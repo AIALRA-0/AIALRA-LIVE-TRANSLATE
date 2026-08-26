@@ -1,0 +1,54 @@
+[project]
+name = "aialra-live-translate-workers"
+version = "0.1.0"
+description = "Local model and document workers for AIALRA-LIVE-TRANSLATE"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "numpy>=2.2,<3",
+  "pillow>=11,<12",
+  "pydantic>=2.11,<3",
+  "pypdf>=5,<7",
+  "python-multipart>=0.0.20,<1",
+  "python-docx>=1.2,<2",
+  "python-pptx>=1.0.2,<2",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+speech = [
+  "faster-whisper>=1.2,<2",
+  "nvidia-cublas-cu12>=12.9,<13; sys_platform == 'win32'",
+  "nvidia-cuda-nvrtc-cu12>=12.9,<13; sys_platform == 'win32'",
+  "nvidia-cudnn-cu12>=9.24,<10; sys_platform == 'win32'",
+]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["workers", "tools"]
+
+[[tool.mypy.overrides]]
+module = ["faster_whisper", "pptx", "docx", "pypdf"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["workers", "tools"]
+addopts = "-q"

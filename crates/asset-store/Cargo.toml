@@ -1,0 +1,13 @@
+[package]
+name = "aialra-asset-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hex.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+

@@ -1,0 +1,53 @@
+# Rust 构建产物由 Cargo 重建，避免把本机二进制写入仓库
+/target/
+
+# JavaScript 依赖和构建产物由 pnpm 重建
+node_modules/
+dist/
+*.tsbuildinfo
+apps/web/vite.config.js
+apps/web/vite.config.d.ts
+apps/web/playwright-report/
+apps/web/test-results/
+
+# Python 虚拟环境、缓存和模型文件保留在本机
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+/models/
+
+# 用户上传的原始研究包已经校验并复制到 docs，根目录副本只作为本地交接输入
+/AIALRA-LIVE-TRANSLATE_初始研究包_2026-08-24.zip
+/AIALRA-LIVE-TRANSLATE_初始研究包_2026-08-24/
+
+# 本地课程数据、数据库、音频、页面和导出含有隐私内容
+/data/*
+!/data/.gitkeep
+/.runtime/
+/output/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Android 和 Tauri 生成产物由各自工具链重建
+.gradle/
+apps/android/local.properties
+apps/android/**/build/
+apps/desktop/src-tauri/target/
+
+# 本机密钥和运行配置不得进入版本库
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 常见编辑器和操作系统临时文件不属于项目产物
+.idea/
+.vscode/
+.playwright-cli/
+.DS_Store
+Thumbs.db

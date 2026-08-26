@@ -1,0 +1,316 @@
+manifest_version: "1.0.0"
+project:
+  name: "AIALRA-LIVE-TRANSLATE"
+  product_positioning: "local-first multimodal live learning copilot"
+  planning_date: "2026-08-24"
+  source_of_truth_after_bootstrap: "local repository plus verified test records"
+  hardware_target:
+    cpu: "Intel Core i9-13900K"
+    gpu: "NVIDIA RTX 4080 16GB"
+    ram_gb: 64
+    default_os: "Windows"
+
+status_boundary:
+  local_repository_inspected_in_this_research: false
+  dingtalk_a1_realtime_pcm_publicly_verified: false
+  dingtalk_a1_post_recording_api_verified_in_public_docs: true
+  babbledeck_existing_capabilities_must_be_audited: true
+
+product_mvp:
+  required:
+    - "native Android or desktop audio capture"
+    - "reliable chunk persistence and resume"
+    - "local partial and final ASR"
+    - "partial and final bilingual translation"
+    - "glossary and terminology control"
+    - "periodic evidence-linked explanations"
+    - "mid-session PPTX PDF and image ingestion"
+    - "asset-page to transcript alignment"
+    - "event-sourced replay revisions and export"
+    - "local-only privacy default"
+  deferred:
+    - "camera slide extraction"
+    - "continuous speech-to-speech translation"
+    - "mandatory realtime speaker diarization"
+    - "enterprise multi-tenant deployment"
+    - "DingTalk A1 realtime direct stream unless separately verified"
+
+immutable_decisions:
+  - id: "ADR-001"
+    decision: "A1 realtime direct stream is not an MVP critical dependency"
+  - id: "ADR-002"
+    decision: "Rust core with Python model and document workers"
+  - id: "ADR-003"
+    decision: "SQLite WAL plus local content-addressed object storage by default"
+  - id: "ADR-004"
+    decision: "native Kotlin Android foreground capture is the primary phone path"
+  - id: "ADR-005"
+    decision: "append-only events and revisions; no silent overwrite"
+  - id: "ADR-006"
+    decision: "ASR and audio durability have the highest runtime priority"
+  - id: "ADR-007"
+    decision: "multimodal files are stable timeline assets, not chat attachments"
+  - id: "ADR-008"
+    decision: "cloud processing is opt-in by session and data type"
+
+runtime_priorities:
+  - priority: 0
+    name: "ingest_persistence_control"
+    preemptible: false
+  - priority: 1
+    name: "asr"
+    preemptible: false
+  - priority: 2
+    name: "final_translation"
+    preemptible: true
+  - priority: 3
+    name: "explanation"
+    preemptible: true
+  - priority: 4
+    name: "vision_embedding"
+    preemptible: true
+  - priority: 5
+    name: "post_session_processing"
+    preemptible: true
+  - priority: 6
+    name: "tts_experiments"
+    preemptible: true
+
+source_adapters:
+  primary:
+    - "android_native"
+    - "desktop_microphone"
+    - "file_replay"
+  supported_after_mvp_core:
+    - "dingtalk_a1_post_recording"
+    - "dingtalk_miniapp_foreground_experiment"
+  future:
+    - "screen_capture"
+    - "camera_slide_capture"
+
+provider_interfaces:
+  - "AudioSource"
+  - "AsrProvider"
+  - "TranslationProvider"
+  - "ExplanationProvider"
+  - "VisionProvider"
+  - "EmbeddingProvider"
+  - "TtsProvider"
+  - "AssetParser"
+  - "CloudEgressPolicy"
+
+model_benchmark_candidates:
+  vad:
+    - "Silero VAD"
+  asr:
+    - "faster-whisper large-v3-turbo"
+    - "FunASR streaming candidate"
+    - "SenseVoiceSmall or Fun-ASR-Nano candidate"
+    - "NVIDIA streaming candidate as a spike"
+  local_text:
+    - "quantized 4B to 9B instruction model selected by benchmark"
+  cloud_text:
+    - "DeepSeek V4 Flash through a provider adapter"
+  vision:
+    - "Qwen3-VL small quantized candidate"
+  embeddings:
+    - "Qwen3 Embedding small candidate"
+    - "BGE-M3 candidate"
+  tts:
+    - "system TTS or Kokoro"
+    - "CosyVoice or Qwen3-TTS after MVP"
+
+performance_targets:
+  lan_audio_arrival_p95_ms: 250
+  first_partial_asr_p95_ms: 1500
+  stable_segment_after_pause_p95_ms: 2500
+  final_translation_after_segment_p95_ms: 1000
+  bilingual_caption_end_to_end_p95_ms: 3000
+  explanation_first_card_after_trigger_seconds:
+    min: 10
+    max: 20
+  acknowledged_audio_chunk_loss_target: 0
+  long_session_minutes: 90
+  note: "engineering targets; benchmark results override assumptions"
+
+privacy_defaults:
+  mode: "local_only"
+  raw_audio_retention_days: "configurable"
+  cloud_text_allowed: false
+  cloud_multimodal_allowed: false
+  camera_capture: false
+  screen_capture: false
+  recording_status_must_be_visible: true
+  consent_record_required: true
+  hidden_recording_prohibited: true
+
+phases:
+  - id: "P0"
+    name: "repository_audit_and_architecture_freeze"
+    gate: "G0"
+    required_tasks:
+      - "ALT-0001"
+      - "ALT-0002"
+      - "ALT-0003"
+      - "ALT-0004"
+      - "ALT-0005"
+      - "ALT-0006"
+      - "ALT-0007"
+  - id: "P1"
+    name: "event_core_and_deterministic_mock_vertical_slice"
+    gate: "G1"
+    required_epics:
+      - "E01"
+      - "E02"
+      - "E03"
+  - id: "P2"
+    name: "local_audio_and_asr_benchmark"
+    gate: "G2"
+    required_epics:
+      - "E04"
+      - "E05"
+  - id: "P3"
+    name: "native_android_reliable_capture"
+    gate: "G3"
+    required_epic: "E06"
+  - id: "P4"
+    name: "translation_glossary_and_explanations"
+    gate: "G4"
+    required_epics:
+      - "E07"
+      - "E08"
+      - "E10"
+  - id: "P5"
+    name: "multimodal_assets_and_alignment"
+    gate: "G5"
+    required_epic: "E09"
+  - id: "P6"
+    name: "DingTalk_A1_verified_adapter"
+    gate: "G6"
+    required_epic: "E11"
+  - id: "P7"
+    name: "packaging_security_and_release"
+    gate: "G7"
+    required_epics:
+      - "E12"
+      - "E13"
+      - "E15"
+  - id: "P8"
+    name: "screen_camera_diarization_tts"
+    gate: "post_mvp"
+    required_epic: "E14"
+
+gates:
+  G0:
+    criteria:
+      - "local repository state documented"
+      - "existing tests and commands recorded"
+      - "BabbleDeck reuse boundary documented"
+      - "architecture decisions mapped"
+  G1:
+    criteria:
+      - "mock audio to live UI to replay works"
+      - "SQLite recovery works"
+      - "revisions are append-only"
+      - "deterministic E2E passes"
+  G2:
+    criteria:
+      - "multiple local ASR candidates benchmarked on real lecture fixtures"
+      - "default and fallback selected by evidence"
+      - "90-minute ASR run has no OOM"
+  G3:
+    criteria:
+      - "Android remains recording while locked and app is backgrounded"
+      - "30-second outage resumes"
+      - "acknowledged chunk loss is zero"
+      - "90-minute device report exists"
+  G4:
+    criteria:
+      - "terminology constraints are enforced"
+      - "explanation schema success target is met"
+      - "all evidence references are valid"
+      - "explanation failure does not block captions"
+      - "ASR plus explanation has no OOM"
+  G5:
+    criteria:
+      - "PPTX PDF and image ingestion works"
+      - "pages have stable IDs"
+      - "mid-session upload affects the next explanation"
+      - "explanation references valid page and segment IDs"
+  G6:
+    criteria:
+      - "A1 control and status are validated on hardware"
+      - "businessOrder mapping is reproducible"
+      - "post-recording file and analysis import works"
+      - "realtime direct-stream probe has an explicit evidence-based conclusion"
+  G7:
+    criteria:
+      - "Windows desktop and Android builds are reproducible"
+      - "privacy and visible recording controls work"
+      - "real-course E2E and 90-minute stress test pass"
+      - "backup restore and export pass"
+      - "secret scan and license review pass"
+
+initial_execution_batch:
+  ordered_tasks:
+    - "ALT-0001"
+    - "ALT-0002"
+    - "ALT-0003"
+    - "ALT-0004"
+    - "ALT-0005"
+    - "ALT-0006"
+    - "ALT-0007"
+    - "ALT-0101"
+    - "ALT-0102"
+    - "ALT-0201"
+    - "ALT-0301"
+    - "ALT-0302"
+    - "ALT-0303"
+    - "ALT-0304"
+    - "ALT-0306"
+  stop_conditions:
+    - "an uncommitted user change would be overwritten"
+    - "a destructive migration is required"
+    - "a secret would need to be committed"
+  continue_without_blocking_when:
+    - "A1 hardware is unavailable"
+    - "cloud API credentials are unavailable"
+    - "private lecture audio cannot be used"
+    - "a specific optional model cannot be downloaded"
+
+prohibited_actions:
+  - "reset stash or overwrite uncommitted user work"
+  - "delete user data models or recordings"
+  - "treat product-side A1 realtime captions as proof of an open realtime API"
+  - "make cloud processing the default"
+  - "store provider keys in the client"
+  - "declare completion from compilation alone"
+  - "skip real UI validation for user-facing behavior"
+  - "silently overwrite transcript translation or explanation history"
+  - "let vision explanation or TTS block audio persistence or ASR"
+  - "copy or rewrite BabbleDeck without a reuse audit and ADR"
+
+required_progress_files:
+  - "PROJECT_STATE.md"
+  - "docs/audits/INITIAL_REPO_AUDIT.md"
+  - "docs/KNOWN_ISSUES.md"
+  - "docs/CHANGELOG.md"
+  - "docs/test-runs/"
+  - "docs/BENCHMARKS.md"
+  - "docs/MODEL_LICENSES.md"
+  - "docs/PRIVACY_BOUNDARIES.md"
+
+completion_report_fields:
+  - "summary"
+  - "global_scope_status"
+  - "local_task_status"
+  - "current_gate"
+  - "repo_state_before"
+  - "files_changed"
+  - "commands_and_tests"
+  - "real_validation"
+  - "performance"
+  - "security_and_privacy"
+  - "known_limitations"
+  - "commit_and_branch"
+  - "next_backlog_id"

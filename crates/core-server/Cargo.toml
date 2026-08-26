@@ -1,0 +1,31 @@
+[package]
+name = "aialra-core-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aialra-asset-store = { path = "../asset-store" }
+aialra-core-domain = { path = "../core-domain" }
+aialra-event-protocol = { path = "../event-protocol" }
+aialra-event-store = { path = "../event-store" }
+anyhow.workspace = true
+async-stream.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+http.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

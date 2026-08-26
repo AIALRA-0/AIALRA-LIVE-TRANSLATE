@@ -1,0 +1,15 @@
+{
+  "name": "aialra-live-translate",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @aialra/web dev",
+    "build": "pnpm --filter @aialra/web build",
+    "lint": "pnpm --filter @aialra/web lint",
+    "typecheck": "pnpm --filter @aialra/web typecheck",
+    "test": "pnpm --filter @aialra/web test",
+    "test:e2e": "pnpm --filter @aialra/web test:e2e"
+  },
+  "packageManager": "pnpm@10.33.4"
+}
+

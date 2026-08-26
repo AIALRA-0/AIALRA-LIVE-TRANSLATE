@@ -1,0 +1,5 @@
+packages:
+  # Web UI 是首个用户入口，桌面封装后续复用同一构建产物
+  - "apps/web"
+  # 钉钉小程序只承担前台能力探针、A1 控制和短时音频帧验证
+  - "apps/dingtalk-miniapp"

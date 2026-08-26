@@ -1,0 +1,13 @@
+.git
+.runtime
+.venv
+target
+node_modules
+data
+output
+apps/android/**/build
+apps/web/dist
+AIALRA-LIVE-TRANSLATE_初始研究包_2026-08-24*
+*.sqlite*
+.env*
+!.env.example

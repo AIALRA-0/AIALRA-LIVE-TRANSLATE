@@ -1,0 +1,17 @@
+FROM python:3.12.11-slim-bookworm
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HOME=/models/huggingface
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 aialra \
+    && useradd --system --uid 10001 --gid aialra --home-dir /app aialra
+WORKDIR /app
+COPY pyproject.toml ./
+COPY workers workers
+RUN pip install --no-cache-dir '.[speech]'
+RUN mkdir -p /models && chown -R aialra:aialra /models
+USER 10001:10001
+EXPOSE 8790
+CMD ["python", "-m", "uvicorn", "workers.model_worker.main:app", "--host", "0.0.0.0", "--port", "8790", "--no-access-log"]

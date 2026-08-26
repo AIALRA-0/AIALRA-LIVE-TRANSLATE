@@ -1,0 +1,13 @@
+{
+  "name": "@aialra/dingtalk-miniapp",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "6.0.2",
+    "vitest": "latest"
+  }
+}

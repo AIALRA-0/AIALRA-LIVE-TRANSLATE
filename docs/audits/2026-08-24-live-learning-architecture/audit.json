@@ -1,0 +1,200 @@
+{
+  "meta": {
+    "contract_version": "1.0",
+    "title": "AIALRA-LIVE-TRANSLATE 架构与 DingTalk 接入决策审计",
+    "mode": "standard",
+    "as_of": "2026-08-24",
+    "status": "complete",
+    "scope": "本地单用户实时课程理解、DingTalk A1 公开能力、Android 与浏览器收音、本地模型、多模态材料和市场近似方案",
+    "exclusions": ["未获授权的 DingTalk 内部接口", "真实课堂录音", "真实学生长期试用", "付费专利数据库", "摄像头自动截图"]
+  },
+  "decision_problem": {
+    "project_classification": "可逆的本地优先学习辅助软件，含录音隐私和第三方平台集成风险",
+    "risk_level": "high",
+    "decision_owner": "AIALRA-LIVE-TRANSLATE 项目所有者",
+    "desired_outcome": "在 RTX 4080 电脑上完成可恢复的实时收音、英文转写、中文翻译、周期讲解和材料归并，并优先利用 DingTalk A1 收音",
+    "current_state": "仓库已形成可运行纵向切片；合成课程闭环通过，A1 真实设备和企业授权仍待验证",
+    "decision": "是否按 A1 双录音补偿链路加本地实时主链路继续推进，以及产品差异应怎样收窄",
+    "success_metrics": ["已确认音频块不因模型失败而丢失", "3 个完整语音窗口全部产生字幕和译文", "新材料进入下一次证据讲解", "A1 能力声明只采用公开合同或真机证据", "正式录音记录许可并持续显示状态"],
+    "constraints": ["i9-13900KF", "RTX 4080 16 GB", "64 GB RAM", "默认本地处理", "单用户优先", "DingTalk 凭据不入库"],
+    "irreversible_actions": ["公开宣称产品独创", "默认把课程发往云端", "把 A1 未公开能力写入生产依赖", "未获许可采集课堂"],
+    "research_budget": {
+      "overall_limit": "完成八个检索分支、打开决定性一手来源、实现并运行最小闭环后收敛",
+      "parallel_capacity": 1,
+      "paid_or_private_access": ["DingTalk 企业凭据未提供", "A1 真机未连接", "公开网络和本地仓库可读"],
+      "cutoff_policy": "遇到企业授权或真机门槛时保留探针并把结论降为待验证"
+    },
+    "reversal_evidence": ["A1 开放稳定低延迟 PCM 或增量逐字稿接口", "真实课程显示本地链路无法达到可读延迟", "近似产品完整覆盖 A1、本地模型和页面证据讲解"]
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "DingTalk A1 能否成为首版唯一实时来源",
+      "critical": true,
+      "internal_probe": "检查用户目标、研究包、当前适配代码和凭据",
+      "external_probe": "核对 DingTalk 当前 JSAPI、DVI OpenAPI 和官方 SDK",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["I1", "I2", "I3"],
+      "external_source_ids": ["E1", "E2", "E3", "E4"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q2",
+      "question": "本机能否完成不丢音频的转写、翻译和讲解闭环",
+      "critical": true,
+      "internal_probe": "运行 GPU 模型、音频 ACK、事件和停止排空测试",
+      "external_probe": "核对 CTranslate2 与 NVIDIA 的 Windows GPU 依赖",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["I3", "I4", "I5"],
+      "external_source_ids": ["E5", "E6"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q3",
+      "question": "课程实时翻译加总结是否具有足够产品差异",
+      "critical": true,
+      "internal_probe": "比对用户目标、初始定位和已实现证据链",
+      "external_probe": "打开课程近似产品、会议助手和本地开源实现",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["I1", "I2", "I3"],
+      "external_source_ids": ["E7", "E8", "E9", "E10"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q4",
+      "question": "当前架构能否支持恢复、材料归并、证据回指和录音门禁",
+      "critical": true,
+      "internal_probe": "检查 Rust 存储、Android 缓存、浏览器回放和交互结果",
+      "external_probe": "核对现有流式实现、文档解析工具和录音政策",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["I3", "I4", "I5"],
+      "external_source_ids": ["E5", "E11", "E12"],
+      "internal_gap": "",
+      "external_gap": ""
+    }
+  ],
+  "source_map": [
+    {"id": "M1I", "question_ids": ["Q1"], "origin": "internal", "channel": "workspace", "target": "需求、研究包和 DingTalk 适配", "decision_use": "确认期望和实现差距", "priority": "high", "access_status": "searched"},
+    {"id": "M1E", "question_ids": ["Q1"], "origin": "external", "channel": "官方开放平台", "target": "A1 与 RecorderManager 合同", "decision_use": "决定 A1 实时角色", "priority": "high", "access_status": "searched"},
+    {"id": "M2I", "question_ids": ["Q2"], "origin": "internal", "channel": "本机运行", "target": "GPU 闭环和 ACK", "decision_use": "确认硬件可行性", "priority": "high", "access_status": "searched"},
+    {"id": "M2E", "question_ids": ["Q2"], "origin": "external", "channel": "官方运行库文档", "target": "CUDA 与 cuDNN 要求", "decision_use": "解释并修复 GPU 失败", "priority": "high", "access_status": "searched"},
+    {"id": "M3I", "question_ids": ["Q3"], "origin": "internal", "channel": "需求与代码", "target": "差异化组合", "decision_use": "识别可保留优势", "priority": "high", "access_status": "searched"},
+    {"id": "M3E", "question_ids": ["Q3"], "origin": "external", "channel": "产品页", "target": "课程近似方案", "decision_use": "检验普通实时翻译定位", "priority": "high", "access_status": "searched"},
+    {"id": "M4I", "question_ids": ["Q4"], "origin": "internal", "channel": "代码、测试和浏览器", "target": "恢复、事件和材料", "decision_use": "确认纵向切片", "priority": "high", "access_status": "searched"},
+    {"id": "M4E", "question_ids": ["Q4"], "origin": "external", "channel": "官方项目和政策", "target": "流式处理、解析和录音边界", "decision_use": "校验技术和产品门禁", "priority": "high", "access_status": "searched"}
+  ],
+  "sources": [
+    {"id": "I1", "origin": "internal", "title": "项目所有者本轮需求", "location": "conversation:2026-08-24", "source_type": "internal-artifact", "retrieval_method": "读取当前对话", "observed_content": "要求端到端执行、本地优先并优先利用 A1 收音", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "定义目标和优先级", "limitations": "未提供凭据、真机或真实课程样本", "direct": true, "independence_group": "owner"},
+    {"id": "I2", "origin": "internal", "title": "初始研究包", "location": "docs/planning/2026-08-24-initial-research", "source_type": "internal-artifact", "retrieval_method": "校验 SHA-256 后逐文件读取", "observed_content": "包含架构、138 项任务、来源和门禁", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "实现起点", "limitations": "生成时未读取本地仓库", "direct": true, "independence_group": "research-package"},
+    {"id": "I3", "origin": "internal", "title": "当前仓库代码与测试", "location": "workspace:F:/AIALRA Codex Workspace/AIALRA-LIVE-TRANSLATE", "source_type": "source-code", "retrieval_method": "读取并运行 Rust、Python、TypeScript、Kotlin", "observed_content": "实现事件存储、ACK、GPU Worker、DingTalk 探针、Android 缓存和网页", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "当前实现事实", "limitations": "未经过生产和长课压力测试", "direct": true, "independence_group": "current-repo"},
+    {"id": "I4", "origin": "internal", "title": "合成课程端到端运行", "location": "tool:node tools/e2e_smoke.mjs", "source_type": "test-observation", "retrieval_method": "发送 12.4 秒合成英语课程音频", "observed_content": "9.206 秒完成 13 次 ACK、3 条字幕、3 条译文、1 页材料和 1 张讲解卡", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "验证本机闭环", "limitations": "不能代表 90 分钟真实课堂", "direct": true, "independence_group": "local-e2e"},
+    {"id": "I5", "origin": "internal", "title": "浏览器与 Android 验证", "location": "output/playwright/completed-console.png", "source_type": "test-observation", "retrieval_method": "真实 Chromium 交互及 Android 单元测试和 APK 构建", "observed_content": "材料进入讲解、证据 ID 可见、控制台零错误、Android 构建通过", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "验证用户入口与手机构建", "limitations": "未连接 Android 真机", "direct": true, "independence_group": "client-validation"},
+
+    {"id": "E1", "origin": "external", "title": "DingTalk startDingerRecord", "location": "https://open.dingtalk.com/document/development/jsapi-start-dinger-record", "source_type": "official-doc", "retrieval_method": "打开官方文档", "observed_content": "可启动 A1 录音并写 businessOrder", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "A1 控制", "limitations": "没有第三方 PCM 说明", "direct": true, "independence_group": "dingtalk"},
+    {"id": "E2", "origin": "external", "title": "DingTalk getDingerDeviceStatus", "location": "https://open.dingtalk.com/document/development/jsapi-get-dinger-device-status", "source_type": "official-doc", "retrieval_method": "打开官方文档", "observed_content": "返回录音与 streaming 等设备状态", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "设备状态探针", "limitations": "状态名不证明第三方取得数据", "direct": true, "independence_group": "dingtalk"},
+    {"id": "E3", "origin": "external", "title": "DingTalk RecorderManager", "location": "https://open.dingtalk.com/document/development/jsapi-recorder-manager-on-frame-recorded", "source_type": "official-doc", "retrieval_method": "打开录音帧和 start 文档", "observed_content": "小程序前台可收到帧，页面不可见会停止", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "前台短时探针", "limitations": "未描述为 A1 麦克风 PCM", "direct": true, "independence_group": "dingtalk"},
+    {"id": "E4", "origin": "external", "title": "DingTalk Go SDK DVI", "location": "https://github.com/alibabacloud-go/dingtalk", "source_type": "source-code", "retrieval_method": "读取官方 SDK 路由和类型", "observed_content": "包含录音控制、音频列表下载、听记、离线 ASR 和总结", "date": "2026-08-19", "accessed_at": "2026-08-24", "applicability": "服务器端控制和补偿", "limitations": "未发现增量接口", "direct": true, "independence_group": "dingtalk"},
+    {"id": "E5", "origin": "external", "title": "CTranslate2 4.8.1 安装文档", "location": "https://opennmt.net/CTranslate2/installation.html", "source_type": "official-doc", "retrieval_method": "打开官方文档", "observed_content": "Windows GPU 需要 CUDA 12.x，语音模型还需 cuDNN", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "ASR GPU 依赖", "limitations": "不证明模型质量", "direct": true, "independence_group": "ctranslate2"},
+    {"id": "E6", "origin": "external", "title": "NVIDIA cuDNN Windows 安装", "location": "https://docs.nvidia.com/deeplearning/cudnn/backend/v9.5.1/installation/windows.html", "source_type": "official-doc", "retrieval_method": "打开 NVIDIA 文档", "observed_content": "可用 Python wheel 安装 CUDA 12 cuDNN，并需配置 DLL 路径", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "修复 GPU 失败", "limitations": "版本组合仍需实跑", "direct": true, "independence_group": "nvidia"},
+    {"id": "E7", "origin": "external", "title": "Clearly", "location": "https://clearlynotes.com/", "source_type": "product-page", "retrieval_method": "打开产品页", "observed_content": "课程实时翻译、总结、Tutor 和 PPT/PDF 并排", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "高相似产品", "limitations": "产品自述不证明质量", "direct": true, "independence_group": "clearly"},
+    {"id": "E8", "origin": "external", "title": "BeginClass", "location": "https://beginclass.ai/", "source_type": "product-page", "retrieval_method": "打开产品页", "observed_content": "设备端课程转写翻译、回放、照片翻译和按需总结", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "高相似本地产品", "limitations": "集中在 Apple 设备", "direct": true, "independence_group": "beginclass"},
+    {"id": "E9", "origin": "external", "title": "LectMate", "location": "https://lectmate.com/", "source_type": "product-page", "retrieval_method": "打开产品页", "observed_content": "课程实时翻译、测验和带时间戳证据的 Tutor", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "证据课程理解近似产品", "limitations": "产品自述不证明延迟", "direct": true, "independence_group": "lectmate"},
+    {"id": "E10", "origin": "external", "title": "Meetily", "location": "https://github.com/Zackriya-Solutions/meetily", "source_type": "source-code", "retrieval_method": "打开项目仓库", "observed_content": "Rust、本地录音、Whisper 或 Parakeet 和 Ollama 总结已有实现", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "本地技术近似方案", "limitations": "面向会议", "direct": true, "independence_group": "meetily"},
+    {"id": "E11", "origin": "external", "title": "Docling", "location": "https://docling-project.github.io/docling/", "source_type": "official-doc", "retrieval_method": "打开官方文档", "observed_content": "支持 PDF、DOCX、PPTX 和图片本地解析", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "多模态解析", "limitations": "当前切片使用轻量解析器", "direct": true, "independence_group": "docling"},
+    {"id": "E12", "origin": "external", "title": "California Penal Code Section 632", "location": "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml?lawCode=PEN&sectionNum=632", "source_type": "official-doc", "retrieval_method": "打开法规页", "observed_content": "对具有保密期待的交流录音设定同意边界", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "录音产品门禁", "limitations": "不是具体课程法律意见", "direct": true, "independence_group": "california-law"},
+
+    {"id": "SL-problem", "origin": "external", "title": "问题分支查询记录", "location": "tool:web-search/2026-08-24/problem", "source_type": "search-log", "retrieval_method": "检索外语课程实时理解工具", "observed_content": "返回多款课程专用产品", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "确认问题被市场识别", "limitations": "排序不代表需求规模", "direct": true, "independence_group": "search-problem"},
+    {"id": "SL-mechanism", "origin": "external", "title": "机制分支查询记录", "location": "tool:web-search/2026-08-24/mechanism", "source_type": "search-log", "retrieval_method": "检索 A1、录音帧和 GPU 机制", "observed_content": "找到控制、前台帧和 GPU 依赖文档", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "校验技术机制", "limitations": "不能替代 A1 真机", "direct": true, "independence_group": "search-mechanism"},
+    {"id": "SL-product", "origin": "external", "title": "产品分支查询记录", "location": "tool:web-search/2026-08-24/product", "source_type": "search-log", "retrieval_method": "检索课程翻译和 AI Tutor", "observed_content": "发现 Clearly、BeginClass 和 LectMate", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "决定重新定位", "limitations": "未覆盖所有应用商店", "direct": true, "independence_group": "search-product"},
+    {"id": "SL-code", "origin": "external", "title": "代码分支查询记录", "location": "tool:web-search+github/2026-08-24/code", "source_type": "search-log", "retrieval_method": "检索官方 SDK 和本地语音项目", "observed_content": "找到 DingTalk SDK 和本地会议实现", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "减少重复开发", "limitations": "许可证需单独审核", "direct": true, "independence_group": "search-code"},
+    {"id": "SL-research", "origin": "external", "title": "研究分支查询记录", "location": "tool:web-search/2026-08-24/research", "source_type": "search-log", "retrieval_method": "检索流式语音和多模态课程研究", "observed_content": "机制成熟但课程归并需自建评测", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "确认机制和评测缺口", "limitations": "没有完成系统综述", "direct": true, "independence_group": "search-research"},
+    {"id": "SL-patent", "origin": "external", "title": "专利分支查询记录", "location": "tool:web-search/2026-08-24/patent", "source_type": "search-log", "retrieval_method": "公开关键词专利初筛", "observed_content": "未取得可改变首轮实现的直接专利结论", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "限制独创声明", "limitations": "不是自由实施意见", "direct": true, "independence_group": "search-patent"},
+    {"id": "SL-adjacent", "origin": "external", "title": "邻近分支查询记录", "location": "tool:web-search/2026-08-24/adjacent", "source_type": "search-log", "retrieval_method": "检索会议助手和屏幕时间线", "observed_content": "发现成熟恢复与多源时间线模式", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "迁移工程模式", "limitations": "会议需求不等于课堂", "direct": true, "independence_group": "search-adjacent"},
+    {"id": "SL-failure", "origin": "external", "title": "失败分支查询记录", "location": "tool:web-search+runtime/2026-08-24/failure", "source_type": "search-log", "retrieval_method": "检索后台录音和 GPU DLL 失败", "observed_content": "小程序后台停止和缺 CUDA 库均为明确边界", "date": "2026-08-24", "accessed_at": "2026-08-24", "applicability": "形成降级门禁", "limitations": "未覆盖 90 分钟耗电", "direct": true, "independence_group": "search-failure"}
+  ],
+  "claims": [
+    {"id": "C1", "statement": "DingTalk 公开资料支持 A1 控制和会后补偿，但尚未证实第三方连续 PCM 或增量逐字稿出口", "kind": "inference", "impact": "high", "confidence": "high", "support_source_ids": ["E1", "E2", "E3", "E4"], "contradict_source_ids": [], "falsifier": "官方合同或真机证据显示可授权连续出口"},
+    {"id": "C2", "statement": "当前本机可以完成短课程音频确认、GPU 转写、本地翻译、材料解析和讲解闭环", "kind": "fact", "impact": "high", "confidence": "high", "support_source_ids": ["I3", "I4", "E5", "E6"], "contradict_source_ids": [], "falsifier": "锁定环境重复运行丢块或无法产生全部 3 条字幕和译文"},
+    {"id": "C3", "statement": "普通课程实时转写、翻译、总结和 Tutor 已有多个高相似替代品", "kind": "fact", "impact": "high", "confidence": "high", "support_source_ids": ["E7", "E8", "E9"], "contradict_source_ids": [], "falsifier": "候选撤回这些能力或无法实际取得"},
+    {"id": "C4", "statement": "值得验证的差异是 A1 双录音、默认本地、现场缺漏讲解和页面证据回指", "kind": "hypothesis", "impact": "high", "confidence": "medium", "support_source_ids": ["I1", "I3", "I4"], "contradict_source_ids": ["E9"], "falsifier": "目标学生不重视这些组合或近似产品已稳定覆盖"},
+    {"id": "C5", "statement": "音频持久化和 ACK 必须独立于模型成功，停止后应排空已接收任务", "kind": "inference", "impact": "high", "confidence": "high", "support_source_ids": ["I3", "I4"], "contradict_source_ids": [], "falsifier": "长时压力测试证明阻塞模型仍满足零丢块和有界停止"}
+  ],
+  "assumptions": [
+    {"id": "A1", "statement": "用户可以取得 DingTalk 企业授权并连接 A1 真机", "critical": true, "status": "untested", "decision_impact": "若无法取得，A1 只能保留为离线设计", "falsifier": "管理员拒绝 DVI 权限或真机不支持公开 JSAPI", "support_source_ids": ["I1", "E1", "E4"], "contradict_source_ids": []},
+    {"id": "A2", "statement": "4 秒窗口在真实英文课程中达到可接受延迟和术语准确率", "critical": true, "status": "untested", "decision_impact": "不足时需要增量 ASR 和更强模型", "falsifier": "真实课程 p95 超过 5 秒或术语召回低于阈值", "support_source_ids": ["I4", "E5"], "contradict_source_ids": []},
+    {"id": "A3", "statement": "每 5 条字幕触发讲解不会妨碍听课", "critical": false, "status": "untested", "decision_impact": "干扰明显时改为手动或困惑信号触发", "falsifier": "真实学生频繁忽略或关闭讲解卡", "support_source_ids": ["I1", "I3"], "contradict_source_ids": []}
+  ],
+  "search_branches": [
+    {"name": "problem", "status": "executed", "reason": "检索课堂理解问题", "round_ids": ["R1"]},
+    {"name": "mechanism", "status": "executed", "reason": "检索关键技术机制", "round_ids": ["R2"]},
+    {"name": "product", "status": "executed", "reason": "检索高相似产品", "round_ids": ["R3"]},
+    {"name": "code", "status": "executed", "reason": "检索 SDK 和开源实现", "round_ids": ["R4"]},
+    {"name": "research", "status": "executed", "reason": "检索研究与评测", "round_ids": ["R5"]},
+    {"name": "patent", "status": "executed", "reason": "完成公开关键词初筛", "round_ids": ["R6"]},
+    {"name": "adjacent", "status": "executed", "reason": "检索邻近会议模式", "round_ids": ["R7"]},
+    {"name": "failure", "status": "executed", "reason": "检索并复现失败边界", "round_ids": ["R8"]}
+  ],
+  "search_rounds": [
+    {"id": "R1", "branch": "problem", "query": "international student live lecture transcription translation", "channel": "web and products", "date": "2026-08-24", "discovery_mode": "problem keyword", "new_candidate_ids": ["P1", "P2", "P3"], "evidence_source_ids": ["E7", "E8", "E9"], "search_log_source_id": "SL-problem", "new_high_similarity_count": 3, "new_decision_evidence_count": 1},
+    {"id": "R2", "branch": "mechanism", "query": "DingTalk A1 RecorderManager CTranslate2 CUDA", "channel": "official docs", "date": "2026-08-24", "discovery_mode": "contract tracing", "new_candidate_ids": ["P5"], "evidence_source_ids": ["E1", "E2", "E3", "E5", "E6"], "search_log_source_id": "SL-mechanism", "new_high_similarity_count": 0, "new_decision_evidence_count": 2},
+    {"id": "R3", "branch": "product", "query": "live lecture translation AI tutor slides evidence", "channel": "product sites", "date": "2026-08-24", "discovery_mode": "feature combination", "new_candidate_ids": ["P1", "P2", "P3"], "evidence_source_ids": ["E7", "E8", "E9"], "search_log_source_id": "SL-product", "new_high_similarity_count": 3, "new_decision_evidence_count": 1},
+    {"id": "R4", "branch": "code", "query": "DingTalk SDK local whisper ollama", "channel": "GitHub", "date": "2026-08-24", "discovery_mode": "repository search", "new_candidate_ids": ["P4", "P5"], "evidence_source_ids": ["E4", "E10"], "search_log_source_id": "SL-code", "new_high_similarity_count": 1, "new_decision_evidence_count": 1},
+    {"id": "R5", "branch": "research", "query": "streaming speech translation multimodal lecture", "channel": "research projects", "date": "2026-08-24", "discovery_mode": "citation tracing", "new_candidate_ids": [], "evidence_source_ids": ["E5", "E11"], "search_log_source_id": "SL-research", "new_high_similarity_count": 0, "new_decision_evidence_count": 1},
+    {"id": "R6", "branch": "patent", "query": "real-time lecture translation multimodal notes explanation", "channel": "public patent search", "date": "2026-08-24", "discovery_mode": "keyword", "new_candidate_ids": [], "evidence_source_ids": ["SL-patent"], "search_log_source_id": "SL-patent", "new_high_similarity_count": 0, "new_decision_evidence_count": 0},
+    {"id": "R7", "branch": "adjacent", "query": "local meeting assistant audio recovery", "channel": "repository search", "date": "2026-08-24", "discovery_mode": "adjacent domain", "new_candidate_ids": ["P4"], "evidence_source_ids": ["E10"], "search_log_source_id": "SL-adjacent", "new_high_similarity_count": 1, "new_decision_evidence_count": 1},
+    {"id": "R8", "branch": "failure", "query": "DingTalk background stop CTranslate2 cublas64_12.dll", "channel": "official docs and runtime", "date": "2026-08-24", "discovery_mode": "failure signature", "new_candidate_ids": [], "evidence_source_ids": ["E3", "E5", "E6"], "search_log_source_id": "SL-failure", "new_high_similarity_count": 0, "new_decision_evidence_count": 2}
+  ],
+  "candidates": [
+    {"id": "P1", "name": "Clearly", "class": "near", "verified": true, "source_ids": ["E7"]},
+    {"id": "P2", "name": "BeginClass", "class": "near", "verified": true, "source_ids": ["E8"]},
+    {"id": "P3", "name": "LectMate", "class": "near", "verified": true, "source_ids": ["E9"]},
+    {"id": "P4", "name": "Meetily", "class": "adjacent", "verified": true, "source_ids": ["E10"]},
+    {"id": "P5", "name": "DingTalk A1 开放平台", "class": "partial", "verified": true, "source_ids": ["E1", "E2", "E3", "E4"]}
+  ],
+  "novelty": {
+    "applicable": true,
+    "applicability_reason": "市场和竞品判断会影响较大工程投入",
+    "assessment": "near-match-found",
+    "stop_reason": "decisive-match",
+    "saturation_round_ids": [],
+    "languages": ["zh-CN", "en"],
+    "regions": ["全球公开网页", "美国与中国相关产品"],
+    "access_gaps": [
+      {"resource": "付费专利数据库", "impact": "禁止声称自由实施或全球独创", "critical": false},
+      {"resource": "DingTalk 企业授权和 A1 真机", "impact": "A1 生产能力保持待验证", "critical": false}
+    ],
+    "scope_statement": "截至 2026-08-24，检查八个公开分支和五个直接候选；找到多个高相似产品后停止扩张独创性结论"
+  },
+  "perspectives": [
+    {"id": "V1", "lens": "证据与假设", "producer": "主执行代理", "producer_type": "lead-agent", "producer_reference": "/root", "independent": false, "context_isolated": false, "source_ids": ["I1", "I3", "I4", "E1", "E5"], "findings": ["A1 实时出口仍待验证", "本地短音频闭环已有运行证据", "90 分钟准确率仍缺证据"], "limitations": "开发者规则禁止未获用户要求的子代理，因此没有独立代理视角"},
+    {"id": "V2", "lens": "现有方案与查重", "producer": "主执行代理", "producer_type": "lead-agent", "producer_reference": "/root", "independent": false, "context_isolated": false, "source_ids": ["E7", "E8", "E9", "E10"], "findings": ["普通定位高度拥挤", "LectMate 已有时间戳证据 Tutor", "A1 本地组合仍可验证"], "limitations": "没有付费市场数据库"},
+    {"id": "V3", "lens": "用户、隐私与维护", "producer": "主执行代理", "producer_type": "lead-agent", "producer_reference": "/root", "independent": false, "context_isolated": false, "source_ids": ["I3", "I5", "E12"], "findings": ["许可和录音状态已进入界面", "手机只在 ACK 后删除缓存", "真实学生接受度待访谈"], "limitations": "未取得教师、学生或合规人员反馈"}
+  ],
+  "real_world_validations": [
+    {"id": "RW1", "role": "本地操作者与系统", "participant_reference": "synthetic-e2e-2026-08-24", "method": "在目标电脑运行合成课程并检查事件", "conducted_at": "2026-08-24", "outcome": "13 次 ACK、3 条字幕、3 条译文、材料与讲解通过", "limitations": "不是目标学生或真实课堂", "status": "completed", "evidence_source_ids": ["I4"]},
+    {"id": "RW2", "role": "目标学生与教师", "participant_reference": "planned-field-pilot", "method": "90 分钟真实课堂试用", "conducted_at": "2026-08-24", "outcome": "等待 A1 真机、课程许可和参与者", "limitations": "当前没有真实行为数据", "status": "planned", "evidence_source_ids": []}
+  ],
+  "alignment_questions": [
+    {"id": "U1", "question": "A1 凭据未提供时是否继续本地主链路", "decision_changing": true, "status": "defaulted", "default_value": "继续本地链路，A1 以优先控制和补偿探针接入"},
+    {"id": "U2", "question": "是否默认向云端发送课程内容", "decision_changing": true, "status": "defaulted", "default_value": "默认禁止全部云端出口"}
+  ],
+  "recommendation": {
+    "verdict": "reframe",
+    "action": "继续可逆验证，把定位收窄为 A1 高质量同步录音加本地实时理解与页面证据链；先完成 A1 真机、90 分钟真实课程和术语基准",
+    "rationale": "技术闭环已在目标机器通过；多个高相似课程产品推翻普通实时翻译加总结的差异假设",
+    "strongest_counterevidence": "Clearly、BeginClass 和 LectMate 已覆盖实时翻译、总结、材料或证据 Tutor，A1 真机结果仍为空白",
+    "minimum_test": "用同一会话同步运行 A1 和 Android 90 分钟，测量完整率、字幕延迟、术语召回、A1 对账和讲解忽略比例",
+    "failure_response": "A1 不开放时移除强依赖；延迟不达标时替换 ASR；用户不需要周期讲解时改为手动触发",
+    "reversal_condition": "A1 开放稳定增量出口可简化双链路，或目标学生显示现有产品已充分满足且本地与 A1 差异无价值",
+    "support_source_ids": ["I3", "I4", "I5", "E1", "E4", "E5"],
+    "counter_source_ids": ["E7", "E8", "E9", "E10"]
+  },
+  "review_triggers": ["A1 真机或企业授权状态变化", "完成首次 90 分钟真实课程", "字幕 p95 超过 5 秒或术语召回低于 90%", "摄像头、云端或公开发布进入范围", "近似产品发布改变差异判断的能力"]
+}

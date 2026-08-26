@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Audio capture and LAN upload are explicit capabilities visible in the system permission UI. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="false"
+        android:label="AIALRA 收音"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Aialra"
+        android:usesCleartextTraffic="true">
+        <!-- Cleartext LAN traffic supports the local bootstrap; production pairing will add TLS. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service
+            android:name=".RecordingService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"
+            android:stopWithTask="false" />
+        <!-- The notification can invoke only this app-local receiver to end an active recording service. -->
+        <receiver
+            android:name=".StopRecordingReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/paper"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <!-- The status remains visible whenever the app is in front; the notification covers background use. -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="AIALRA · 本地课堂收音"
+        android:textColor="@color/forest"
+        android:textSize="13sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:text="把手机变成可靠的实时字幕输入。"
+        android:textColor="@color/ink"
+        android:textSize="28sp"
+        android:textStyle="bold" />
+
+    <EditText
+        android:id="@+id/serverUrl"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="28dp"
+        android:hint="ws://电脑局域网地址:8787"
+        android:inputType="textUri"
+        android:singleLine="true" />
+
+    <EditText
+        android:id="@+id/sessionId"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:hint="桌面端会话 ID"
+        android:inputType="text"
+        android:singleLine="true" />
+
+    <CheckBox
+        android:id="@+id/consentCheck"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:text="我已获得课程录音许可" />
+
+    <Button
+        android:id="@+id/startButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:backgroundTint="@color/forest"
+        android:text="开始持续收音"
+        android:textColor="@color/paper" />
+
+    <Button
+        android:id="@+id/stopButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="停止并保留未确认音频"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="22dp"
+        android:text="等待连接。DingTalk A1 可同时作为高质量同步录音。"
+        android:textColor="#667168"
+        android:textSize="13sp" />
+</LinearLayout>
