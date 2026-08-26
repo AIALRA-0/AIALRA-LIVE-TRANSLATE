@@ -23,6 +23,14 @@
 - 网页 ESLint、TypeScript、4 项测试和生产构建通过
 - Compose 配置解析和 Cloudflare DNS 工具语法检查通过
 
+### 1.4 线上部署
+
+- Cloudflare 代理 DNS、Let's Encrypt 证书、Nginx WebSocket 反向代理和共享 Authentik 应用已部署
+- 三项容器只把核心端口映射到 VPS 回环地址；匿名请求和伪造身份头请求均返回登录跳转
+- VPS 默认 ASR 从 `small` 调整为 `tiny + CPU int8`，并关闭 Hugging Face Xet 下载路径，避免首次模型下载阻塞展示验收
+- 部署器增加 Linux 行尾约束、本机探针代理绕过和 Nginx 重载后的有限重试；两次失败部署均自动回滚
+- 最终 VPS 合成端到端验收通过：13 个音频块全部确认，产生 3 条字幕、3 条译文、1 页材料和 1 张讲解卡
+
 ## 2 2026-08-25 真机迭代
 
 ### 2.1 修复

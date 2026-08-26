@@ -65,7 +65,7 @@ Authentik 官方提供 Proxy Provider 和 Forward Auth 两种接入方式。AIAL
 
 ## 5 性能边界
 
-VPS 当前没有 GPU。CPU `faster-whisper small + int8` 和 1.5B 本地模型适合展示和短课，不足以提前承诺长课堂实时延迟。
+VPS 当前没有 GPU。CPU `faster-whisper tiny + int8` 和 1.5B 本地模型用于展示，不足以提前承诺课程精度或长课堂实时延迟；有 GPU 的本地 Worker 继续使用更高质量模型。
 
 生产形态建议增加 GPU 计算连接器：VPS 仍先持久化音频并返回 ACK；受信任的 GPU 主机通过主动出站连接领取已保存任务并回传追加事件。GPU 主机断线时录音继续安全保存，恢复后再补算。这个结构避免把家庭或办公电脑暴露到公网，也避免模型故障影响停止录音。
 

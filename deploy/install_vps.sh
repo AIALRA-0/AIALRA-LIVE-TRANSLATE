@@ -84,7 +84,7 @@ if [[ ! -s "$env_file" ]]; then
     printf 'AIALRA_DATA_PATH=/srv/aialra/data/live-translate\n'
     printf 'AIALRA_MODEL_PATH=/srv/aialra/data/live-translate-models\n'
     printf 'AIALRA_OLLAMA_PATH=/srv/aialra/data/live-translate-ollama\n'
-    printf 'AIALRA_ASR_MODEL=small\n'
+    printf 'AIALRA_ASR_MODEL=tiny\n'
     printf 'AIALRA_ASR_DEVICE=cpu\n'
     printf 'AIALRA_ASR_COMPUTE_TYPE=int8\n'
     printf 'AIALRA_OLLAMA_MODEL=qwen2.5:1.5b-instruct\n'
@@ -150,10 +150,24 @@ rm -f -- "$tls_stage"
 nginx -t
 systemctl reload nginx
 
-anonymous_status="$(curl -sS --resolve "$site_host:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$site_host/")"
-[[ "$anonymous_status" == '302' ]]
-forged_status="$(curl -sS --resolve "$site_host:443:127.0.0.1" -H 'X-Aialra-Authenticated: 1' -H 'X-Aialra-Sub: forged' -o /dev/null -w '%{http_code}' "https://$site_host/")"
-[[ "$forged_status" == '302' ]]
+probe_protected_route() {
+  local -a headers=("${@}")
+  local status=''
+  for _ in {1..30}; do
+    status="$(curl -sS --noproxy '*' --connect-timeout 5 --max-time 10 \
+      --resolve "$site_host:443:127.0.0.1" \
+      "${headers[@]}" \
+      -o /dev/null -w '%{http_code}' "https://$site_host/" 2>/dev/null || true)"
+    if [[ "$status" == '302' ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+probe_protected_route
+probe_protected_route -H 'X-Aialra-Authenticated: 1' -H 'X-Aialra-Sub: forged'
 openssl x509 -in "/etc/letsencrypt/live/$site_host/fullchain.pem" -noout -checkend 604800 >/dev/null
 
 trap - ERR INT TERM HUP
