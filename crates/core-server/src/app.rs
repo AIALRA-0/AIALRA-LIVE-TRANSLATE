@@ -1,10 +1,9 @@
 //! Shared state and safe event emission.
 
 use crate::dingtalk::DingtalkClient;
-use crate::worker::WorkerClient;
 use aialra_asset_store::ObjectStore;
 use aialra_event_protocol::EventEnvelope;
-use aialra_event_store::EventStore;
+use aialra_event_store::{EventStore, ModelJobRecord, NewModelJob};
 use anyhow::{Context, Result};
 use axum::Json;
 use axum::http::StatusCode;
@@ -13,26 +12,22 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Notify, Semaphore, broadcast};
+use tokio::sync::broadcast;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: EventStore,
     pub objects: ObjectStore,
-    pub worker: WorkerClient,
     pub dingtalk: DingtalkClient,
     pub events: broadcast::Sender<EventEnvelope>,
     pub sequence_lock: Arc<Mutex<()>>,
     pub audio_buffers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    pub asr_slots: Arc<Semaphore>,
-    pub pending_model_jobs: Arc<AtomicUsize>,
-    pub model_drained: Arc<Notify>,
 }
 
 impl AppState {
-    pub fn open(data_dir: &Path, worker_url: &str) -> Result<Self> {
+    pub fn open(data_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir).context("create data directory")?;
         let store = EventStore::open(data_dir.join("aialra.sqlite"))?;
         let objects = ObjectStore::new(data_dir.join("objects"))?;
@@ -40,15 +35,10 @@ impl AppState {
         Ok(Self {
             store,
             objects,
-            worker: WorkerClient::new(worker_url),
             dingtalk: DingtalkClient::from_env(),
             events,
             sequence_lock: Arc::new(Mutex::new(())),
             audio_buffers: Arc::new(Mutex::new(HashMap::new())),
-            // One ASR task keeps the live path within a predictable GPU budget.
-            asr_slots: Arc::new(Semaphore::new(1)),
-            pending_model_jobs: Arc::new(AtomicUsize::new(0)),
-            model_drained: Arc::new(Notify::new()),
         })
     }
 
@@ -88,6 +78,61 @@ impl AppState {
         let _ = self.events.send(event.clone());
         Ok(event)
     }
+
+    /// A stable UUID turns a retried model completion into the same append-only event.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_idempotent(
+        &self,
+        stable_key: &str,
+        session_id: &str,
+        source_id: &str,
+        event_type: &str,
+        monotonic_ns: u64,
+        correlation_id: &str,
+        causation_id: Option<String>,
+        payload: Value,
+    ) -> Result<EventEnvelope> {
+        let _guard = self
+            .sequence_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("sequence lock poisoned"))?;
+        let sequence = self.store.next_sequence(session_id, source_id)?;
+        let mut event = EventEnvelope::new(
+            session_id,
+            source_id,
+            sequence,
+            event_type,
+            monotonic_ns,
+            correlation_id,
+            causation_id,
+            payload,
+        )?;
+        event.event_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, stable_key.as_bytes());
+        if self.store.insert_event(&event)? {
+            let _ = self.events.send(event.clone());
+        }
+        Ok(event)
+    }
+
+    /// Queue creation and its status event share one stable idempotency key.
+    pub fn enqueue_job(&self, job: NewModelJob) -> Result<ModelJobRecord> {
+        let record = self.store.enqueue_model_job(&job)?;
+        let _ = self.emit_idempotent(
+            &format!("{}:queued", record.id),
+            &record.session_id,
+            "model_scheduler",
+            "model.job.queued",
+            0,
+            &record.id,
+            None,
+            serde_json::json!({
+                "job_id": record.id,
+                "job_type": record.job_type,
+                "priority": record.priority
+            }),
+        );
+        Ok(record)
+    }
 }
 
 #[derive(Debug)]
@@ -114,6 +159,20 @@ impl ApiError {
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+        }
+    }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }

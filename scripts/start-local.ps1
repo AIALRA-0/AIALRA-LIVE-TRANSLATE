@@ -23,6 +23,16 @@ if (Test-Path -LiteralPath $localEnvFile -PathType Leaf) {
     }
 }
 
+# A local-only run receives an ephemeral shared token when the user did not configure one.
+if ([string]::IsNullOrWhiteSpace($env:AIALRA_WORKER_TOKEN)) {
+    $randomBytes = [byte[]]::new(32) # Use cryptographic randomness without writing the raw token to disk or terminal.
+    [Security.Cryptography.RandomNumberGenerator]::Fill($randomBytes) # Generate one process-scoped bearer token.
+    $env:AIALRA_WORKER_TOKEN = [Convert]::ToHexString($randomBytes).ToLowerInvariant() # Child services inherit the same temporary secret.
+}
+$tokenBytes = [Text.Encoding]::UTF8.GetBytes($env:AIALRA_WORKER_TOKEN) # Hash the token for the core-side verifier.
+$tokenHash = [Security.Cryptography.SHA256]::HashData($tokenBytes) # The core stores only the digest in its process environment.
+$env:AIALRA_WORKER_TOKEN_SHA256 = [Convert]::ToHexString($tokenHash).ToLowerInvariant() # Match the Rust hexadecimal verifier.
+
 # Refuse to overwrite PID records when either project port already has a listener.
 $occupiedProjectPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in @(8787, 8790) } | Select-Object -ExpandProperty LocalPort -Unique) # Resolve only the two fixed loopback service ports.
 if ($occupiedProjectPorts.Count -gt 0) { throw "AIALRA 端口已被占用：$($occupiedProjectPorts -join ', ')，请先停止现有服务。" } # A stale or unrelated listener must be handled before startup.
@@ -60,5 +70,8 @@ if (!$workerReady -or !$coreReady) {
     & (Join-Path $PSScriptRoot "stop-local.ps1") # Remove only the verified launchers created by this project.
     throw "本地服务未在 120 秒内就绪，请检查模型依赖和端口状态。" # Report a bounded, actionable failure after partial cleanup.
 }
+$agentScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-gpu-agent.ps1") # The agent begins only after both local APIs are ready.
+$agent = Start-Process -FilePath $shellPath -ArgumentList @("-NoProfile", "-File", $agentScript) -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru # Connect the model worker to the persistent queue.
+$agent.Id | Set-Content -LiteralPath (Join-Path $runDirectory "agent.pid") -Encoding ascii # Safe shutdown verifies this launcher by name.
 if (!$NoBrowser) { Start-Process "http://127.0.0.1:8787" } # Interactive runs open one page; automation stays headless.
 Write-Output "AIALRA 已启动：http://127.0.0.1:8787" # Give terminal users a copyable local address.

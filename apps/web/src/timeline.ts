@@ -64,12 +64,22 @@ export function eventToTimelineItem(event: EventEnvelope): TimelineItem | null {
       imageUrl: text(payload.preview_url) || undefined,
     };
   }
-  if (event.event_type === "model.run.failed") {
+  if (event.event_type === "model.job.failed") {
     return {
       id: event.event_id,
       kind: "status",
       title: "模型任务暂时不可用",
       body: "音频已安全保存，可在模型恢复后重新处理。",
+      evidenceIds: [],
+      occurredAt: event.captured_at_wall,
+    };
+  }
+  if (event.event_type === "model.job.retry_scheduled") {
+    return {
+      id: event.event_id,
+      kind: "status",
+      title: "真实模型等待恢复",
+      body: "输入已保存，任务会在本机 GPU 恢复后自动重试，不会生成占位结果",
       evidenceIds: [],
       occurredAt: event.captured_at_wall,
     };

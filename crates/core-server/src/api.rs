@@ -1,9 +1,11 @@
 //! Versioned HTTP and Server-Sent Events endpoints for the desktop UI.
 
 use crate::app::{ApiError, AppState};
-use crate::explanation::create_explanation;
+use crate::audio::flush_session_buffers;
+use crate::explanation::enqueue_explanation;
+use crate::jobs::finish_session_after_stop;
 use aialra_core_domain::SessionState;
-use aialra_event_store::{AssetPageRecord, AssetRecord, NewSession, SessionRecord};
+use aialra_event_store::{AssetRecord, NewModelJob, NewSession, SessionRecord};
 use axum::body::Body;
 use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderValue, header};
@@ -14,20 +16,30 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::convert::Infallible;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use uuid::Uuid;
 
 const MAX_ASSET_BYTES: usize = 50 * 1024 * 1024;
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    // Worker failure degrades model capabilities while the durable core remains healthy.
-    let worker = state.worker.health().await.ok();
+    let queue = state.store.model_queue_counts(None).ok();
+    let worker = state.store.latest_worker().ok().flatten().map(|record| {
+        let online = (Utc::now() - record.last_seen_at).num_seconds() <= 30;
+        json!({
+            "id": record.id,
+            "online": online,
+            "capabilities": record.capabilities,
+            "model_metadata": record.model_metadata,
+            "active_job_id": record.active_job_id,
+            "last_seen_at": record.last_seen_at
+        })
+    });
     Json(json!({
         "status": "ok",
         "service": "aialra-core",
         "version": env!("CARGO_PKG_VERSION"),
         "worker": worker,
+        "model_queue": queue,
         "local_only_default": true,
         "deployment_mode": std::env::var("AIALRA_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".to_owned()),
         "processing_location": std::env::var("AIALRA_PROCESSING_LOCATION").unwrap_or_else(|_| "本机处理".to_owned())
@@ -51,9 +63,12 @@ pub async fn create_session(
     if request.title.trim().is_empty() {
         return Err(ApiError::bad_request("session title is required"));
     }
-    if !request.consent_confirmed && !request.demo_mode {
+    if !request.consent_confirmed {
+        return Err(ApiError::bad_request("recording consent is required"));
+    }
+    if request.demo_mode {
         return Err(ApiError::bad_request(
-            "recording consent is required outside demo mode",
+            "demo mode is not available in production",
         ));
     }
 
@@ -66,7 +81,7 @@ pub async fn create_session(
         target_language: request.target_language,
         privacy_mode: "local_only".to_owned(),
         consent_confirmed: request.consent_confirmed,
-        demo_mode: request.demo_mode,
+        demo_mode: false,
     };
     state.store.create_session(&session)?;
     let correlation = format!("create_{}", Uuid::now_v7().simple());
@@ -79,7 +94,7 @@ pub async fn create_session(
         None,
         json!({
             "confirmed": request.consent_confirmed,
-            "demo_mode": request.demo_mode,
+            "demo_mode": false,
             "privacy_mode": "local_only"
         }),
     )?;
@@ -160,32 +175,28 @@ pub async fn stop_session(
         None,
         json!({}),
     )?;
-    // Recording control returns immediately while a background task drains every accepted ASR window.
-    tokio::spawn(async move {
-        loop {
-            let drained = state.model_drained.notified();
-            if state.pending_model_jobs.load(Ordering::SeqCst) == 0 {
-                break;
-            }
-            drained.await;
-        }
-        if state
-            .store
-            .transition_session(&session_id, SessionState::Completed)
-            .is_ok()
-        {
-            let _ = state.emit(
-                &session_id,
-                "core",
-                "session.completed",
-                0,
-                &correlation,
-                None,
-                json!({"model_queue_drained": true}),
-            );
-        }
-    });
-    Ok(Json(stopping))
+    let sealed_tail_windows = flush_session_buffers(&state, &session_id)?;
+    let processing = state
+        .store
+        .transition_session(&session_id, SessionState::Processing)?;
+    let queue = state.store.model_queue_counts(Some(&session_id))?;
+    state.emit(
+        &session_id,
+        "core",
+        "session.processing",
+        0,
+        &correlation,
+        None,
+        json!({
+            "sealed_tail_windows": sealed_tail_windows,
+            "queued_jobs": queue.queued,
+            "leased_jobs": queue.leased
+        }),
+    )?;
+    finish_session_after_stop(&state, &session_id)?;
+    let current = state.store.get_session(&session_id)?.unwrap_or(processing);
+    let _ = stopping;
+    Ok(Json(current))
 }
 
 pub async fn list_events(
@@ -316,106 +327,6 @@ pub async fn stream_events(
     ))
 }
 
-pub async fn run_demo(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let session = state
-        .store
-        .get_session(&session_id)?
-        .ok_or_else(|| ApiError::not_found("session not found"))?;
-    if !session.demo_mode {
-        return Err(ApiError::bad_request("mock pipeline requires demo mode"));
-    }
-    if session.state == SessionState::Ready {
-        state
-            .store
-            .transition_session(&session_id, SessionState::Recording)?;
-    }
-
-    // The deterministic script exercises partial, final, translation, explanation, and replay paths.
-    let demo_session_id = session_id.clone();
-    tokio::spawn(async move {
-        let correlation = format!("demo_{}", Uuid::now_v7().simple());
-        let segments = [
-            (
-                "seg_demo_1",
-                "A pipeline hazard happens when overlapping instructions depend on the same resource.",
-                "当重叠执行的指令依赖同一资源时，就会出现流水线冒险。",
-            ),
-            (
-                "seg_demo_2",
-                "Forwarding can provide a result before it is written back to the register file.",
-                "数据前递可以在结果写回寄存器堆之前把它提供给后续指令。",
-            ),
-        ];
-        for (index, (segment_id, text, translation)) in segments.into_iter().enumerate() {
-            let monotonic = (index as u64 + 1) * 2_000_000_000;
-            let partial = state.emit(
-                &demo_session_id,
-                "mock_asr",
-                "asr.partial.updated",
-                monotonic,
-                &correlation,
-                None,
-                json!({"text": text.split('.').next().unwrap_or(text), "segment_id": segment_id}),
-            );
-            if partial.is_err() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(220)).await;
-            let finalized = match state.emit(
-                &demo_session_id,
-                "mock_asr",
-                "segment.finalized",
-                monotonic,
-                &correlation,
-                partial.ok().map(|event| event.event_id.to_string()),
-                json!({"segment_id": segment_id, "text": text, "start_ms": index * 2000, "end_ms": (index + 1) * 2000, "confidence": 0.99}),
-            ) {
-                Ok(event) => event,
-                Err(_) => return,
-            };
-            tokio::time::sleep(Duration::from_millis(180)).await;
-            let _ = state.emit(
-                &demo_session_id,
-                "mock_translation",
-                "translation.finalized",
-                monotonic,
-                &correlation,
-                Some(finalized.event_id.to_string()),
-                json!({"segment_id": segment_id, "translation_id": format!("tr_{segment_id}"), "text": translation, "provider": "deterministic_mock"}),
-            );
-            tokio::time::sleep(Duration::from_millis(180)).await;
-        }
-        let _ = state.emit(
-            &demo_session_id,
-            "mock_explainer",
-            "explanation.card.created",
-            4_000_000_000,
-            &correlation,
-            None,
-            json!({
-                "card_id": "card_demo_1",
-                "summary": "本段说明流水线冒险以及数据前递如何降低等待时间。",
-                "rare_terms": [{
-                    "term": "forwarding",
-                    "one_line": "数据前递把尚未写回的计算结果直接送到需要它的后续流水级，从而减少停顿。",
-                    "evidence_segment_ids": ["seg_demo_2"],
-                    "asset_page_ids": []
-                }],
-                "review_questions": ["数据前递为什么无法解决所有流水线冒险？"],
-                "evidence_segment_ids": ["seg_demo_1", "seg_demo_2"],
-                "asset_page_ids": [],
-                "fact_type": "background_explanation",
-                "provider": "deterministic_mock",
-                "confidence": 0.96
-            }),
-        );
-    });
-    Ok(Json(json!({"started": true, "session_id": session_id})))
-}
-
 pub async fn upload_asset(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -463,46 +374,22 @@ pub async fn upload_asset(
         json!({"asset_id": asset_id, "media_type": media_type, "object_hash": stored.hash, "size_bytes": stored.size_bytes}),
     )?;
 
-    // Parsing is local and progressive; failure preserves the immutable original for retry.
-    let parsed = state
-        .worker
-        .parse_asset(&file_name, &media_type, bytes.to_vec())
-        .await?;
-    let mut page_ids = Vec::new();
-    for page in parsed.pages {
-        let page_id = format!("page_{}_{}", asset_id, page.page_number);
-        state.store.insert_asset_page(&AssetPageRecord {
-            id: page_id.clone(),
-            asset_id: asset_id.clone(),
-            page_number: page.page_number,
-            title: Some(page.title.clone()),
-            text_content: page.text.clone(),
-            object_hash: media_type
-                .starts_with("image/")
-                .then(|| stored.hash.clone()),
-            created_at: Utc::now(),
-        })?;
-        state.emit(
-            &session_id,
-            "asset_parser",
-            "asset.page.extracted",
-            0,
-            &correlation,
-            None,
-            json!({
-                "asset_id": asset_id,
-                "page_id": page_id,
-                "page_number": page.page_number,
-                "title": page.title,
-                "text": page.text,
-                "parser": parsed.parser,
-                "media_type": media_type,
-                "preview_url": media_type.starts_with("image/").then(|| format!("/api/v1/sessions/{session_id}/assets/{asset_id}/content"))
-            }),
-        )?;
-        page_ids.push(page_id);
-    }
-    Ok(Json(json!({"asset_id": asset_id, "page_ids": page_ids})))
+    let job = state.enqueue_job(NewModelJob {
+        id: format!("job_{}", Uuid::now_v7().simple()),
+        session_id: session_id.clone(),
+        job_type: "asset_parse".to_owned(),
+        priority: 10,
+        input: json!({
+            "asset_id": asset_id,
+            "file_name": sanitize_file_name(&file_name),
+            "media_type": media_type
+        }),
+        input_object_hash: Some(stored.hash),
+        idempotency_key: format!("asset_parse:{session_id}:{asset_id}"),
+    })?;
+    Ok(Json(
+        json!({"asset_id": asset_id, "job_id": job.id, "page_ids": []}),
+    ))
 }
 
 pub async fn asset_content(
@@ -531,8 +418,8 @@ pub async fn explain_now(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let event = create_explanation(&state, &session_id, "manual").await?;
-    Ok(Json(json!({"event": event})))
+    let job = enqueue_explanation(&state, &session_id, "manual")?;
+    Ok(Json(json!({"job_id": job.id, "status": job.status})))
 }
 
 fn sanitize_file_name(value: &str) -> String {

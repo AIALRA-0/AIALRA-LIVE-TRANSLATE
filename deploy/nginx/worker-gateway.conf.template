@@ -1,0 +1,22 @@
+server {
+    listen __TAILSCALE_IP__:__WORKER_GATEWAY_PORT__;
+    server_name _;
+
+    access_log off;
+
+    location ^~ /internal/v1/ {
+        proxy_pass http://127.0.0.1:__SERVICE_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_set_header X-Real-IP $remote_addr;
+        client_max_body_size 55m;
+        proxy_read_timeout 75s;
+        proxy_send_timeout 75s;
+        proxy_buffering off;
+    }
+
+    location / {
+        return 404;
+    }
+}

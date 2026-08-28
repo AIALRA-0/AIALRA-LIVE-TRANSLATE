@@ -12,6 +12,7 @@ pub enum SessionState {
     Recording,
     Degraded,
     Stopping,
+    Processing,
     Completed,
     Failed,
     Archived,
@@ -27,7 +28,8 @@ impl SessionState {
                 | (Self::Recording, Self::Degraded)
                 | (Self::Degraded, Self::Recording)
                 | (Self::Recording | Self::Degraded, Self::Stopping)
-                | (Self::Stopping, Self::Completed | Self::Failed)
+                | (Self::Stopping, Self::Processing | Self::Failed)
+                | (Self::Processing, Self::Completed | Self::Failed)
                 | (Self::Created | Self::Ready, Self::Failed)
                 | (Self::Completed | Self::Failed, Self::Archived)
         );

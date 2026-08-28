@@ -9,9 +9,9 @@ services:
     environment:
       AIALRA_BIND: 0.0.0.0:8787
       AIALRA_DATA_DIR: /data
-      AIALRA_WORKER_URL: http://worker:8790
       AIALRA_DEPLOYMENT_MODE: server
-      AIALRA_PROCESSING_LOCATION: AIALRA 私有主机处理
+      AIALRA_PROCESSING_LOCATION: 本机 RTX 4080 经私有通道处理
+      AIALRA_WORKER_TOKEN_SHA256: ${AIALRA_WORKER_TOKEN_SHA256:?worker token hash is required}
       AIALRA_EXPLAIN_EVERY_SEGMENTS: ${AIALRA_EXPLAIN_EVERY_SEGMENTS:-5}
       LOCAL_ONLY: "true"
       CLOUD_TEXT_ALLOWED: "false"
@@ -22,12 +22,9 @@ services:
       DINGTALK_USER_ID: ${DINGTALK_USER_ID:-}
       RUST_LOG: ${RUST_LOG:-aialra_core_server=info,tower_http=warn}
     volumes:
-      - ${AIALRA_DATA_PATH:-/srv/aialra/data/live-translate}:/data
+      - ${AIALRA_DATA_PATH:-/var/lib/aialra-live-translate}:/data
     ports:
       - 127.0.0.1:${AIALRA_PORT:-13150}:8787
-    depends_on:
-      worker:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/api/v1/health"]
       interval: 30s
@@ -38,44 +35,3 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-
-  worker:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.worker
-    restart: unless-stopped
-    environment:
-      AIALRA_ASR_MODEL: ${AIALRA_ASR_MODEL:-tiny}
-      AIALRA_ASR_DEVICE: ${AIALRA_ASR_DEVICE:-cpu}
-      AIALRA_ASR_COMPUTE_TYPE: ${AIALRA_ASR_COMPUTE_TYPE:-int8}
-      AIALRA_OLLAMA_URL: http://ollama:11434
-      AIALRA_OLLAMA_MODEL: ${AIALRA_OLLAMA_MODEL:-qwen2.5:1.5b-instruct}
-      HF_HUB_DISABLE_XET: "1"
-      HF_HUB_DOWNLOAD_TIMEOUT: "300"
-    volumes:
-      - ${AIALRA_MODEL_PATH:-/srv/aialra/data/live-translate-models}:/models
-    depends_on:
-      ollama:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/health', timeout=3)"]
-      interval: 15s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-
-  ollama:
-    image: ollama/ollama:0.32.14
-    restart: unless-stopped
-    environment:
-      OLLAMA_HOST: 0.0.0.0:11434
-      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
-      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
-    volumes:
-      - ${AIALRA_OLLAMA_PATH:-/srv/aialra/data/live-translate-ollama}:/root/.ollama
-    security_opt:
-      - no-new-privileges:true

@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
 
         // Last-used connection fields reduce setup time when no explicit USB values are supplied.
         val preferences = getSharedPreferences("capture", MODE_PRIVATE)
-        serverUrl.setText(requestedServerUrl ?: preferences.getString("serverUrl", "ws://192.168.1.2:8787"))
+        serverUrl.setText(requestedServerUrl ?: preferences.getString("serverUrl", "ws://192.0.2.2:8787"))
         sessionId.setText(requestedSessionId ?: preferences.getString("sessionId", ""))
 
         // Start and stop controls always keep the system foreground notification in sync.

@@ -28,6 +28,7 @@ OLLAMA_MODEL = os.getenv("AIALRA_OLLAMA_MODEL", "qwen2.5:14b-instruct")
 ASR_MODEL_NAME = os.getenv("AIALRA_ASR_MODEL", "small")
 ASR_DEVICE = os.getenv("AIALRA_ASR_DEVICE", "cuda")
 ASR_COMPUTE_TYPE = os.getenv("AIALRA_ASR_COMPUTE_TYPE", "float16")
+LLM_DEVICE = os.getenv("AIALRA_LLM_DEVICE", "cuda")
 
 _asr_model: Any | None = None
 _asr_lock = threading.Lock()
@@ -40,6 +41,8 @@ class HealthResponse(BaseModel):
     asr_available: bool
     ollama_available: bool
     model: str
+    asr_provider: str
+    llm_provider: str
 
 
 class AsrRequest(BaseModel):
@@ -80,7 +83,7 @@ class TranslationRequest(BaseModel):
 
 
 class TranslationResponse(BaseModel):
-    """Provider identity lets the timeline distinguish a model translation from fallback text."""
+    """Provider identity lets the timeline verify the model and execution device."""
 
     text: str
     provider: str
@@ -165,6 +168,8 @@ async def health() -> HealthResponse:
         asr_available=asr_available,
         ollama_available=ollama_available,
         model=OLLAMA_MODEL,
+        asr_provider=f"faster-whisper:{ASR_MODEL_NAME}@{ASR_DEVICE}",
+        llm_provider=f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}",
     )
 
 
@@ -186,7 +191,7 @@ async def transcribe(request: AsrRequest) -> AsrResponse:
 
 @app.post("/v1/translate", response_model=TranslationResponse)
 async def translate(request: TranslationRequest) -> TranslationResponse:
-    """Ollama is preferred locally; an identity fallback keeps the source visible during failure."""
+    """A translation is accepted only when the configured local Ollama model returns valid JSON."""
 
     glossary_lines = [
         f"{item.source} => {item.source if item.do_not_translate else item.preferred}"
@@ -205,8 +210,12 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
     )
     result = await _ollama_json(system, user)
     if isinstance(result, dict) and isinstance(result.get("text"), str):
-        return TranslationResponse(text=result["text"].strip(), provider=f"ollama:{OLLAMA_MODEL}")
-    return TranslationResponse(text=request.text, provider="identity_fallback")
+        text = result["text"].strip()
+        if text:
+            return TranslationResponse(
+                text=text, provider=f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}"
+            )
+    raise HTTPException(status_code=503, detail="local Ollama translation is unavailable")
 
 
 @app.post("/v1/explain", response_model=ExplanationResponse)
@@ -252,9 +261,9 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
     if isinstance(result, dict):
         normalized = _normalize_explanation(result, segment_ids, page_ids)
         if normalized is not None:
-            normalized.provider = f"ollama:{OLLAMA_MODEL}"
+            normalized.provider = f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}"
             return normalized
-    return _heuristic_explanation(request)
+    raise HTTPException(status_code=503, detail="local Ollama explanation is unavailable")
 
 
 @app.post("/v1/assets/parse", response_model=AssetParseResponse)
@@ -321,7 +330,7 @@ def _transcribe_sync(audio: npt.NDArray[np.float32], request: AsrRequest) -> Asr
         language=str(getattr(info, "language", language or "unknown")),
         confidence=confidence,
         duration_ms=duration_ms,
-        provider=f"faster-whisper:{ASR_MODEL_NAME}",
+        provider=f"faster-whisper:{ASR_MODEL_NAME}@{ASR_DEVICE}",
     )
 
 
@@ -367,8 +376,19 @@ def _normalize_explanation(
 ) -> ExplanationResponse | None:
     """Pydantic validates structure while local allowlists remove fabricated evidence IDs."""
 
+    normalized = {
+        "summary": raw.get("summary", ""),
+        "missing_context": raw.get("missing_context", []),
+        "rare_terms": raw.get("rare_terms", []),
+        "possible_asr_errors": raw.get("possible_asr_errors", []),
+        "review_questions": raw.get("review_questions", []),
+        "evidence_segment_ids": raw.get("evidence_segment_ids", segment_ids),
+        "asset_page_ids": raw.get("asset_page_ids", page_ids),
+        "confidence": raw.get("confidence", 0.5),
+        "provider": "pending",
+    }
     try:
-        candidate = ExplanationResponse.model_validate({**raw, "provider": "pending"})
+        candidate = ExplanationResponse.model_validate(normalized)
     except ValueError:
         return None
     allowed_segments = set(segment_ids)
@@ -391,28 +411,6 @@ def _normalize_explanation(
     if not candidate.evidence_segment_ids:
         candidate.evidence_segment_ids = segment_ids
     return candidate
-
-
-def _heuristic_explanation(request: ExplanationRequest) -> ExplanationResponse:
-    """A deterministic fallback preserves evidence links when the local LLM is unavailable."""
-
-    segment_ids = [segment.id for segment in request.segments]
-    page_ids = [page.id for page in request.asset_pages]
-    source_excerpt = request.segments[-1].text.strip()
-    page_note = ""
-    if request.asset_pages:
-        page_note = f" Related material: {request.asset_pages[-1].title}."
-    return ExplanationResponse(
-        summary=f"{source_excerpt}{page_note}",
-        missing_context=[],
-        rare_terms=[],
-        possible_asr_errors=[],
-        review_questions=["本段与最近一页材料之间的关系是什么？"] if page_ids else [],
-        evidence_segment_ids=segment_ids,
-        asset_page_ids=page_ids,
-        confidence=0.5,
-        provider="deterministic_fallback",
-    )
 
 
 def _parse_asset_sync(suffix: str, data: bytes) -> AssetParseResponse:

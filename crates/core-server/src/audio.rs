@@ -1,19 +1,15 @@
 //! Reliable PCM ingress shared by browsers, Android, and the DingTalk mini-app foreground probe.
 
 use crate::app::AppState;
-use crate::explanation::create_explanation;
-use crate::worker::{AsrRequest, GlossaryConstraint, TranslationRequest};
+use crate::jobs::enqueue_asr;
 use aialra_core_domain::SessionState;
 use aialra_event_store::AudioChunkRecord;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::response::Response;
-use base64::Engine;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use std::sync::atomic::Ordering;
-use uuid::Uuid;
 
 const HEADER_BYTES: usize = 16;
 const SAMPLE_RATE: u32 = 16_000;
@@ -150,16 +146,7 @@ async fn persist_frame(
             }
         };
         if let Some(window) = maybe_window {
-            state.pending_model_jobs.fetch_add(1, Ordering::SeqCst);
-            let state = state.clone();
-            let session_id = session_id.to_owned();
-            let source_id = source_id.to_owned();
-            tokio::spawn(async move {
-                process_window(state.clone(), session_id, source_id, captured_at_ms, window).await;
-                if state.pending_model_jobs.fetch_sub(1, Ordering::SeqCst) == 1 {
-                    state.model_drained.notify_waiters();
-                }
-            });
+            enqueue_asr(state, session_id, source_id, captured_at_ms, &window)?;
         }
     }
     Ok((sequence, !inserted))
@@ -179,133 +166,34 @@ fn trailing_audio_is_silent(pcm: &[u8]) -> bool {
     samples > 0 && total / samples < SILENCE_MEAN_ABSOLUTE_PCM
 }
 
-async fn process_window(
-    state: AppState,
-    session_id: String,
-    source_id: String,
-    captured_at_ms: u64,
-    pcm: Vec<u8>,
-) {
-    // The semaphore serializes only ASR work so slower translation cannot delay the next audio window.
-    let Ok(asr_permit) = state.asr_slots.acquire().await else {
-        return;
+/// Stopping a session seals every short tail so the final spoken phrase is not lost.
+pub fn flush_session_buffers(state: &AppState, session_id: &str) -> anyhow::Result<usize> {
+    let prefix = format!("{session_id}:");
+    let drained = {
+        let mut buffers = state
+            .audio_buffers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audio buffer lock poisoned"))?;
+        let keys = buffers
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| buffers.remove(&key).map(|bytes| (key, bytes)))
+            .collect::<Vec<_>>()
     };
-    let Ok(Some(session)) = state.store.get_session(&session_id) else {
-        return;
-    };
-    let correlation = format!("asr_{}", Uuid::now_v7().simple());
-    let response = state
-        .worker
-        .transcribe(&AsrRequest {
-            pcm_s16le_base64: base64::engine::general_purpose::STANDARD.encode(pcm),
-            sample_rate: SAMPLE_RATE,
-            language: session.source_language.clone(),
-            initial_prompt: String::new(),
-        })
-        .await;
-    let asr = match response {
-        Ok(result) if !result.text.trim().is_empty() => result,
-        Ok(_) => return,
-        Err(error) => {
-            let _ = state.emit(
-                &session_id,
-                "model_scheduler",
-                "model.run.failed",
-                captured_at_ms.saturating_mul(1_000_000),
-                &correlation,
-                None,
-                json!({"role": "asr", "error_kind": "worker_unavailable", "source_id": source_id}),
-            );
-            tracing::warn!(error = %error, session_id, "ASR window failed");
-            return;
+    let captured_at_ms = Utc::now().timestamp_millis().max(0) as u64;
+    let mut queued = 0;
+    for (key, pcm) in drained {
+        if pcm.is_empty() {
+            continue;
         }
-    };
-    // Release ASR capacity before translation because the audio path has priority over downstream enrichment.
-    drop(asr_permit);
-    let segment_id = format!("seg_{}", Uuid::now_v7().simple());
-    let partial = state.emit(
-        &session_id,
-        "local_asr",
-        "asr.partial.updated",
-        captured_at_ms.saturating_mul(1_000_000),
-        &correlation,
-        None,
-        json!({"segment_id": segment_id, "text": asr.text, "provider": asr.provider}),
-    );
-    let finalized = state.emit(
-        &session_id,
-        "local_asr",
-        "segment.finalized",
-        captured_at_ms.saturating_mul(1_000_000),
-        &correlation,
-        partial.ok().map(|event| event.event_id.to_string()),
-        json!({
-            "segment_id": segment_id,
-            "text": asr.text,
-            "language": asr.language,
-            "confidence": asr.confidence,
-            "duration_ms": asr.duration_ms,
-            "provider": asr.provider
-        }),
-    );
-    let Ok(finalized) = finalized else {
-        return;
-    };
-    let source_text = finalized
-        .payload
-        .get("text")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_owned();
-    match state
-        .worker
-        .translate(&TranslationRequest {
-            text: source_text,
-            source_language: session.source_language,
-            target_language: session.target_language,
-            glossary: Vec::<GlossaryConstraint>::new(),
-            context: Vec::new(),
-        })
-        .await
-    {
-        Ok(translation) => {
-            let _ = state.emit(
-                &session_id,
-                "local_translation",
-                "translation.finalized",
-                captured_at_ms.saturating_mul(1_000_000),
-                &correlation,
-                Some(finalized.event_id.to_string()),
-                json!({"segment_id": segment_id, "translation_id": format!("tr_{segment_id}"), "text": translation.text, "provider": translation.provider}),
-            );
-            maybe_create_periodic_explanation(&state, &session_id).await;
-        }
-        Err(error) => {
-            tracing::warn!(error = %error, session_id, "translation failed after ASR");
-        }
+        let source_id = key.trim_start_matches(&prefix);
+        enqueue_asr(state, session_id, source_id, captured_at_ms, &pcm)?;
+        queued += 1;
     }
-}
-
-async fn maybe_create_periodic_explanation(state: &AppState, session_id: &str) {
-    // A volume trigger avoids interrupting every short caption while still helping during a long lecture.
-    let interval = std::env::var("AIALRA_EXPLAIN_EVERY_SEGMENTS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(5);
-    let Ok(events) = state.store.list_events(session_id) else {
-        return;
-    };
-    let segment_count = events
-        .iter()
-        .filter(|event| event.event_type == "segment.finalized")
-        .count();
-    if segment_count > 0
-        && segment_count.is_multiple_of(interval)
-        && let Err(error) = create_explanation(state, session_id, "segment_volume").await
-    {
-        tracing::warn!(error = %error, session_id, "periodic explanation failed");
-    }
+    Ok(queued)
 }
 
 #[cfg(test)]

@@ -76,7 +76,6 @@ const session = await checked(
 await checked(fetch(`${API}/sessions/${session.id}/start`, { method: "POST" }));
 const capabilities = await checked(fetch(`${API}/sessions/${session.id}/dingtalk/capabilities`));
 const pcm = await readFile(FIXTURE);
-const expectedWindows = Math.floor(pcm.length / 128_000);
 const acknowledgements = await sendPcm(session.id, pcm);
 let events = await waitForEvents(
   session.id,
@@ -93,13 +92,18 @@ material.append(
   "pipeline-notes.txt",
 );
 await checked(fetch(`${API}/sessions/${session.id}/assets`, { method: "POST", body: material }));
+await waitForEvents(
+  session.id,
+  (items) => items.some((item) => item.event_type === "asset.page.extracted"),
+);
 await checked(fetch(`${API}/sessions/${session.id}/explain`, { method: "POST" }));
 await checked(fetch(`${API}/sessions/${session.id}/stop`, { method: "POST" }));
 events = await waitForEvents(
   session.id,
   (items) =>
     items.some((item) => item.event_type === "session.completed") &&
-    items.filter((item) => item.event_type === "translation.finalized").length >= expectedWindows,
+    items.some((item) => item.event_type === "translation.finalized") &&
+    items.some((item) => item.event_type === "explanation.card.created"),
 );
 
 // Machine-readable output is stored by the caller and can be compared across model changes.

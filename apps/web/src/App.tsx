@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { api, subscribeEvents, type DingtalkCapabilities, type RuntimeHealth } from "./api";
-import { BrowserCapture } from "./audio";
+import { BrowserCapture, type CaptureMode } from "./audio";
 import { appendEvent } from "./timeline";
 import type { EventEnvelope, Session, TimelineItem } from "./types";
 
@@ -26,6 +26,7 @@ function stateLabel(state: string): string {
       recording: "录音中",
       degraded: "降级录音中",
       stopping: "正在停止",
+      processing: "模型处理中",
       completed: "已完成",
     }[state] ?? state
   );
@@ -34,13 +35,14 @@ function stateLabel(state: string): string {
 function SessionCreator({ onCreated }: { onCreated: (session: Session) => void }) {
   const [title, setTitle] = useState("今天的课程");
   const [consent, setConsent] = useState(false);
-  const [demo, setDemo] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [runtime, setRuntime] = useState<RuntimeHealth | null>(null);
+  const [recent, setRecent] = useState<Session | null>(null);
 
   useEffect(() => {
     void api.health().then(setRuntime).catch(() => setRuntime(null));
+    void api.listSessions().then((sessions) => setRecent(sessions[0] ?? null)).catch(() => setRecent(null));
   }, []);
 
   async function submit(event: FormEvent): Promise<void> {
@@ -53,7 +55,7 @@ function SessionCreator({ onCreated }: { onCreated: (session: Session) => void }
         source_language: "en",
         target_language: "zh-CN",
         consent_confirmed: consent,
-        demo_mode: demo,
+        demo_mode: false,
       });
       onCreated(session);
     } catch (caught) {
@@ -94,14 +96,15 @@ function SessionCreator({ onCreated }: { onCreated: (session: Session) => void }
           />
           <span>我已获得课程录音许可</span>
         </label>
-        <label className="check-row subtle">
-          <input type="checkbox" checked={demo} onChange={(event) => setDemo(event.target.checked)} />
-          <span>先用内置课程片段体验</span>
-        </label>
         {error && <p className="error-message" role="alert">{error}</p>}
         <button className="primary-button" disabled={busy} type="submit">
           {busy ? "正在准备…" : "进入课程控制台"}
         </button>
+        {recent && (
+          <button className="secondary-button recent-button" type="button" onClick={() => onCreated(recent)}>
+            继续最近课程 · {recent.title}
+          </button>
+        )}
         <p className="consent-note">正式录音会持续显示红色状态，并可随时停止。</p>
       </form>
     </main>
@@ -109,6 +112,7 @@ function SessionCreator({ onCreated }: { onCreated: (session: Session) => void }
 }
 
 function TimelineCard({ item }: { item: TimelineItem }) {
+  const visibleEvidenceId = (id: string) => `${id.slice(0, 12)}…${id.slice(-5)}`;
   return (
     <article className={`timeline-card ${item.kind}`} data-testid={`timeline-${item.kind}`}>
       <header>
@@ -117,8 +121,9 @@ function TimelineCard({ item }: { item: TimelineItem }) {
       </header>
       {item.imageUrl && <img className="asset-preview" src={item.imageUrl} alt={item.title} />}
       <p>{item.body || "正在解析内容…"}</p>
+      {item.provider && <p className="provider-line">{item.provider}</p>}
       {item.evidenceIds.length > 0 && (
-        <footer>{item.evidenceIds.map((id) => <code key={id}>{id}</code>)}</footer>
+        <footer>{item.evidenceIds.map((id) => <code key={id}>{visibleEvidenceId(id)}</code>)}</footer>
       )}
     </article>
   );
@@ -135,6 +140,8 @@ function Console({ initial, onExit }: { initial: Session; onExit: () => void }) 
   const [dingtalkRecording, setDingtalkRecording] = useState(false);
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [selectedAudioInput, setSelectedAudioInput] = useState("");
+  const [captureMode, setCaptureMode] = useState<CaptureMode>("microphone");
+  const [runtime, setRuntime] = useState<RuntimeHealth | null>(null);
   const capture = useRef<BrowserCapture | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
@@ -148,6 +155,10 @@ function Console({ initial, onExit }: { initial: Session; onExit: () => void }) 
         if (event.event_type === "session.stopping") {
           setSession((current) => ({ ...current, state: "stopping" }));
         }
+        if (event.event_type === "session.processing") {
+          setSession((current) => ({ ...current, state: "processing" }));
+          setCaptureStatus("录音已停止，真实模型任务仍在处理");
+        }
         if (event.event_type === "session.completed") {
           setSession((current) => ({ ...current, state: "completed" }));
           setCaptureStatus("课程会话已安全结束，模型队列已排空");
@@ -156,6 +167,21 @@ function Console({ initial, onExit }: { initial: Session; onExit: () => void }) 
       setStreamConnected,
     );
   }, [initial.id]);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const next = await api.health();
+        if (active) setRuntime(next);
+      } catch {
+        if (active) setRuntime(null);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 10_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
 
   useEffect(() => () => capture.current?.stop(), []);
 
@@ -184,36 +210,31 @@ function Console({ initial, onExit }: { initial: Session; onExit: () => void }) 
     setBusy(true);
     setNotice("");
     try {
-      if (session.demo_mode) {
-        await api.runDemo(session.id);
-        setSession({ ...session, state: "recording" });
-        setCaptureStatus("内置课程片段正在播放");
-      } else {
-        const started = await api.startSession(session.id);
-        setSession(started);
-        if (dingtalk?.configured) {
-          try {
-            await api.startDingtalk(session.id);
-            setDingtalkRecording(true);
-            setNotice("DingTalk A1 已同步录音；本地麦克风提供实时字幕");
-          } catch (caught) {
-            setNotice(
-              caught instanceof Error
-                ? `A1 启动失败，本地实时链路继续工作：${caught.message}`
-                : "A1 启动失败，本地实时链路继续工作",
-            );
-          }
+      const started = await api.startSession(session.id);
+      setSession(started);
+      if (dingtalk?.configured) {
+        try {
+          await api.startDingtalk(session.id);
+          setDingtalkRecording(true);
+          setNotice("DingTalk A1 已同步录音，浏览器链路提供实时字幕");
+        } catch (caught) {
+          setNotice(
+            caught instanceof Error
+              ? `A1 启动失败，浏览器实时链路继续工作：${caught.message}`
+              : "A1 启动失败，浏览器实时链路继续工作",
+          );
         }
-        const nextCapture = new BrowserCapture(
-          session.id,
-          setCaptureStatus,
-          selectedAudioInput || undefined,
-        );
-        capture.current = nextCapture;
-        await nextCapture.start();
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        setAudioInputs(devices.filter((device) => device.kind === "audioinput"));
       }
+      const nextCapture = new BrowserCapture(
+        session.id,
+        setCaptureStatus,
+        captureMode,
+        selectedAudioInput || undefined,
+      );
+      capture.current = nextCapture;
+      await nextCapture.start();
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setAudioInputs(devices.filter((device) => device.kind === "audioinput"));
     } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : "启动失败");
     } finally {
@@ -252,7 +273,7 @@ function Console({ initial, onExit }: { initial: Session; onExit: () => void }) 
     setNotice("正在结合最近字幕和材料生成讲解…");
     try {
       await api.explain(session.id);
-      setNotice("补充讲解已加入课程时间线");
+      setNotice("补充讲解已排队，将由本机 GPU 完成");
     } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : "讲解失败");
     } finally {
@@ -265,7 +286,7 @@ function Console({ initial, onExit }: { initial: Session; onExit: () => void }) 
     setNotice(`正在解析 ${file.name}…`);
     try {
       const result = await api.uploadAsset(session.id, file);
-      setNotice(`材料解析完成，共 ${result.page_ids.length} 页`);
+      setNotice(`材料已安全保存，解析任务 ${result.job_id.slice(0, 12)} 已排队`);
     } catch (caught) {
       setNotice(caught instanceof Error ? caught.message : "材料解析失败");
     } finally {
@@ -284,6 +305,7 @@ function Console({ initial, onExit }: { initial: Session; onExit: () => void }) 
   }
 
   const isRecording = ["recording", "degraded"].includes(session.state);
+  const visibleSessionId = `${session.id.slice(0, 16)}…${session.id.slice(-6)}`;
 
   return (
     <div className="console-shell">
@@ -303,47 +325,51 @@ function Console({ initial, onExit }: { initial: Session; onExit: () => void }) 
           <section className="control-card hero-control">
             <p className="section-kicker">课程控制</p>
             <div className="source-badge">
-              {session.demo_mode
-                ? "内置体验片段"
-                : dingtalk?.configured
-                  ? "DingTalk A1 + 本地实时链路"
-                  : "当前浏览器麦克风"}
+              {dingtalk?.configured ? "DingTalk A1 + 浏览器实时链路" : "浏览器实时收音"}
             </div>
-            {!session.demo_mode && (
-              <p className={`a1-status ${dingtalk?.configured ? "ready" : ""}`}>
-                {dingtalk?.configured
-                  ? dingtalkRecording
-                    ? "A1 正在同步录音"
-                    : "A1 已配置，将随课程启动"
-                  : "A1 等待企业凭据与设备验证"}
-              </p>
-            )}
+            <p className={`a1-status ${dingtalk?.configured ? "ready" : ""}`}>
+              {dingtalk?.configured
+                ? dingtalkRecording
+                  ? "A1 正在同步录音"
+                  : "A1 已配置，将随课程启动"
+                : "A1 等待企业凭据与设备验证"}
+            </p>
+            <div className={`gpu-status ${runtime?.worker?.online ? "online" : "offline"}`}>
+              <strong>{runtime?.worker?.online ? "本机 GPU 在线" : "本机 GPU 离线"}</strong>
+              <span>
+                {runtime?.worker?.online
+                  ? `${String(runtime.worker.model_metadata.asr_provider ?? "CUDA ASR")} · 队列 ${runtime.model_queue?.queued ?? 0}`
+                  : `音频正在安全保存，等待本机 GPU · 队列 ${runtime?.model_queue?.queued ?? 0}`}
+              </span>
+            </div>
             <p className="capture-status">{captureStatus}</p>
-            {!session.demo_mode && session.state === "ready" && (
-              <label className="device-picker">
-                收音设备
-                <select
-                  value={selectedAudioInput}
-                  onChange={(event) => setSelectedAudioInput(event.target.value)}
-                >
-                  <option value="">系统默认麦克风</option>
-                  {audioInputs.map((device, index) => (
-                    <option key={device.deviceId} value={device.deviceId}>
-                      {device.label || `麦克风 ${index + 1}`}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            {session.state === "ready" && (
+              <>
+                <label className="device-picker">
+                  收音来源
+                  <select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as CaptureMode)}>
+                    <option value="microphone">麦克风</option>
+                    <option value="screen">浏览器标签或系统共享音频</option>
+                  </select>
+                </label>
+                {captureMode === "microphone" && (
+                  <label className="device-picker">
+                    麦克风设备
+                    <select value={selectedAudioInput} onChange={(event) => setSelectedAudioInput(event.target.value)}>
+                      <option value="">系统默认麦克风</option>
+                      {audioInputs.map((device, index) => (
+                        <option key={device.deviceId} value={device.deviceId}>{device.label || `麦克风 ${index + 1}`}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </>
             )}
-            {!session.demo_mode && (
-              <div className="android-pairing" aria-label="Android 实机配对信息">
-                <span>Android 会话 ID</span>
-                <code>{session.id}</code>
-                <button className="text-button" type="button" onClick={() => void copySessionId()}>
-                  复制 ID
-                </button>
-              </div>
-            )}
+            <div className="android-pairing" aria-label="Android 实机配对信息">
+              <span>Android 会话 ID</span>
+              <code>{visibleSessionId}</code>
+              <button className="text-button" type="button" onClick={() => void copySessionId()}>复制 ID</button>
+            </div>
             {session.state === "ready" && (
               <button className="primary-button" disabled={busy} onClick={() => void begin()}>
                 开始理解

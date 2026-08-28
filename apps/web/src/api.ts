@@ -16,9 +16,18 @@ export interface RuntimeHealth {
   deployment_mode: "local" | "server";
   processing_location: string;
   worker: {
-    status?: string;
-    asr_available?: boolean;
-    ollama_available?: boolean;
+    id: string;
+    online: boolean;
+    capabilities: string[];
+    model_metadata: Record<string, unknown>;
+    active_job_id: string | null;
+    last_seen_at: string;
+  } | null;
+  model_queue: {
+    queued: number;
+    leased: number;
+    completed: number;
+    failed: number;
   } | null;
 }
 
@@ -56,12 +65,8 @@ export const api = {
     checked<Session>(fetch(`/api/v1/sessions/${sessionId}/start`, { method: "POST" })),
   stopSession: (sessionId: string) =>
     checked<Session>(fetch(`/api/v1/sessions/${sessionId}/stop`, { method: "POST" })),
-  runDemo: (sessionId: string) =>
-    checked<{ started: boolean }>(
-      fetch(`/api/v1/sessions/${sessionId}/demo`, { method: "POST" }),
-    ),
   explain: (sessionId: string) =>
-    checked<{ event: EventEnvelope }>(
+    checked<{ job_id: string; status: string }>(
       fetch(`/api/v1/sessions/${sessionId}/explain`, { method: "POST" }),
     ),
   dingtalkCapabilities: (sessionId: string) =>
@@ -79,7 +84,7 @@ export const api = {
   uploadAsset: (sessionId: string, file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return checked<{ asset_id: string; page_ids: string[] }>(
+    return checked<{ asset_id: string; job_id: string; page_ids: string[] }>(
       fetch(`/api/v1/sessions/${sessionId}/assets`, { method: "POST", body: form }),
     );
   },

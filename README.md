@@ -1,82 +1,127 @@
+<div align="center">
+
 # AIALRA-LIVE-TRANSLATE
 
-> 面向课程与讲座的实时理解工作台：浏览器直接收音，持续生成原文、中文译文、补充讲解和课件引用。
+浏览器直接收音，由受信任的本机 GPU 持续生成课程字幕、中文译文和证据可回溯的补充讲解
 
 [English](README.en.md) · [部署说明](deploy/README.md) · [隐私边界](docs/PRIVACY_BOUNDARIES.md) · [验证记录](docs/VALIDATION_REPORT.md)
 
-当前状态：可运行的单用户纵向切片。浏览器、Android 和 DingTalk A1 是不同采集入口；浏览器是当前最方便的主入口，A1 保留为高质量同步录音与会后补偿链路。
+`Public beta` · `Local first` · `RTX CUDA verified` · `中文 / English`
 
-![使用合成课程数据展示的实时字幕、中文译文和讲解时间线](docs/assets/live-console-demo.png)
+![真实 RTX GPU 链路处理公开合成课程音频后的字幕与译文时间线](docs/assets/readme/real-gpu-timeline.png)
 
-图 1. 脱敏后的内置课程体验，不包含真实录音、账户、域名或课件。
+图 1　公开合成课程音频经 `faster-whisper:small@cuda` 和 `ollama:qwen2.5:14b-instruct@cuda` 处理后的真实页面，标识符已缩略，图片元数据已移除
+
+</div>
 
 ## 它解决什么问题
 
-听英文课程时，用户不应同时承担听写、翻译、生词查询、课件整理和笔记归档。AIALRA-LIVE-TRANSLATE 把这些动作放进同一条课程时间线：
+听英文课程时，用户不应同时承担听写、翻译、生词查询、课件整理和笔记归档
 
-- 电脑或手机无需安装应用，打开受保护的 HTTPS 页面即可选择麦克风；
-- 音频块带序号发送，服务器完成持久化后才返回确认；
-- 稳定字幕、中文译文和解释卡采用追加式事件，旧结果不会被静默覆盖；
-- PPT、PDF、DOCX、图片与文本进入下一轮讲解，并保留字幕或页码证据；
-- 录音停止优先于模型任务，系统会排空已经接收的任务后完成会话；
-- 第三方模型出口默认关闭，生产入口由 Authentik 保护。
+AIALRA 把这些动作放进同一条课程时间线：
 
-本项目不是隐蔽录音工具，也不保证代替教师许可、学校政策或适用法律。真实录音前必须确认已获得许可。
+- 电脑或手机浏览器直接采集麦克风、标签页或系统共享音频
+- 音频块先持久化再 ACK，模型离线不会阻塞录音和停止
+- VPS 只负责入口、身份验证、持久队列和事件，RTX GPU Agent 主动领取任务
+- 稳定字幕、译文、讲解和人工修订采用追加式事件，旧结果不会被静默覆盖
+- PPT、PDF、DOCX、图片和文本进入后续讲解，并保留字幕或页码证据
+- DingTalk A1 可作为同步录音和会后补偿来源，公开接口尚未证明连续第三方 PCM 能力
 
-## 运行结构
+本项目不是隐蔽录音工具，真实录音前必须确认已经获得许可，并遵守课程、学校和适用法律要求
+
+## 已验证的运行结构
 
 ```mermaid
 flowchart TD
-  Browser[电脑或手机浏览器] -->|HTTPS + WSS| Edge[Cloudflare 代理]
-  Android[Android 长时采集] -->|WSS + ACK| Edge
+  Browser[电脑或手机浏览器] -->|HTTPS + WSS| Auth[Authentik 保护入口]
+  Android[Android 前台录音] -->|WSS + ACK| Auth
   A1[DingTalk A1] -->|同步录制与会后补偿| Core
-  Edge --> Auth[Authentik 鉴权]
   Auth --> Core[Rust 音频与事件核心]
-  Core --> Store[(SQLite + 内容寻址文件)]
-  Core --> Worker[Python 模型与文档 Worker]
-  Worker --> ASR[faster-whisper]
-  Worker --> LLM[本地翻译与讲解模型]
+  Core --> Store[(SQLite WAL + 内容寻址文件)]
+  Core --> Queue[(持久模型队列与租约)]
+  Agent[Windows RTX GPU Agent] -->|Tailscale 私有领取| Queue
+  Agent --> ASR[faster-whisper CUDA]
+  Agent --> LLM[Ollama 14B CUDA]
 ```
 
-图 2. 浏览器音频先经受保护入口到达核心服务，ACK、落盘和停止控制不依赖模型是否可用。
+音频接收、落盘、ACK 和停止控制不等待模型，GPU 离线时任务保持排队，不生成 identity 或 deterministic 占位结果
 
-## 第一次运行
+## 第一次本地运行
 
-前置条件：Windows、Rust 1.95、Node.js 22、pnpm 10、Python 3.12、uv；需要真实本地翻译时还需 Ollama。
+前置条件：Windows、Rust 1.95、Node.js 22、pnpm 10、Python 3.12 或 3.13、uv、Ollama 和 NVIDIA CUDA
+
+先准备本地模型：
 
 ```powershell
-Copy-Item .env.example .env
+ollama pull qwen2.5:14b-instruct
+```
+
+再启动完整本地链路：
+
+```powershell
 ./scripts/start-local.ps1
 ```
 
-打开脚本给出的本地地址后：
+脚本会构建网页、启动 Rust Core、模型 Worker 和双通道 GPU Agent，并只打开一个课程工作台页面
 
-1. 保留“内置课程片段”可在不启用麦克风时查看完整时间线；
-2. 取消体验片段并勾选录音许可，可选择电脑、USB 麦克风或系统默认输入；
-3. 点击“开始理解”，浏览器显示红色录音状态和服务器确认状态；
-4. 点击“停止并保存”，等待界面显示会话完成。
+首次可观察结果：
 
-浏览器实录必须位于 `localhost` 或 HTTPS 安全环境。远程部署使用同源 HTTPS、SSE 和 WSS，不需要在网页中填写服务器地址。
+1. 勾选“我已获得课程录音许可”
+2. 选择麦克风或浏览器标签／系统共享音频
+3. 点击“开始理解”，确认红色录音状态和音频 ACK 状态
+4. 朗读或播放公开测试材料，等待字幕和译文显示实际 CUDA Provider
+5. 点击“停止并保存”，界面会区分“录音已停止”和“模型处理完成”
+
+浏览器实录需要 `localhost` 或 HTTPS 安全环境
 
 ## 当前能力
 
 | 能力 | 当前状态 | 证据边界 |
 |---|---|---|
-| 浏览器麦克风 | 可用 | 16 kHz 单声道 PCM、序号、ACK、断线重发；桌面长时测试仍待完成 |
-| VPS 展示 | 部署包已具备 | Compose、CPU ASR、本地小模型、Nginx、Authentik 与 Cloudflare DNS 自动化 |
-| Android | 已完成真机短测 | 前台服务、先落盘、ACK 后删除、通知栏停止；尚未完成 90 分钟测试 |
-| DingTalk A1 | 控制与补偿链路 | 公开接口未证明第三方连续 PCM 或增量逐字稿能力 |
-| 实时字幕 | 可用 | 本地 GPU 已验证；VPS CPU 配置需以线上基准为准 |
-| 中文翻译与讲解 | 可用 | Ollama 可用时走本地模型，失败时保留原文和证据关系 |
-| 课程材料 | 可用 | 支持 PPTX、PDF、DOCX、图片和文本；高级 OCR/VLM 仍在规划 |
+| 浏览器收音 | 可用 | AudioWorklet、16 kHz 单声道 PCM、序号、ACK、IndexedDB 未确认块恢复 |
+| 私有 GPU 链路 | 可用 | VPS 持久队列、60 秒租约、20 秒续租、Tailscale 私有 Gateway、DPAPI 令牌 |
+| 实时字幕 | 可用 | `faster-whisper small + CUDA float16`，RTX 4080 已验证 |
+| 中文翻译与讲解 | 可用 | `qwen2.5:14b-instruct` 本地 Ollama，结果必须证明 `@cuda` |
+| 课程材料 | 可用 | PPTX、PDF、DOCX、图片和文本，复杂 OCR 与 VLM 仍在规划 |
+| Android | 短时真机通过 | 前台服务、先落盘、ACK 后删除，90 分钟与锁屏门禁未完成 |
+| DingTalk A1 | 控制与补偿链路 | 公开资料未证明第三方连续 PCM 或增量逐字稿能力 |
+| 摄像头与自动截屏 | 规划中 | 默认关闭，尚未进入生产路径 |
 
-## 部署选择
+## 真实门禁结果
 
-- 本机模式：模型与数据都在使用者电脑上，适合最高隐私和 GPU 实时处理。
-- VPS 展示模式：浏览器随处可用，VPS 负责入口、持久化、CPU ASR 和轻量模型，适合当前演示。
-- 混合生产模式：VPS 永远负责接收、ACK 和恢复；受信任的 GPU Worker 通过私有出站连接领取模型任务，适合长课和更高质量模型。
+测试条件：2026-08-27，Windows，RTX 4080 16 GB，公开合成英语课程音频，`small` ASR 和本地 14B 模型
 
-VPS 没有 GPU 时，不应把 CPU 展示结果写成生产性能结论。完整操作顺序、回滚边界和资源说明见 [VPS 部署说明](deploy/README.md)。
+| 门禁 | 结果 |
+|---|---:|
+| 本机完整链路 | 21／21 音频 ACK，4 字幕，4 译文，1 材料页，1 讲解卡，14.2 秒完成 |
+| 本机 ASR 最慢窗口 | 1.89 秒 |
+| 本机译文最慢段 | 0.87 秒 |
+| 本机讲解 | 7.51 秒 |
+| GPU 峰值观察 | 约 12.2 GB 显存，无 OOM |
+| VPS → Tailscale → RTX 完整链路 | 21／21 音频 ACK，4 字幕，4 译文，1 材料页，1 讲解卡，35.0 秒完成 |
+| GPU 离线 | 21／21 音频 ACK，0 假字幕，5 个任务持久排队 |
+| GPU 恢复 | 4 字幕，4 译文，重复字幕 0 |
+| Core 带队列重启 | 5 个任务和 `processing` 状态均保留，恢复后重复字幕 0 |
+| 浏览器页面 | 桌面、暗色、390 px 窄屏通过，控制台错误与警告 0，横向溢出 0 |
+
+这些数字只描述列出的合成样本和硬件，不代表所有口音、课堂噪声或长课程性能
+
+复现入口见 [验证记录](docs/VALIDATION_REPORT.md) 和 `tools/e2e_smoke.mjs`
+
+## 私有部署
+
+混合部署由 VPS 持久接收音频，本机 GPU Agent 主动领取任务，VPS 不访问家庭公网地址
+
+初始化 Windows DPAPI 令牌并安装登录自启动：
+
+```powershell
+./scripts/initialize-gpu-agent-secret.ps1
+./scripts/install-gpu-agent.ps1 -GatewayUrl "http://worker-gateway.example.invalid"
+```
+
+VPS 只保存令牌 SHA-256 摘要，公开 Nginx 对 `/internal/` 固定拒绝，Worker Gateway 只绑定私有网络接口
+
+完整部署和回滚边界见 [部署说明](deploy/README.md)
 
 ## 验证
 
@@ -87,31 +132,33 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
-./.venv/Scripts/python.exe -m pytest
+uv run ruff check workers tools
+uv run mypy workers tools
+uv run pytest
 ```
-
-当前自动检查覆盖 Rust 10 项、Python 6 项、网页 4 项、DingTalk 小程序 1 项和 Android 1 项。具体运行日期、环境与未通过门禁见 [验证记录](docs/VALIDATION_REPORT.md)。
 
 ## 数据与安全
 
-- 录音、逐字稿、课件、令牌和临时下载地址禁止进入 Git、测试快照和普通日志；
-- 生产服务只绑定 VPS 回环端口，由 Nginx 覆盖身份头并接入 Authentik；
-- 录音、字幕和材料保存在独立私有数据目录，代码回滚不会删除用户数据；
-- 云端文本与图片出口默认关闭，启用时仍需服务端策略和会话级授权；
-- 仓库示例只使用保留域名和空凭据，不提供共享演示账号。
+- 录音、逐字稿、课件、令牌、私有地址和临时下载链接禁止进入 Git、测试快照和普通日志
+- 真实录音必须先记录许可确认，并持续显示录音状态和停止入口
+- 本地模式默认关闭云端文本与图片出口
+- 原始数据位于独立私有目录，代码回滚不会删除用户会话
+- 示例只使用合成内容、保留域名和空凭据
 
-发现安全问题时，请通过仓库维护者的私密渠道报告，不要在公开 Issue 中附带录音、令牌、真实域名或服务器信息。
+发现安全问题时，请使用 GitHub 的私密安全报告，不要在公开 Issue 附带录音、令牌、真实地址或服务器信息
 
 ## 项目目录
 
-- `crates/`：Rust 领域状态、事件、持久化、音频接收与本地 API；
-- `workers/`：ASR、翻译、讲解和材料解析；
-- `apps/web/`：浏览器课程控制台；
-- `apps/android/`：Android 长时采集客户端；
-- `apps/dingtalk-miniapp/`：DingTalk A1 控制与前台能力探针；
-- `deploy/`：可复现的 VPS、Nginx、Authentik 和 Cloudflare 配置；
-- `docs/`：决策、研究、限制、变更和验证记录。
+- `crates/`：Rust 状态机、事件、持久队列、音频接收和 API
+- `workers/`：ASR、翻译、讲解、材料解析和 GPU Agent
+- `apps/web/`：黑白单页课程工作台
+- `apps/android/`：Android 长时录音客户端
+- `apps/dingtalk-miniapp/`：DingTalk A1 控制与前台能力探针
+- `deploy/`：VPS、Nginx、Authentik 和私有 Gateway 配置
+- `docs/`：决策、研究、隐私、限制、变更和验证记录
 
 ## 支持与许可
 
-问题和功能建议通过本仓库 Issue 跟踪。代码当前为内部项目，仓库未提供开源许可证；未经权利人明确授权，不授予复制、分发或商用许可。
+问题和功能建议通过本仓库 Issue 跟踪
+
+本仓库当前没有 `LICENSE` 文件，除适用法律另有规定外，权利人未授予复制、分发、修改或商用许可
