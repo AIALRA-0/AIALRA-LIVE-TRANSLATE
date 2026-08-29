@@ -1,19 +1,16 @@
 //! Versioned HTTP and Server-Sent Events endpoints for the desktop UI.
 
 use crate::app::{ApiError, AppState};
-use crate::audio::flush_session_buffers;
 use crate::explanation::enqueue_explanation;
-use crate::jobs::finish_session_after_stop;
-use aialra_core_domain::SessionState;
-use aialra_event_store::{AssetRecord, NewModelJob, NewSession, SessionRecord};
+use crate::identity::CurrentUser;
+use aialra_event_store::{AssetRecord, NewModelJob, SessionRecord};
 use axum::body::Body;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Extension, Multipart, Path, State};
 use axum::http::{HeaderValue, header};
 use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{Json, response::IntoResponse};
 use chrono::Utc;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::time::Duration;
@@ -46,86 +43,20 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CreateSessionRequest {
-    pub title: String,
-    pub source_language: String,
-    pub target_language: String,
-    pub consent_confirmed: bool,
-    #[serde(default)]
-    pub demo_mode: bool,
-}
-
 pub async fn create_session(
-    State(state): State<AppState>,
-    Json(request): Json<CreateSessionRequest>,
+    State(_state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
 ) -> Result<Json<SessionRecord>, ApiError> {
-    if request.title.trim().is_empty() {
-        return Err(ApiError::bad_request("session title is required"));
-    }
-    if !request.consent_confirmed {
-        return Err(ApiError::bad_request("recording consent is required"));
-    }
-    if request.demo_mode {
-        return Err(ApiError::bad_request(
-            "demo mode is not available in production",
-        ));
-    }
-
-    // UUIDv7 IDs are stable across audio, DingTalk businessOrder, assets, and exports.
-    let session_id = format!("session_{}", Uuid::now_v7().simple());
-    let session = NewSession {
-        id: session_id.clone(),
-        title: request.title.trim().to_owned(),
-        source_language: request.source_language,
-        target_language: request.target_language,
-        privacy_mode: "local_only".to_owned(),
-        consent_confirmed: request.consent_confirmed,
-        demo_mode: false,
-    };
-    state.store.create_session(&session)?;
-    let correlation = format!("create_{}", Uuid::now_v7().simple());
-    state.emit(
-        &session_id,
-        "core",
-        "consent.recorded",
-        0,
-        &correlation,
-        None,
-        json!({
-            "confirmed": request.consent_confirmed,
-            "demo_mode": false,
-            "privacy_mode": "local_only"
-        }),
-    )?;
-    state.emit(
-        &session_id,
-        "core",
-        "session.created",
-        0,
-        &correlation,
-        None,
-        json!({"title": session.title}),
-    )?;
-    let ready = state
-        .store
-        .transition_session(&session_id, SessionState::Ready)?;
-    state.emit(
-        &session_id,
-        "core",
-        "session.ready",
-        0,
-        &correlation,
-        None,
-        json!({}),
-    )?;
-    Ok(Json(ready))
+    Err(ApiError::conflict(
+        "project-scoped session creation is required",
+    ))
 }
 
 pub async fn list_sessions(
     State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<Vec<SessionRecord>>, ApiError> {
-    Ok(Json(state.store.list_sessions()?))
+    Ok(Json(state.store.list_sessions_for_owner(&user.0)?))
 }
 
 pub async fn get_session(
@@ -140,63 +71,17 @@ pub async fn get_session(
 }
 
 pub async fn start_session(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    State(_state): State<AppState>,
+    Path(_session_id): Path<String>,
 ) -> Result<Json<SessionRecord>, ApiError> {
-    let record = state
-        .store
-        .transition_session(&session_id, SessionState::Recording)?;
-    state.emit(
-        &session_id,
-        "core",
-        "session.recording.started",
-        0,
-        &format!("start_{}", Uuid::now_v7().simple()),
-        None,
-        json!({"visible_recording_required": true}),
-    )?;
-    Ok(Json(record))
+    Err(ApiError::conflict("recording lease is required"))
 }
 
 pub async fn stop_session(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
+    State(_state): State<AppState>,
+    Path(_session_id): Path<String>,
 ) -> Result<Json<SessionRecord>, ApiError> {
-    let correlation = format!("stop_{}", Uuid::now_v7().simple());
-    let stopping = state
-        .store
-        .transition_session(&session_id, SessionState::Stopping)?;
-    state.emit(
-        &session_id,
-        "core",
-        "session.stopping",
-        0,
-        &correlation,
-        None,
-        json!({}),
-    )?;
-    let sealed_tail_windows = flush_session_buffers(&state, &session_id)?;
-    let processing = state
-        .store
-        .transition_session(&session_id, SessionState::Processing)?;
-    let queue = state.store.model_queue_counts(Some(&session_id))?;
-    state.emit(
-        &session_id,
-        "core",
-        "session.processing",
-        0,
-        &correlation,
-        None,
-        json!({
-            "sealed_tail_windows": sealed_tail_windows,
-            "queued_jobs": queue.queued,
-            "leased_jobs": queue.leased
-        }),
-    )?;
-    finish_session_after_stop(&state, &session_id)?;
-    let current = state.store.get_session(&session_id)?.unwrap_or(processing);
-    let _ = stopping;
-    Ok(Json(current))
+    Err(ApiError::conflict("recording lease is required"))
 }
 
 pub async fn list_events(

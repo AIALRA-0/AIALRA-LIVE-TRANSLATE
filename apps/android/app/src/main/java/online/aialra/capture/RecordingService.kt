@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -31,11 +32,13 @@ import java.nio.ByteOrder
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
 
 /** RecordingService captures mono PCM, persists each frame, and deletes it only after server ACK. */
 class RecordingService : Service() {
     private val running = AtomicBoolean(false)
-    private val remoteSessionStarted = AtomicBoolean(false) // Remote state prevents the stop request from targeting an unstarted session.
+    private val leaseActive = AtomicBoolean(false)
+    private val stopRequested = AtomicBoolean(false)
     private val networkClient = OkHttpClient.Builder()
         .callTimeout(5, TimeUnit.SECONDS) // A blocked USB or Wi-Fi control call cannot keep a foreground service alive indefinitely.
         .pingInterval(15, TimeUnit.SECONDS)
@@ -46,30 +49,46 @@ class RecordingService : Service() {
     private var socket: WebSocket? = null
     private var captureThread: Thread? = null
     private lateinit var sessionId: String
+    private lateinit var projectId: String
+    private lateinit var deviceId: String
+    private var leaseToken: String = ""
+    private var leaseGeneration: Long = 0
     private lateinit var controlBaseUrl: String // HTTP control uses the same trusted local route as the WebSocket audio connection.
     private lateinit var websocketUrl: String
+    private lateinit var sessionCacheDirectory: File
     private lateinit var cacheDirectory: File
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_GRACEFUL_STOP) {
+            beginGracefulStop()
+            return START_NOT_STICKY
+        }
         // Missing extras stop safely before microphone access or network activity begins.
         sessionId = intent?.getStringExtra(EXTRA_SESSION_ID).orEmpty()
+        projectId = intent?.getStringExtra(EXTRA_PROJECT_ID).orEmpty()
         val serverBase = intent?.getStringExtra(EXTRA_SERVER_URL).orEmpty().trimEnd('/')
-        if (sessionId.isBlank() || !serverBase.startsWith("ws")) {
+        if (projectId.isBlank() || sessionId.isBlank() || !serverBase.startsWith("ws")) {
             stopSelf()
             return START_NOT_STICKY
         }
         controlBaseUrl = serverBase // Convert the audio route into the matching local HTTP control route.
             .replaceFirst("wss://", "https://")
             .replaceFirst("ws://", "http://")
-        websocketUrl = "$serverBase/api/v1/sessions/$sessionId/sources/android/audio"
-        cacheDirectory = File(getExternalFilesDir("audio-cache"), safeSessionId(sessionId))
-        cacheDirectory.mkdirs()
+        websocketUrl = serverBase
+        val leasePreferences = getSharedPreferences("recording-lease", MODE_PRIVATE)
+        deviceId = leasePreferences.getString("deviceId", null) ?: "android-${UUID.randomUUID()}".also {
+            leasePreferences.edit().putString("deviceId", it).apply()
+        }
+        leaseToken = leasePreferences.getString("leaseToken-$projectId", "").orEmpty()
+        sessionCacheDirectory = File(getExternalFilesDir("audio-cache"), safeSessionId(sessionId))
+        sessionCacheDirectory.mkdirs()
         setCaptureActive(true)
+        stopRequested.set(false)
         startVisibleNotification()
         if (running.compareAndSet(false, true)) {
-            startRemoteSessionThenCapture()
+            restoreOrAcquireLeaseThenCapture()
         }
         return START_REDELIVER_INTENT
     }
@@ -82,8 +101,10 @@ class RecordingService : Service() {
         recorder?.release()
         recorder = null
         captureThread?.join(1_500)
+        if (this::cacheDirectory.isInitialized && pendingFiles().isEmpty() && leaseActive.get()) {
+            if (requestRemoteSessionStop()) leaseActive.set(false)
+        }
         socket?.close(1000, "recording stopped")
-        if (remoteSessionStarted.get()) requestRemoteSessionStop() // Only a server-confirmed recording session receives a drain request.
         reconnectExecutor.shutdownNow()
         networkClient.dispatcher.executorService.shutdown()
         super.onDestroy()
@@ -131,6 +152,37 @@ class RecordingService : Service() {
         }
     }
 
+    private fun beginGracefulStop() {
+        if (!running.get() || !stopRequested.compareAndSet(false, true)) return
+        recorder?.runCatching { stop() }
+        recorder?.release()
+        recorder = null
+        captureThread?.join(1_500)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(
+            NOTIFICATION_ID,
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setContentTitle("AIALRA 正在安全停止")
+                .setContentText("正在补传并确认最后的音频块")
+                .setOngoing(true)
+                .build(),
+        )
+        Thread({
+            while (running.get() && stopRequested.get()) {
+                sendPending()
+                if (pendingFiles().isEmpty() && requestRemoteSessionStop()) {
+                    leaseActive.set(false)
+                    running.set(false)
+                    setCaptureActive(false)
+                    stopSelf()
+                    return@Thread
+                }
+                Thread.sleep(250)
+            }
+        }, "aialra-audio-drain").start()
+    }
+
     private fun startAudioCapture() {
         // The service validates permission again because Android may recreate it without the activity.
         if (ContextCompat.checkSelfPermission(
@@ -162,45 +214,78 @@ class RecordingService : Service() {
         captureThread = Thread({ captureLoop(bufferBytes) }, "aialra-audio-capture").apply { start() }
     }
 
-    private fun startRemoteSessionThenCapture() {
-        // The core must enter recording state before it accepts a durable Android audio frame.
+    private fun restoreOrAcquireLeaseThenCapture() {
+        if (leaseToken.isNotBlank()) {
+            requestLease("renew", leaseToken) { restored ->
+                if (restored) beginLeasedCapture() else acquireLease()
+            }
+        } else {
+            acquireLease()
+        }
+    }
+
+    private fun acquireLease() {
+        requestLease("acquire", null) { acquired -> if (acquired) beginLeasedCapture() else stopSelf() }
+    }
+
+    private fun requestLease(action: String, token: String?, completed: (Boolean) -> Unit) {
+        val body = JSONObject().put("device_id", deviceId).apply {
+            if (token != null) put("lease_token", token)
+        }.toString().toRequestBody("application/json".toMediaType())
         val request = Request.Builder()
-            .url("$controlBaseUrl/api/v1/sessions/$sessionId/start")
-            .post(ByteArray(0).toRequestBody(null))
+            .url("$controlBaseUrl/api/v1/projects/$projectId/sessions/$sessionId/recording/$action")
+            .post(body)
             .build()
         networkClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                stopSelf()
+                completed(action == "renew" && leaseActive.get())
             }
 
             override fun onResponse(call: okhttp3.Call, response: Response) {
                 response.use {
-                    if (!it.isSuccessful) {
-                        stopSelf()
-                        return
-                    }
+                    if (!it.isSuccessful) return completed(false)
+                    val payload = JSONObject(it.body?.string().orEmpty())
+                    if (action == "acquire") leaseToken = payload.optString("lease_token")
+                    leaseGeneration = payload.optLong("generation", leaseGeneration)
                 }
-                remoteSessionStarted.set(true)
-                if (!running.get()) return
-                connectSocket()
-                startAudioCapture()
+                if (leaseToken.isBlank()) return completed(false)
+                cacheDirectory = File(sessionCacheDirectory, "generation-$leaseGeneration")
+                cacheDirectory.mkdirs()
+                getSharedPreferences("recording-lease", MODE_PRIVATE).edit().putString("leaseToken-$projectId", leaseToken).apply()
+                completed(true)
             }
         })
     }
 
-    private fun requestRemoteSessionStop() {
+    private fun beginLeasedCapture() {
+        leaseActive.set(true)
+        if (!running.get()) return
+        connectSocket()
+        startAudioCapture()
+        reconnectExecutor.scheduleAtFixedRate({
+            if (running.get()) requestLease("renew", leaseToken) { renewed -> if (!renewed) stopSelf() }
+        }, 10, 10, TimeUnit.SECONDS)
+    }
+
+    private fun requestRemoteSessionStop(): Boolean {
         // The bounded stop request tells the core to drain accepted model work after phone capture ends.
         val request = Request.Builder()
-            .url("$controlBaseUrl/api/v1/sessions/$sessionId/stop")
-            .post(ByteArray(0).toRequestBody(null))
+            .url("$controlBaseUrl/api/v1/projects/$projectId/sessions/$sessionId/recording/stop")
+            .post(JSONObject().put("device_id", deviceId).put("lease_token", leaseToken).toString().toRequestBody("application/json".toMediaType()))
             .build()
-        runCatching { networkClient.newCall(request).execute().close() }
+        val stopped = runCatching {
+            networkClient.newCall(request).execute().use { response -> response.isSuccessful }
+        }.getOrDefault(false)
+        if (stopped) {
+            getSharedPreferences("recording-lease", MODE_PRIVATE).edit().remove("leaseToken-$projectId").apply()
+        }
+        return stopped
     }
 
     private fun captureLoop(bufferBytes: Int) {
         // Each successful read becomes an atomic disk frame before any WebSocket send attempt.
         val shortBuffer = ShortArray(bufferBytes / 2)
-        while (running.get()) {
+        while (running.get() && !stopRequested.get()) {
             val read = recorder?.read(shortBuffer, 0, shortBuffer.size) ?: break
             if (read <= 0) continue
             val pcm = ByteBuffer.allocate(read * 2).order(ByteOrder.LITTLE_ENDIAN)
@@ -223,7 +308,9 @@ class RecordingService : Service() {
         // A reconnect clears in-flight markers because every stored frame is safe to resend idempotently.
         if (!running.get()) return
         inFlight.clear()
-        val request = Request.Builder().url(websocketUrl).build()
+        val request = Request.Builder().url("$websocketUrl/api/v1/sessions/$sessionId/sources/android-g$leaseGeneration/audio")
+            .header("Sec-WebSocket-Protocol", "aialra.audio.v1, lease.$leaseToken")
+            .build()
         socket = networkClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 sendPending()
@@ -275,7 +362,7 @@ class RecordingService : Service() {
     private fun nextSequence(): Long {
         // A committed preference advances before capture, preventing sequence reuse after a process crash.
         val preferences = getSharedPreferences("capture-sequence", MODE_PRIVATE)
-        val key = "sequence-$sessionId"
+        val key = "sequence-$sessionId-generation-$leaseGeneration"
         val next = preferences.getLong(key, 0L) + 1L
         preferences.edit().putLong(key, next).commit()
         return next
@@ -294,7 +381,9 @@ class RecordingService : Service() {
 
     companion object {
         const val EXTRA_SERVER_URL = "serverUrl"
+        const val EXTRA_PROJECT_ID = "projectId"
         const val EXTRA_SESSION_ID = "sessionId"
+        const val ACTION_GRACEFUL_STOP = "online.aialra.capture.action.GRACEFUL_STOP"
         private const val SAMPLE_RATE = 16_000
         private const val CHANNEL_ID = "aialra-recording"
         private const val NOTIFICATION_ID = 4201

@@ -3,7 +3,7 @@
 ## 1 当前运行组合
 
 - ASR：配置文件设定 `faster-whisper small` 处理英语 4 秒稳定窗口，模型由 faster-whisper 首次加载到 Hugging Face 缓存
-- 翻译和讲解：本机已有的 `qwen2.5:14b-instruct` 通过 Ollama 提供中文翻译和证据讲解
+- 翻译和讲解：`qwen2.5:7b-instruct` 通过 Ollama 提供中文翻译和证据讲解，14B 基准因长任务阻塞实时翻译而未成为默认值
 - 失败回退：项目源码中的确定性规则保留原文和证据关系
 
 ## 2 运行库

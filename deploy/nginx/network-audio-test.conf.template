@@ -1,0 +1,28 @@
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __TEST_AUDIO_HOST__;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name __TEST_AUDIO_HOST__;
+
+    ssl_certificate /etc/letsencrypt/live/__TEST_AUDIO_HOST__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__TEST_AUDIO_HOST__/privkey.pem;
+
+    location = /fixture/course.wav {
+        auth_basic "AIALRA controlled audio test";
+        auth_basic_user_file __AUTH_FILE__;
+        alias __FIXTURE_FILE__;
+        default_type audio/wav;
+        add_header Cache-Control "private, no-store" always;
+        limit_rate 512k;
+    }
+
+    location / {
+        return 404;
+    }
+}

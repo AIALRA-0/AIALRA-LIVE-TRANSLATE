@@ -13,6 +13,17 @@ services:
       AIALRA_PROCESSING_LOCATION: 本机 RTX 4080 经私有通道处理
       AIALRA_WORKER_TOKEN_SHA256: ${AIALRA_WORKER_TOKEN_SHA256:?worker token hash is required}
       AIALRA_EXPLAIN_EVERY_SEGMENTS: ${AIALRA_EXPLAIN_EVERY_SEGMENTS:-5}
+      AIALRA_LEGACY_OWNER_SUBJECT: ${AIALRA_LEGACY_OWNER_SUBJECT:-}
+      AIALRA_READWEAVE_BASE_URL: ${AIALRA_READWEAVE_BASE_URL:-}
+      AIALRA_READWEAVE_ETAPI_TOKEN: ${AIALRA_READWEAVE_ETAPI_TOKEN:-}
+      AIALRA_READWEAVE_ROOT_NOTE_ID: ${AIALRA_READWEAVE_ROOT_NOTE_ID:-root}
+      AIALRA_READWEAVE_PUBLIC_URL: ${AIALRA_READWEAVE_PUBLIC_URL:-}
+      # Bound glibc arena retention while long ReadWeave projections repeatedly build growing documents.
+      MALLOC_ARENA_MAX: "1"
+      # Browser PCM frames are roughly 32 KiB. Mapping allocations above 16 KiB keeps repeated
+      # WebSocket frame buffers out of the long-lived general heap and returns them on release.
+      MALLOC_MMAP_THRESHOLD_: "16384"
+      MALLOC_TRIM_THRESHOLD_: "16384"
       LOCAL_ONLY: "true"
       CLOUD_TEXT_ALLOWED: "false"
       CLOUD_MULTIMODAL_ALLOWED: "false"
@@ -26,7 +37,7 @@ services:
     ports:
       - 127.0.0.1:${AIALRA_PORT:-13150}:8787
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/api/v1/health"]
+      test: ["CMD", "curl", "--fail", "--silent", "-H", "X-authentik-uid: deployment-health", "http://127.0.0.1:8787/api/v1/health"]
       interval: 30s
       timeout: 5s
       retries: 3

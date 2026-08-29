@@ -107,13 +107,19 @@ ln -sfn "$release_dir" "$current_link"
 docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" build
 docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" up -d --remove-orphans
 
+# ReadWeave remains independently deployable while ETAPI stays on the private application network
+readweave_container="${AIALRA_READWEAVE_CONTAINER:-readweave}"
+if docker inspect "$readweave_container" >/dev/null 2>&1; then
+  docker network connect aialra-live-translate_default "$readweave_container" 2>/dev/null || true
+fi
+
 for _ in {1..60}; do
-  if curl -fsS --max-time 5 "http://127.0.0.1:$service_port/api/v1/health" >/dev/null; then
+  if curl -fsS --max-time 5 -H 'X-authentik-uid: deployment-health' "http://127.0.0.1:$service_port/api/v1/health" >/dev/null; then
     break
   fi
   sleep 2
 done
-curl -fsS --max-time 5 "http://127.0.0.1:$service_port/api/v1/health" >/dev/null
+curl -fsS --max-time 5 -H 'X-authentik-uid: deployment-health' "http://127.0.0.1:$service_port/api/v1/health" >/dev/null
 
 apps_stage="$(mktemp "$backup_dir/.apps.XXXXXX")"
 jq \

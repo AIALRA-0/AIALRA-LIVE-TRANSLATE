@@ -3,9 +3,9 @@
     <!-- A light native theme keeps permission dialogs and status controls readable. -->
     <style name="Theme.Aialra" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">@color/forest</item>
-        <item name="android:navigationBarColor">@color/forest</item>
-        <item name="android:statusBarColor">@color/forest</item>
+        <item name="android:colorAccent">@color/ink</item>
+        <item name="android:navigationBarColor">@color/ink</item>
+        <item name="android:statusBarColor">@color/ink</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

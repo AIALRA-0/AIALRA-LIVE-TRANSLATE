@@ -3,18 +3,20 @@
 use crate::dingtalk::DingtalkClient;
 use aialra_asset_store::ObjectStore;
 use aialra_event_protocol::EventEnvelope;
-use aialra_event_store::{EventStore, ModelJobRecord, NewModelJob};
+use aialra_event_store::{EventStore, ModelJobRecord, NewModelJob, ProjectUpdateRecord};
 use anyhow::{Context, Result};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use uuid::Uuid;
+
+const REPLAYABLE_EVENT_BUFFER: usize = 512;
+const AUDIO_WAKE_BUFFER: usize = 2_048;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,7 +25,8 @@ pub struct AppState {
     pub dingtalk: DingtalkClient,
     pub events: broadcast::Sender<EventEnvelope>,
     pub sequence_lock: Arc<Mutex<()>>,
-    pub audio_buffers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    pub project_updates: broadcast::Sender<ProjectUpdateRecord>,
+    pub audio_pending: broadcast::Sender<(String, String)>,
 }
 
 impl AppState {
@@ -31,14 +34,19 @@ impl AppState {
         std::fs::create_dir_all(data_dir).context("create data directory")?;
         let store = EventStore::open(data_dir.join("aialra.sqlite"))?;
         let objects = ObjectStore::new(data_dir.join("objects"))?;
-        let (events, _) = broadcast::channel(2_048);
+        // Events and project updates are durable in SQLite, so lagging clients reconnect with
+        // their cursor instead of forcing the process to retain a long lecture in memory.
+        let (events, _) = broadcast::channel(REPLAYABLE_EVENT_BUFFER);
+        let (project_updates, _) = broadcast::channel(REPLAYABLE_EVENT_BUFFER);
+        let (audio_pending, _) = broadcast::channel(AUDIO_WAKE_BUFFER);
         Ok(Self {
             store,
             objects,
             dingtalk: DingtalkClient::from_env(),
             events,
             sequence_lock: Arc::new(Mutex::new(())),
-            audio_buffers: Arc::new(Mutex::new(HashMap::new())),
+            project_updates,
+            audio_pending,
         })
     }
 
@@ -74,8 +82,10 @@ impl AppState {
             causation_id,
             payload,
         )?;
-        self.store.insert_event(&event)?;
-        let _ = self.events.send(event.clone());
+        if self.store.insert_event(&event)? {
+            let _ = self.events.send(event.clone());
+            self.record_session_event_update(&event)?;
+        }
         Ok(event)
     }
 
@@ -110,6 +120,7 @@ impl AppState {
         event.event_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, stable_key.as_bytes());
         if self.store.insert_event(&event)? {
             let _ = self.events.send(event.clone());
+            self.record_session_event_update(&event)?;
         }
         Ok(event)
     }
@@ -132,6 +143,52 @@ impl AppState {
             }),
         );
         Ok(record)
+    }
+
+    pub fn record_project_update(
+        &self,
+        project_id: &str,
+        session_id: Option<&str>,
+        update_type: &str,
+        payload: Value,
+    ) -> Result<ProjectUpdateRecord> {
+        let update =
+            self.store
+                .insert_project_update(project_id, session_id, update_type, &payload)?;
+        let _ = self.project_updates.send(update.clone());
+        Ok(update)
+    }
+
+    fn record_session_event_update(&self, event: &EventEnvelope) -> Result<()> {
+        if let Some(project) = self.store.project_for_session(&event.session_id)? {
+            self.record_project_update(
+                &project.id,
+                Some(&event.session_id),
+                "session.event",
+                serde_json::to_value(event)?,
+            )?;
+        }
+        if matches!(
+            event.event_type.as_str(),
+            "segment.finalized"
+                | "translation.finalized"
+                | "explanation.card.created"
+                | "asset.page.extracted"
+                | "session.processing"
+                | "session.completed"
+                | "session.failed"
+        ) {
+            let immediate = matches!(
+                event.event_type.as_str(),
+                "session.processing" | "session.completed" | "session.failed"
+            );
+            if let Err(error) =
+                crate::readweave::enqueue_projection(self, &event.session_id, immediate)
+            {
+                tracing::warn!(error_kind = "readweave_enqueue_failed", error = %error, "ReadWeave projection enqueue failed without blocking the course pipeline");
+            }
+        }
+        Ok(())
     }
 }
 

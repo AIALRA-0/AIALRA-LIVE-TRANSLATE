@@ -1,7 +1,15 @@
 // Validate that audio remains durable while the private GPU agent is offline, then verify recovery.
 import { readFile } from "node:fs/promises";
+import WebSocket from "ws";
 
 const API = process.env.AIALRA_API_URL || "http://127.0.0.1:8787/api/v1";
+const TEST_SUBJECT = process.env.AIALRA_TEST_SUBJECT || "";
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => {
+  const url = String(input);
+  if (!TEST_SUBJECT || !url.startsWith(API)) return nativeFetch(input, init);
+  return nativeFetch(input, { ...init, headers: { ...(init.headers || {}), "X-authentik-uid": TEST_SUBJECT } });
+};
 
 async function checked(responsePromise) {
   const response = await responsePromise;
@@ -23,7 +31,7 @@ async function waitFor(sessionId, predicate, timeoutMs = 300_000) {
   throw new Error("offline recovery timed out");
 }
 
-async function sendPcm(sessionId, pcm) {
+async function sendPcm(sessionId, leaseToken, pcm) {
   const wsBase = API.replace(/^http/, "ws").replace(/\/api\/v1$/, "");
   const chunks = [];
   for (let offset = 0, sequence = 1; offset < pcm.length; offset += 32_000, sequence += 1) {
@@ -35,7 +43,7 @@ async function sendPcm(sessionId, pcm) {
     chunks.push({ sequence, frame });
   }
   return await new Promise((resolve, reject) => {
-    const socket = new WebSocket(`${wsBase}/api/v1/sessions/${sessionId}/sources/offline/audio`);
+    const socket = new WebSocket(`${wsBase}/api/v1/sessions/${sessionId}/sources/offline/audio`, ["aialra.audio.v1", `lease.${leaseToken}`], TEST_SUBJECT ? { headers: { "X-authentik-uid": TEST_SUBJECT } } : undefined);
     const acknowledgements = new Set();
     const timer = setTimeout(() => reject(new Error("offline audio ACK timeout")), 60_000);
     socket.onopen = () => chunks.forEach(({ frame }) => socket.send(frame));
@@ -57,20 +65,23 @@ async function sendPcm(sessionId, pcm) {
 const mode = process.argv[2];
 if (mode === "enqueue") {
   const pcm = await readFile(process.argv[3] || "data/test-fixtures/pipeline-lecture.pcm");
-  const session = await checked(fetch(`${API}/sessions`, {
+  const project = await checked(fetch(`${API}/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      title: "GPU 离线恢复验证",
-      source_language: "en",
-      target_language: "zh-CN",
-      consent_confirmed: true,
-      demo_mode: false,
-    }),
+    body: JSON.stringify({ title: "GPU 离线恢复项目", source_language: "en", target_language: "zh-CN" }),
   }));
-  await checked(fetch(`${API}/sessions/${session.id}/start`, { method: "POST" }));
-  const acknowledgements = await sendPcm(session.id, pcm);
-  await checked(fetch(`${API}/sessions/${session.id}/stop`, { method: "POST" }));
+  const deviceId = "offline-device-0001";
+  const session = await checked(fetch(`${API}/projects/${project.id}/sessions`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "GPU 离线恢复验证", consent_confirmed: true, device_id: deviceId }),
+  }));
+  const lease = await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }),
+  }));
+  const acknowledgements = await sendPcm(session.id, lease.lease_token, pcm);
+  await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
+  }));
   await new Promise((resolve) => setTimeout(resolve, 5_000));
   const health = await checked(fetch(`${API}/health`));
   const current = await events(session.id);

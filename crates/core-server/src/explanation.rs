@@ -28,7 +28,7 @@ pub fn enqueue_explanation(
                 "text": event.payload.get("text")?.as_str()?
             }))
         })
-        .take(12)
+        .take(8)
         .collect::<Vec<_>>();
     segments.reverse();
     let mut pages = events

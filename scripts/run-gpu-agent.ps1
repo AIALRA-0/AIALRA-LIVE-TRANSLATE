@@ -11,4 +11,7 @@ if ([string]::IsNullOrWhiteSpace($env:AIALRA_WORKER_TOKEN)) {
     $env:AIALRA_WORKER_TOKEN = $credential.Password # The token remains process-local and is not written to logs.
 }
 Set-Location -LiteralPath $projectRoot # Python imports resolve from the repository root.
-uv run python -m workers.gpu_agent.main # Run two lanes: ASR and lower-priority language/document jobs.
+$pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe" # Keep the supervised wrapper as the direct parent of the long-running agent.
+if (!(Test-Path -LiteralPath $pythonPath -PathType Leaf)) { throw "项目虚拟环境 Python 不存在" }
+& $pythonPath -m workers.gpu_agent.main # Run independent ASR, translation, and explanation/document lanes.
+if ($LASTEXITCODE -ne 0) { throw "本机 GPU Agent 退出，代码 $LASTEXITCODE" }

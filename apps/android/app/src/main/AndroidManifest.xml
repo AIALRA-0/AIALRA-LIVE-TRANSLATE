@@ -12,8 +12,8 @@
         android:label="AIALRA 收音"
         android:supportsRtl="true"
         android:theme="@style/Theme.Aialra"
-        android:usesCleartextTraffic="true">
-        <!-- Cleartext LAN traffic supports the local bootstrap; production pairing will add TLS. -->
+        android:usesCleartextTraffic="false">
+        <!-- Production capture accepts only TLS endpoints; the debug source set permits local LAN bootstrap. -->
         <activity
             android:name=".MainActivity"
             android:exported="true">

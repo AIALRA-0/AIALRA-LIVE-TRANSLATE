@@ -1,8 +1,16 @@
 // This smoke runner exercises the compiled local services with a synthetic, non-private lecture fixture.
 import { readFile } from "node:fs/promises";
+import WebSocket from "ws";
 
 const API = process.env.AIALRA_API_URL || "http://127.0.0.1:8787/api/v1";
 const FIXTURE = process.argv[2] || "data/test-fixtures/pipeline-lecture.pcm";
+const TEST_SUBJECT = process.env.AIALRA_TEST_SUBJECT || "";
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => {
+  const url = String(input);
+  if (!TEST_SUBJECT || !url.startsWith(API)) return nativeFetch(input, init);
+  return nativeFetch(input, { ...init, headers: { ...(init.headers || {}), "X-authentik-uid": TEST_SUBJECT } });
+};
 
 // JSON helpers surface the service error body and preserve one readable failure boundary.
 async function checked(responsePromise) {
@@ -25,7 +33,7 @@ async function waitForEvents(sessionId, predicate, timeoutMs = 300_000) {
 }
 
 // The WebSocket sender uses one-second frames and waits until every sequence has an ACK.
-async function sendPcm(sessionId, pcm) {
+async function sendPcm(sessionId, leaseToken, pcm) {
   const wsBase = API.replace(/^http/, "ws").replace(/\/api\/v1$/, "");
   const chunks = [];
   for (let offset = 0, sequence = 1; offset < pcm.length; offset += 32_000, sequence += 1) {
@@ -39,6 +47,8 @@ async function sendPcm(sessionId, pcm) {
   return await new Promise((resolve, reject) => {
     const socket = new WebSocket(
       `${wsBase}/api/v1/sessions/${sessionId}/sources/smoke/audio`,
+      ["aialra.audio.v1", `lease.${leaseToken}`],
+      TEST_SUBJECT ? { headers: { "X-authentik-uid": TEST_SUBJECT } } : undefined,
     );
     const acknowledgements = new Set();
     const timer = setTimeout(() => reject(new Error("audio ACK timeout")), 60_000);
@@ -60,23 +70,24 @@ async function sendPcm(sessionId, pcm) {
 
 // One real session covers consent, audio durability, ASR, translation, asset parsing, explanation, and stop.
 const startedAt = Date.now();
-const session = await checked(
-  fetch(`${API}/sessions`, {
+const project = await checked(
+  fetch(`${API}/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      title: "端到端合成课程验证",
-      source_language: "en",
-      target_language: "zh-CN",
-      consent_confirmed: true,
-      demo_mode: false,
-    }),
+    body: JSON.stringify({ title: "端到端验证项目", source_language: "en", target_language: "zh-CN" }),
   }),
 );
-await checked(fetch(`${API}/sessions/${session.id}/start`, { method: "POST" }));
+const deviceId = "smoke-device-0001";
+const session = await checked(fetch(`${API}/projects/${project.id}/sessions`, {
+  method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ title: "端到端合成课程验证", consent_confirmed: true, device_id: deviceId }),
+}));
+const lease = await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
+  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }),
+}));
 const capabilities = await checked(fetch(`${API}/sessions/${session.id}/dingtalk/capabilities`));
 const pcm = await readFile(FIXTURE);
-const acknowledgements = await sendPcm(session.id, pcm);
+const acknowledgements = await sendPcm(session.id, lease.lease_token, pcm);
 let events = await waitForEvents(
   session.id,
   (items) =>
@@ -97,7 +108,9 @@ await waitForEvents(
   (items) => items.some((item) => item.event_type === "asset.page.extracted"),
 );
 await checked(fetch(`${API}/sessions/${session.id}/explain`, { method: "POST" }));
-await checked(fetch(`${API}/sessions/${session.id}/stop`, { method: "POST" }));
+await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
+  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
+}));
 events = await waitForEvents(
   session.id,
   (items) =>

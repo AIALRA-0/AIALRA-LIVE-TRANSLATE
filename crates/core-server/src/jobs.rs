@@ -250,7 +250,7 @@ fn apply_asr_result(
     elapsed_ms: u64,
 ) -> Result<(), ApiError> {
     let asr: AsrResponse = serde_json::from_value(result.clone())?;
-    require_provider(&asr.provider, "faster-whisper:")?;
+    require_provider(&asr.provider, "faster-whisper:", &["@cpu", "@cuda"])?;
     if asr.text.trim().is_empty() {
         state.emit_idempotent(
             &format!("{}:asr_no_speech", job.id),
@@ -328,7 +328,7 @@ fn apply_translation_result(
     elapsed_ms: u64,
 ) -> Result<(), ApiError> {
     let translation: TranslationResponse = serde_json::from_value(result.clone())?;
-    require_provider(&translation.provider, "ollama:")?;
+    require_provider(&translation.provider, "ollama:", &["@cuda"])?;
     let segment_id = required_input_string(&job.input, "segment_id")?;
     state.emit_idempotent(
         &format!("{}:translation_final", job.id),
@@ -370,7 +370,7 @@ fn apply_explanation_result(
     elapsed_ms: u64,
 ) -> Result<(), ApiError> {
     let explanation: ExplanationResponse = serde_json::from_value(result.clone())?;
-    require_provider(&explanation.provider, "ollama:")?;
+    require_provider(&explanation.provider, "ollama:", &["@cuda"])?;
     let allowed_segments = job
         .input
         .get("segments")
@@ -532,7 +532,10 @@ pub fn enqueue_asr(
             "initial_prompt": ""
         }),
         input_object_hash: Some(stored.hash.clone()),
-        idempotency_key: format!("asr:{session_id}:{source_id}:{}", stored.hash),
+        idempotency_key: format!(
+            "asr:{session_id}:{source_id}:{captured_at_ms}:{}",
+            stored.hash
+        ),
     })?;
     Ok(())
 }
@@ -584,12 +587,12 @@ fn allowed_capabilities(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn require_provider(provider: &str, prefix: &str) -> Result<(), ApiError> {
-    if provider.starts_with(prefix) && provider.ends_with("@cuda") {
+fn require_provider(provider: &str, prefix: &str, devices: &[&str]) -> Result<(), ApiError> {
+    if provider.starts_with(prefix) && devices.iter().any(|device| provider.ends_with(device)) {
         Ok(())
     } else {
         Err(ApiError::bad_request(
-            "production model result did not prove a CUDA provider",
+            "production model result did not prove an allowed local provider",
         ))
     }
 }
@@ -612,3 +615,22 @@ fn sanitize_error_kind(value: &str) -> String {
 }
 
 use axum::response::IntoResponse;
+
+#[cfg(test)]
+mod tests {
+    use super::require_provider;
+
+    #[test]
+    fn provider_gate_allows_cpu_asr_and_requires_cuda_llm() {
+        assert!(
+            require_provider(
+                "faster-whisper:small@cpu",
+                "faster-whisper:",
+                &["@cpu", "@cuda"]
+            )
+            .is_ok()
+        );
+        assert!(require_provider("ollama:qwen2.5:3b-instruct@cuda", "ollama:", &["@cuda"]).is_ok());
+        assert!(require_provider("ollama:qwen2.5:3b-instruct@cpu", "ollama:", &["@cuda"]).is_err());
+    }
+}

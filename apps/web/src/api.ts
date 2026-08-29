@@ -1,4 +1,4 @@
-import type { EventEnvelope, Session } from "./types";
+import type { EventEnvelope, Project, ProjectUpdate, ReadWeavePreview, ReadWeaveStatus, RecordingLease, Session } from "./types";
 
 export interface DingtalkCapabilities {
   configured: boolean;
@@ -47,6 +47,34 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
 export const api = {
   health: () => checked<RuntimeHealth>(fetch("/api/v1/health")),
   listSessions: () => checked<Session[]>(fetch("/api/v1/sessions")),
+  listProjects: () => checked<Project[]>(fetch("/api/v1/projects")),
+  createProject: (title: string) => checked<Project>(fetch("/api/v1/projects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title, source_language: "en", target_language: "zh-CN" }),
+  })),
+  listProjectSessions: (projectId: string) => checked<Session[]>(fetch(`/api/v1/projects/${projectId}/sessions`)),
+  createProjectSession: (projectId: string, input: { title: string; consent_confirmed: boolean; device_id: string }) =>
+    checked<Session>(fetch(`/api/v1/projects/${projectId}/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    })),
+  acquireRecording: (projectId: string, sessionId: string, deviceId: string) =>
+    checked<RecordingLease>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/recording/acquire`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }),
+    })),
+  renewRecording: (projectId: string, sessionId: string, deviceId: string, leaseToken: string) =>
+    checked<Record<string, unknown>>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/recording/renew`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: leaseToken }),
+    })),
+  stopRecording: (projectId: string, sessionId: string, deviceId: string, leaseToken: string) =>
+    checked<Session>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/recording/stop`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: leaseToken }),
+    })),
+  readWeaveStatus: (projectId: string) => checked<ReadWeaveStatus>(fetch(`/api/v1/projects/${projectId}/readweave`)),
+  readWeavePreview: (projectId: string) => checked<ReadWeavePreview>(fetch(`/api/v1/projects/${projectId}/readweave/preview`)),
+  reconcileReadWeave: (projectId: string) => checked<{ queued: boolean }>(fetch(`/api/v1/projects/${projectId}/readweave/reconcile`, { method: "POST" })),
   createSession: (input: {
     title: string;
     source_language: string;
@@ -89,6 +117,21 @@ export const api = {
     );
   },
 };
+
+export function subscribeProject(
+  projectId: string,
+  onUpdate: (update: ProjectUpdate) => void,
+  onConnection: (connected: boolean) => void,
+): () => void {
+  const source = new EventSource(`/api/v1/projects/${projectId}/stream`);
+  source.onopen = () => onConnection(true);
+  source.onerror = () => onConnection(false);
+  source.addEventListener("session.event", (message) => onUpdate(JSON.parse((message as MessageEvent).data) as ProjectUpdate));
+  ["project.created", "project.updated", "recording.lease.acquired", "recording.lease.renewed", "recording.lease.released", "readweave.synced", "readweave.conflict", "readweave.reconcile.queued"].forEach((eventName) => {
+    source.addEventListener(eventName, (message) => onUpdate(JSON.parse((message as MessageEvent).data) as ProjectUpdate));
+  });
+  return () => source.close();
+}
 
 // EventSource reconnects automatically and the service replays durable history after reconnect.
 export function subscribeEvents(

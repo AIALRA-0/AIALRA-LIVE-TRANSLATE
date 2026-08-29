@@ -11,7 +11,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="AIALRA · 本地课堂收音"
-        android:textColor="@color/forest"
+        android:textColor="@color/ink"
         android:textSize="13sp"
         android:textStyle="bold" />
 
@@ -31,6 +31,15 @@
         android:layout_marginTop="28dp"
         android:hint="ws://电脑局域网地址:8787"
         android:inputType="textUri"
+        android:singleLine="true" />
+
+    <EditText
+        android:id="@+id/projectId"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:hint="项目 ID"
+        android:inputType="text"
         android:singleLine="true" />
 
     <EditText
@@ -54,7 +63,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="18dp"
-        android:backgroundTint="@color/forest"
+        android:backgroundTint="@color/ink"
         android:text="开始持续收音"
         android:textColor="@color/paper" />
 
@@ -72,6 +81,6 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="22dp"
         android:text="等待连接。DingTalk A1 可同时作为高质量同步录音。"
-        android:textColor="#667168"
+        android:textColor="@color/muted"
         android:textSize="13sp" />
 </LinearLayout>

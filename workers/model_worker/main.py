@@ -7,7 +7,9 @@ import base64
 import io
 import json
 import os
+import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -21,13 +23,38 @@ from pptx import Presentation
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
+_windows_dll_handles: list[Any] = []
+
+
+def _register_bundled_cuda_dlls() -> None:
+    """Expose uv-installed NVIDIA runtime DLLs to CTranslate2 on Windows."""
+
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+    binary_directories: list[str] = []
+    for entry in sys.path:
+        package_root = Path(entry) / "nvidia"
+        for package in ("cublas", "cudnn", "cuda_nvrtc"):
+            binary_directory = package_root / package / "bin"
+            if binary_directory.is_dir():
+                resolved = str(binary_directory.resolve())
+                if resolved not in binary_directories:
+                    binary_directories.append(resolved)
+                    _windows_dll_handles.append(os.add_dll_directory(resolved))
+    if binary_directories:
+        os.environ["PATH"] = os.pathsep.join(binary_directories + [os.environ.get("PATH", "")])
+
+
+_register_bundled_cuda_dlls()
+
 app = FastAPI(title="AIALRA Local Model Worker", version="1.0.0")
 
 OLLAMA_URL = os.getenv("AIALRA_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("AIALRA_OLLAMA_MODEL", "qwen2.5:14b-instruct")
+OLLAMA_MODEL = os.getenv("AIALRA_OLLAMA_MODEL", "qwen2.5:3b-instruct")
 ASR_MODEL_NAME = os.getenv("AIALRA_ASR_MODEL", "small")
-ASR_DEVICE = os.getenv("AIALRA_ASR_DEVICE", "cuda")
-ASR_COMPUTE_TYPE = os.getenv("AIALRA_ASR_COMPUTE_TYPE", "float16")
+ASR_DEVICE = os.getenv("AIALRA_ASR_DEVICE", "cpu")
+ASR_COMPUTE_TYPE = os.getenv("AIALRA_ASR_COMPUTE_TYPE", "int8")
+ASR_CPU_THREADS = max(0, min(32, int(os.getenv("AIALRA_ASR_CPU_THREADS", "12"))))
 LLM_DEVICE = os.getenv("AIALRA_LLM_DEVICE", "cuda")
 
 _asr_model: Any | None = None
@@ -40,8 +67,10 @@ class HealthResponse(BaseModel):
     status: str
     asr_available: bool
     ollama_available: bool
+    ollama_gpu_resident: bool
     model: str
     asr_provider: str
+    asr_cpu_threads: int
     llm_provider: str
 
 
@@ -163,12 +192,15 @@ async def health() -> HealthResponse:
 
     asr_available = _faster_whisper_importable()
     ollama_available = await _ollama_available()
+    ollama_gpu_resident = await _ollama_gpu_resident()
     return HealthResponse(
         status="ok",
         asr_available=asr_available,
         ollama_available=ollama_available,
+        ollama_gpu_resident=ollama_gpu_resident,
         model=OLLAMA_MODEL,
         asr_provider=f"faster-whisper:{ASR_MODEL_NAME}@{ASR_DEVICE}",
+        asr_cpu_threads=ASR_CPU_THREADS,
         llm_provider=f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}",
     )
 
@@ -198,8 +230,9 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
         for item in request.glossary
     ]
     system = (
-        "You translate stable lecture captions. Return JSON with one string field named text. "
-        "Preserve formulas, code, model numbers, and do-not-translate terms. Do not add commentary."
+        "You translate stable lecture captions. Return only the translated text. "
+        "Preserve formulas, code, model numbers, and do-not-translate terms. "
+        "Do not return JSON, labels, or commentary."
     )
     user = (
         f"Source language: {request.source_language}\n"
@@ -208,58 +241,123 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
         f"Glossary: {'; '.join(glossary_lines)}\n"
         f"Text: {request.text}"
     )
-    result = await _ollama_json(system, user)
-    if isinstance(result, dict) and isinstance(result.get("text"), str):
-        text = result["text"].strip()
-        if text:
-            return TranslationResponse(
-                text=text, provider=f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}"
-            )
+    text = await _ollama_text(system, user, max_tokens=512)
+    if text:
+        return TranslationResponse(text=text, provider=f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}")
     raise HTTPException(status_code=503, detail="local Ollama translation is unavailable")
 
 
 @app.post("/v1/explain", response_model=ExplanationResponse)
 async def explain(request: ExplanationRequest) -> ExplanationResponse:
-    """Generated IDs are replaced by a validated response whose references come from the request."""
+    """The model writes bounded teaching content while trusted code attaches evidence IDs."""
 
     segment_ids = [segment.id for segment in request.segments]
     page_ids = [page.id for page in request.asset_pages]
     system = (
         "You are a lecture comprehension assistant. Return compact JSON in the requested language. "
-        "Use only provided segment_id and page_id values. Separate course statements from "
-        "background knowledge. "
-        "Explain rare terms in one sentence and never invent evidence IDs."
+        "When target_language starts with zh, write every natural-language field "
+        "in Simplified Chinese. "
+        "Separate course statements from background knowledge. Do not repeat identifiers. "
+        "Write a one-sentence summary. Return at most two missing-context items, three rare terms, "
+        "two possible ASR errors, and two review questions. Explain each rare term in one sentence "
+        "and keep every item concise."
     )
-    user = json.dumps(
+    language_instruction = (
+        "All natural-language output fields must use Simplified Chinese.\n"
+        if request.target_language.lower().startswith("zh")
+        else ""
+    )
+    user = language_instruction + json.dumps(
         {
             "target_language": request.target_language,
-            "segments": [segment.model_dump() for segment in request.segments],
-            "asset_pages": [page.model_dump() for page in request.asset_pages],
+            "segments": [segment.text for segment in request.segments],
+            "asset_pages": [
+                {"title": page.title, "text": page.text} for page in request.asset_pages
+            ],
             "required_shape": {
                 "summary": "string",
-                "missing_context": [
-                    {"text": "string", "evidence_segment_ids": ["segment_id"]}
-                ],
-                "rare_terms": [
-                    {
-                        "term": "string",
-                        "one_line": "string",
-                        "evidence_segment_ids": ["segment_id"],
-                        "asset_page_ids": ["page_id"],
-                    }
-                ],
+                "missing_context": ["string"],
+                "rare_terms": [{"term": "string", "one_line": "string"}],
                 "possible_asr_errors": ["string"],
                 "review_questions": ["string"],
-                "evidence_segment_ids": segment_ids,
-                "asset_page_ids": page_ids,
                 "confidence": 0.0,
             },
         },
         ensure_ascii=False,
     )
-    result = await _ollama_json(system, user)
+    result = await _ollama_json(
+        system,
+        user,
+        {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "maxLength": 300},
+                "missing_context": {
+                    "type": "array",
+                    "maxItems": 2,
+                    "items": {"type": "string", "maxLength": 240},
+                },
+                "rare_terms": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "term": {"type": "string", "maxLength": 80},
+                            "one_line": {"type": "string", "maxLength": 240},
+                        },
+                        "required": ["term", "one_line"],
+                        "additionalProperties": False,
+                    },
+                },
+                "possible_asr_errors": {
+                    "type": "array",
+                    "maxItems": 2,
+                    "items": {"type": "string", "maxLength": 200},
+                },
+                "review_questions": {
+                    "type": "array",
+                    "maxItems": 2,
+                    "items": {"type": "string", "maxLength": 200},
+                },
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": [
+                "summary",
+                "missing_context",
+                "rare_terms",
+                "possible_asr_errors",
+                "review_questions",
+                "confidence",
+            ],
+            "additionalProperties": False,
+        },
+        max_tokens=512,
+        accept=lambda payload: _has_explanation_shape(payload)
+        and _uses_requested_explanation_language(payload, request.target_language),
+    )
     if isinstance(result, dict):
-        normalized = _normalize_explanation(result, segment_ids, page_ids)
+        compact = {
+            **result,
+            "missing_context": [
+                {"text": item, "evidence_segment_ids": segment_ids[-2:]}
+                for item in result.get("missing_context", [])
+                if isinstance(item, str)
+            ],
+            "rare_terms": [
+                {
+                    "term": item.get("term", ""),
+                    "one_line": item.get("one_line", ""),
+                    "evidence_segment_ids": segment_ids[-2:],
+                    "asset_page_ids": page_ids,
+                }
+                for item in result.get("rare_terms", [])
+                if isinstance(item, dict)
+            ],
+            "evidence_segment_ids": segment_ids,
+            "asset_page_ids": page_ids,
+        }
+        normalized = _normalize_explanation(compact, segment_ids, page_ids)
         if normalized is not None:
             normalized.provider = f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}"
             return normalized
@@ -302,6 +400,7 @@ def _get_asr_model() -> Any:
                 ASR_MODEL_NAME,
                 device=ASR_DEVICE,
                 compute_type=ASR_COMPUTE_TYPE,
+                cpu_threads=ASR_CPU_THREADS,
             )
         return _asr_model
 
@@ -345,30 +444,165 @@ async def _ollama_available() -> bool:
         return False
 
 
-async def _ollama_json(system: str, user: str) -> dict[str, Any] | None:
-    """Ollama receives only text already allowed by the local session policy."""
+def _ollama_model_uses_gpu(payload: object) -> bool:
+    """Accept the configured model only when at least 90 percent is resident in VRAM."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return False
+    for item in payload["models"]:
+        if not isinstance(item, dict) or item.get("name") != OLLAMA_MODEL:
+            continue
+        size = item.get("size")
+        size_vram = item.get("size_vram")
+        if (
+            isinstance(size, int)
+            and not isinstance(size, bool)
+            and size > 0
+            and isinstance(size_vram, int)
+            and not isinstance(size_vram, bool)
+        ):
+            return size_vram >= size * 0.9
+    return False
+
+
+async def _ollama_gpu_resident() -> bool:
+    """Read Ollama's process inventory instead of trusting a configured provider suffix."""
 
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "stream": False,
-                    "format": "json",
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "options": {"temperature": 0.1},
-                },
-            )
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{OLLAMA_URL}/api/ps")
             response.raise_for_status()
-            content = response.json()["message"]["content"]
-            parsed = json.loads(content)
-            return parsed if isinstance(parsed, dict) else None
-    except (httpx.HTTPError, KeyError, TypeError, json.JSONDecodeError):
-        return None
+            return _ollama_model_uses_gpu(response.json())
+    except (httpx.HTTPError, TypeError, ValueError):
+        return False
+
+
+async def _ollama_json(
+    system: str,
+    user: str,
+    schema: dict[str, Any] | None = None,
+    *,
+    max_tokens: int = 768,
+    accept: Callable[[dict[str, Any]], bool] | None = None,
+) -> dict[str, Any] | None:
+    """Ollama receives only text already allowed by the local session policy."""
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                repair = (
+                    "\nThe prior response was invalid. Return exactly the requested JSON shape "
+                    "with every required field populated."
+                    if attempt
+                    else ""
+                )
+                response = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "stream": False,
+                        "format": schema or "json",
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": f"{user}{repair}"},
+                        ],
+                        "options": {
+                            "temperature": 0 if attempt == 0 else 0.1,
+                            "seed": attempt,
+                            "num_predict": max_tokens,
+                        },
+                    },
+                )
+                response.raise_for_status()
+                content = response.json()["message"]["content"]
+                parsed = _parse_model_json(content)
+                if isinstance(parsed, dict) and (accept is None or accept(parsed)):
+                    return parsed
+        except (httpx.HTTPError, KeyError, TypeError):
+            await asyncio.sleep(1)
+    return None
+
+
+async def _ollama_text(system: str, user: str, *, max_tokens: int) -> str | None:
+    """A plain local model response avoids fragile JSON quoting for translated prose."""
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                repair = (
+                    "\nThe prior response was empty. Return only the translated text."
+                    if attempt
+                    else ""
+                )
+                response = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "stream": False,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": f"{user}{repair}"},
+                        ],
+                        "options": {
+                            "temperature": 0 if attempt == 0 else 0.1,
+                            "seed": attempt,
+                            "num_predict": max_tokens,
+                        },
+                    },
+                )
+                response.raise_for_status()
+                content = response.json()["message"]["content"]
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        except (httpx.HTTPError, KeyError, TypeError):
+            await asyncio.sleep(1)
+    return None
+
+
+def _parse_model_json(content: str) -> dict[str, Any] | None:
+    """Accept unescaped control characters while retaining the JSON object boundary."""
+
+    for strict in (True, False):
+        try:
+            parsed = json.loads(content, strict=strict)
+        except json.JSONDecodeError:
+            continue
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _has_nonempty_string(payload: dict[str, Any], field: str) -> bool:
+    """Semantic validation turns malformed local output into an in-process repair attempt."""
+
+    value = payload.get(field)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _has_explanation_shape(payload: dict[str, Any]) -> bool:
+    """Require a real summary while allowing trusted normalization of omitted optional sections."""
+
+    if not _has_nonempty_string(payload, "summary"):
+        return False
+    for field in (
+        "missing_context",
+        "rare_terms",
+        "possible_asr_errors",
+        "review_questions",
+    ):
+        if field in payload and not isinstance(payload[field], list):
+            return False
+    return "confidence" not in payload or isinstance(payload["confidence"], (int, float))
+
+
+def _uses_requested_explanation_language(
+    payload: dict[str, Any], target_language: str
+) -> bool:
+    """A Chinese session never accepts an English-only summary as a completed card."""
+
+    if not target_language.lower().startswith("zh"):
+        return True
+    summary = payload.get("summary")
+    return isinstance(summary, str) and any("\u4e00" <= char <= "\u9fff" for char in summary)
 
 
 def _normalize_explanation(

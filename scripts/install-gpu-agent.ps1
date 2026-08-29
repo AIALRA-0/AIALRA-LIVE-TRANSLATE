@@ -1,6 +1,8 @@
 param(
     [string]$WorkerToken,
-    [string]$GatewayUrl = "http://worker-gateway.example.invalid"
+    [string]$GatewayUrl = "http://worker-gateway.example.invalid",
+    [string]$OllamaUrl = "http://127.0.0.1:11434",
+    [string]$OllamaModel = "qwen2.5:3b-instruct"
 )
 
 $ErrorActionPreference = "Stop" # Installation must not leave a task with an incomplete secret.
@@ -13,6 +15,9 @@ if (![string]::IsNullOrWhiteSpace($WorkerToken)) {
     $secureToken | ConvertFrom-SecureString | Set-Content -LiteralPath $secretFile -Encoding ascii # Persist only DPAPI ciphertext.
 }
 if (!(Test-Path -LiteralPath $secretFile -PathType Leaf)) { throw "请先运行 initialize-gpu-agent-secret.ps1" } # Never install a task that cannot authenticate.
+$ollamaTags = Invoke-RestMethod -Uri "$($OllamaUrl.TrimEnd('/'))/api/tags" -TimeoutSec 10 # Fail installation before creating an unusable login task.
+$availableModels = @($ollamaTags.models | ForEach-Object name)
+if ($OllamaModel -notin $availableModels) { throw "Ollama 缺少模型 $OllamaModel，请先安装真实模型" }
 
 $taskName = "AIALRA RTX GPU Agent" # Use one stable name so reinstall updates instead of duplicating tasks.
 $launcher = Join-Path $PSScriptRoot "run-gpu-stack.ps1" # The scheduled action owns both loopback inference and the private queue agent.
@@ -20,6 +25,8 @@ $action = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument "-NoProfile -Win
 $trigger = New-ScheduledTaskTrigger -AtLogOn # The task principal below restricts the trigger to this interactive identity.
 $settings = New-ScheduledTaskSettingsSet -RestartCount 6 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) # Recover from temporary Tailscale or provider outages.
 [Environment]::SetEnvironmentVariable("AIALRA_GPU_GATEWAY_URL", $GatewayUrl, "User") # Store only the private endpoint, never the token.
+[Environment]::SetEnvironmentVariable("AIALRA_OLLAMA_URL", $OllamaUrl, "User") # Persist the verified loopback provider for future logins.
+[Environment]::SetEnvironmentVariable("AIALRA_OLLAMA_MODEL", $OllamaModel, "User") # Keep startup and the validated model on the same provider.
 $currentUser = (& whoami.exe).Trim() # Resolve the exact interactive identity used by DPAPI.
 try {
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User $currentUser -RunLevel Limited -Description "AIALRA local RTX model agent" -Force -ErrorAction Stop | Out-Null # Prefer Task Scheduler when the account can register tasks.

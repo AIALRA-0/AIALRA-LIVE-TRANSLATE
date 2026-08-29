@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat
 /** MainActivity collects only the local server address, session ID, and consent confirmation. */
 class MainActivity : ComponentActivity() {
     private lateinit var serverUrl: EditText
+    private lateinit var projectId: EditText
     private lateinit var sessionId: EditText
     private lateinit var consentCheck: CheckBox
     private lateinit var startButton: Button
@@ -39,6 +40,7 @@ class MainActivity : ComponentActivity() {
         // The native screen remains usable when the desktop web application is unavailable.
         setContentView(R.layout.activity_main)
         serverUrl = findViewById(R.id.serverUrl)
+        projectId = findViewById(R.id.projectId)
         sessionId = findViewById(R.id.sessionId)
         consentCheck = findViewById(R.id.consentCheck)
         startButton = findViewById(R.id.startButton)
@@ -48,10 +50,12 @@ class MainActivity : ComponentActivity() {
         // Explicit USB launch extras fill only the local address and session ID, never a credential or transcript.
         val requestedServerUrl = intent?.getStringExtra(RecordingService.EXTRA_SERVER_URL)
         val requestedSessionId = intent?.getStringExtra(RecordingService.EXTRA_SESSION_ID)
+        val requestedProjectId = intent?.getStringExtra(RecordingService.EXTRA_PROJECT_ID)
 
         // Last-used connection fields reduce setup time when no explicit USB values are supplied.
         val preferences = getSharedPreferences("capture", MODE_PRIVATE)
         serverUrl.setText(requestedServerUrl ?: preferences.getString("serverUrl", "ws://192.0.2.2:8787"))
+        projectId.setText(requestedProjectId ?: preferences.getString("projectId", ""))
         sessionId.setText(requestedSessionId ?: preferences.getString("sessionId", ""))
 
         // Start and stop controls always keep the system foreground notification in sync.
@@ -80,8 +84,8 @@ class MainActivity : ComponentActivity() {
             statusText.text = "请先确认已经获得课程录音许可。"
             return
         }
-        if (serverUrl.text.isBlank() || sessionId.text.isBlank()) {
-            statusText.text = "请填写电脑地址和桌面端会话 ID。"
+        if (serverUrl.text.isBlank() || projectId.text.isBlank() || sessionId.text.isBlank()) {
+            statusText.text = "请填写电脑地址、项目 ID 和会话 ID。"
             return
         }
         val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
@@ -103,12 +107,15 @@ class MainActivity : ComponentActivity() {
         // The server URL and session ID become explicit foreground-service extras for process recovery.
         val normalizedBase = serverUrl.text.toString().trim().trimEnd('/')
         val session = sessionId.text.toString().trim()
+        val project = projectId.text.toString().trim()
         getSharedPreferences("capture", MODE_PRIVATE).edit()
             .putString("serverUrl", normalizedBase)
+            .putString("projectId", project)
             .putString("sessionId", session)
             .apply()
         val intent = Intent(this, RecordingService::class.java)
             .putExtra(RecordingService.EXTRA_SERVER_URL, normalizedBase)
+            .putExtra(RecordingService.EXTRA_PROJECT_ID, project)
             .putExtra(RecordingService.EXTRA_SESSION_ID, session)
         ContextCompat.startForegroundService(this, intent)
         showRecording(true, "前台服务已启动，正在等待本地服务确认音频块。")

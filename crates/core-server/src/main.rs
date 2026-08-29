@@ -5,13 +5,16 @@ mod app;
 mod audio;
 mod dingtalk;
 mod explanation;
+mod identity;
 mod jobs;
+mod projects;
+mod readweave;
 mod worker;
 
 use anyhow::{Context, Result};
 use app::AppState;
 use axum::{
-    Router,
+    Router, middleware,
     routing::{get, post},
 };
 use std::env;
@@ -34,10 +37,60 @@ async fn main() -> Result<()> {
     let data_dir =
         PathBuf::from(env::var("AIALRA_DATA_DIR").unwrap_or_else(|_| "./data".to_owned()));
     let state = AppState::open(&data_dir).context("initialize application state")?;
+    if let Ok(subject) = env::var("AIALRA_LEGACY_OWNER_SUBJECT")
+        && !subject.trim().is_empty()
+    {
+        let imported = projects::assign_legacy_sessions(&state, &subject)
+            .map_err(|error| anyhow::anyhow!("assign legacy sessions: {error:?}"))?;
+        info!(imported, "legacy session ownership migration checked");
+    }
+    let recovered_windows =
+        audio::recover_audio_assembly(&state).context("recover durable audio assembly")?;
+    info!(recovered_windows, "durable audio assembly recovered");
 
     // Versioned routes keep device and UI clients compatible across incremental releases.
     let api = Router::new()
         .route("/health", get(api::health))
+        .route(
+            "/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
+        .route(
+            "/projects/{project_id}",
+            get(projects::get_project).patch(projects::update_project),
+        )
+        .route(
+            "/projects/{project_id}/stream",
+            get(projects::stream_project),
+        )
+        .route(
+            "/projects/{project_id}/sessions",
+            get(projects::list_project_sessions).post(projects::create_project_session),
+        )
+        .route(
+            "/projects/{project_id}/readweave",
+            get(projects::readweave_status),
+        )
+        .route(
+            "/projects/{project_id}/readweave/preview",
+            get(projects::readweave_preview),
+        )
+        .route(
+            "/projects/{project_id}/readweave/reconcile",
+            post(projects::reconcile_readweave),
+        )
+        .route(
+            "/projects/{project_id}/sessions/{session_id}/recording/acquire",
+            post(projects::acquire_recording),
+        )
+        .route(
+            "/projects/{project_id}/sessions/{session_id}/recording/renew",
+            post(projects::renew_recording),
+        )
+        .route(
+            "/projects/{project_id}/sessions/{session_id}/recording/stop",
+            post(projects::stop_recording),
+        )
         .route(
             "/sessions",
             get(api::list_sessions).post(api::create_session),
@@ -68,7 +121,14 @@ async fn main() -> Result<()> {
         .route(
             "/sessions/{session_id}/sources/{source_id}/audio",
             get(audio::audio_websocket),
-        );
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            identity::identity_and_session_scope,
+        ));
+
+    tokio::spawn(readweave::run_connector_loop(state.clone()));
+    tokio::spawn(audio::run_audio_assembler(state.clone()));
 
     // Worker endpoints are blocked at the public proxy and require a second application token.
     let internal = Router::new()

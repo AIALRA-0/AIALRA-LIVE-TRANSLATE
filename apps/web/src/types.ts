@@ -29,6 +29,55 @@ export interface Session {
   updated_at: string;
 }
 
+export interface Project {
+  id: string;
+  owner_subject: string;
+  title: string;
+  source_language: string;
+  target_language: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectUpdate {
+  cursor: number;
+  project_id: string;
+  session_id: string | null;
+  update_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface RecordingLease {
+  project_id: string;
+  session_id: string;
+  holder_device_id: string;
+  generation: number;
+  expires_at: string;
+  lease_token: string;
+}
+
+export interface ReadWeaveStatus {
+  configured: boolean;
+  queued: number;
+  syncing: number;
+  completed: number;
+  conflicts: number;
+  updated_at: string | null;
+  note_url: string | null;
+}
+
+export interface ReadWeavePreview {
+  sessions: Array<{
+    session_id: string;
+    title: string;
+    state: string;
+    latest_entries: Array<{ segment_id: string; original: string; translation: string | null }>;
+    explanation_count: number;
+  }>;
+}
+
 // TimelineItem groups revisions under stable segment, card, or page identifiers.
 export interface TimelineItem {
   id: string;

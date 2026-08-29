@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeFrame, resample } from "./audio";
+import { encodeFrame, nextFramesToSend, recoverNextSequence, resample } from "./audio";
 
 describe("audio transport", () => {
   it("encodes sequence and capture time as big-endian unsigned integers", () => {
@@ -15,5 +15,31 @@ describe("audio transport", () => {
     const input = new Float32Array(48_000);
     const output = resample(input, 48_000);
     expect(output).toHaveLength(16_000);
+  });
+});
+
+describe("durable browser audio sequence", () => {
+  it("continues after a fully acknowledged page refresh", () => {
+    expect(recoverNextSequence(42, [])).toBe(42);
+  });
+
+  it("continues after the newest pending IndexedDB frame", () => {
+    expect(recoverNextSequence(12, [12, 13, 14])).toBe(15);
+  });
+
+  it("starts a new lease generation at sequence one", () => {
+    expect(recoverNextSequence(null, [])).toBe(1);
+  });
+});
+
+describe("bounded audio recovery", () => {
+  it("sends the oldest eight cached frames instead of flooding a recovered socket", () => {
+    expect(nextFramesToSend([12, 4, 9, 3, 8, 7, 6, 5, 11, 10], [])).toEqual([
+      3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+  });
+
+  it("fills only the remaining acknowledgement window", () => {
+    expect(nextFramesToSend([1, 2, 3, 4, 5], [1, 2, 3], 4)).toEqual([4]);
   });
 });

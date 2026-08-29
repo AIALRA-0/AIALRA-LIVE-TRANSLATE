@@ -11,6 +11,7 @@ import platform
 import random
 import subprocess
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -39,7 +40,11 @@ class Lane:
 
 LANES = (
     Lane("asr", ("asr",)),
-    Lane("llm", ("translate", "explain", "asset_parse")),
+    # Translation must never wait behind a long explanation request.  Separate
+    # leases also make the server-side pickup metric reflect actual worker
+    # availability instead of the duration of the previous LLM generation.
+    Lane("translate", ("translate",)),
+    Lane("explain", ("explain", "asset_parse")),
 )
 
 
@@ -47,9 +52,76 @@ class RetryableJobError(RuntimeError):
     """A local provider or private-network interruption should return the job to the queue."""
 
 
+class GpuScheduler:
+    """Serialize shared-GPU work while allowing CPU ASR to overlap one GPU LLM request."""
+
+    def __init__(self, *, asr_uses_gpu: bool = True) -> None:
+        self._asr_uses_gpu = asr_uses_gpu
+        self._llm_lock = asyncio.Lock()
+        self._condition = asyncio.Condition()
+        self._active_kind: str | None = None
+        self._asr_waiters = 0
+        self._last_asr_completed: float | None = None
+        self._llm_start_window_seconds = 2.0
+
+    async def run_asr(
+        self, request: Callable[[], Awaitable[httpx.Response]]
+    ) -> httpx.Response:
+        if not self._asr_uses_gpu:
+            return await request()
+        async with self._condition:
+            self._asr_waiters += 1
+            try:
+                await self._condition.wait_for(lambda: self._active_kind is None)
+                self._active_kind = "asr"
+            finally:
+                self._asr_waiters -= 1
+        try:
+            return await request()
+        finally:
+            async with self._condition:
+                self._active_kind = None
+                self._last_asr_completed = time.monotonic()
+                self._condition.notify_all()
+
+    async def run_llm(
+        self, request: Callable[[], Awaitable[httpx.Response]]
+    ) -> httpx.Response:
+        if not self._asr_uses_gpu:
+            async with self._llm_lock:
+                return await request()
+        async with self._condition:
+            while True:
+                within_window = (
+                    self._last_asr_completed is not None
+                    and time.monotonic() - self._last_asr_completed
+                    <= self._llm_start_window_seconds
+                )
+                if self._active_kind is None and self._asr_waiters == 0 and within_window:
+                    break
+                await self._condition.wait()
+            self._active_kind = "llm"
+        try:
+            return await request()
+        finally:
+            async with self._condition:
+                self._active_kind = None
+                self._condition.notify_all()
+
+
 def sanitize_worker_id(value: str) -> str:
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
     return "".join(character for character in value if character in allowed)[:64] or "rtx-worker"
+
+
+def provider_proves_local_execution(job_type: str, provider: str) -> bool:
+    """ASR may use the local CPU while every language-model result must prove CUDA."""
+
+    if job_type == "asr":
+        return provider.startswith("faster-whisper:") and provider.endswith(("@cpu", "@cuda"))
+    if job_type in {"translate", "explain"}:
+        return provider.startswith("ollama:") and provider.endswith("@cuda")
+    return True
 
 
 def authorization_headers() -> dict[str, str]:
@@ -87,10 +159,35 @@ async def verify_model_worker(client: httpx.AsyncClient) -> dict[str, Any]:
     health = cast(dict[str, Any], response.json())
     if not health.get("asr_available") or not health.get("ollama_available"):
         raise RuntimeError("local ASR and Ollama providers must both be ready")
-    for key in ("asr_provider", "llm_provider"):
-        if not str(health.get(key, "")).endswith("@cuda"):
-            raise RuntimeError(f"{key} did not prove CUDA execution")
+    if not health.get("ollama_gpu_resident"):
+        raise RuntimeError("configured Ollama model is not resident on the local GPU")
+    asr_provider = str(health.get("asr_provider", ""))
+    if not asr_provider.endswith(("@cpu", "@cuda")):
+        raise RuntimeError("asr_provider did not prove local execution")
+    if not str(health.get("llm_provider", "")).endswith("@cuda"):
+        raise RuntimeError("llm_provider did not prove CUDA execution")
     return health
+
+
+async def model_health_loop(client: httpx.AsyncClient) -> None:
+    """Exit only when the worker process is unreachable, not while a local model is busy."""
+
+    failures = 0
+    while True:
+        await asyncio.sleep(10)
+        try:
+            response = await client.get(f"{MODEL_WORKER_URL}/health", timeout=10)
+            response.raise_for_status()
+            health = response.json()
+            if health.get("status") != "ok" or not health.get("ollama_gpu_resident"):
+                raise RuntimeError("local model worker health status is not ok")
+            failures = 0
+        except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as error:
+            failures += 1
+            if failures >= 3:
+                raise RuntimeError(
+                    "local model worker remained unavailable for 30 seconds"
+                ) from error
 
 
 async def heartbeat_loop(
@@ -133,6 +230,7 @@ async def execute_job(
     gateway: httpx.AsyncClient,
     model: httpx.AsyncClient,
     job: dict[str, Any],
+    scheduler: GpuScheduler,
 ) -> dict[str, Any]:
     job_type = str(job["job_type"])
     model_input = dict(job["input"])
@@ -143,15 +241,23 @@ async def execute_job(
         if expected and hashlib.sha256(binary.content).hexdigest() != expected:
             raise RetryableJobError("input integrity check failed")
         model_input["pcm_s16le_base64"] = base64.b64encode(binary.content).decode("ascii")
-        response = await model.post(
-            f"{MODEL_WORKER_URL}/v1/asr/transcribe", json=model_input, timeout=180
+        response = await scheduler.run_asr(
+            lambda: model.post(
+                f"{MODEL_WORKER_URL}/v1/asr/transcribe", json=model_input, timeout=180
+            )
         )
     elif job_type == "translate":
-        response = await model.post(
-            f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=180
+        response = await scheduler.run_llm(
+            lambda: model.post(
+                f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=180
+            )
         )
     elif job_type == "explain":
-        response = await model.post(f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=300)
+        response = await scheduler.run_llm(
+            lambda: model.post(
+                f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=300
+            )
+        )
     elif job_type == "asset_parse":
         binary = await gateway.get(f"{GATEWAY_URL}/internal/v1/jobs/{job['id']}/input", timeout=60)
         binary.raise_for_status()
@@ -173,8 +279,8 @@ async def execute_job(
     response.raise_for_status()
     result = cast(dict[str, Any], response.json())
     provider = str(result.get("provider", ""))
-    if job_type in {"asr", "translate", "explain"} and not provider.endswith("@cuda"):
-        raise RetryableJobError("model result did not prove CUDA execution")
+    if not provider_proves_local_execution(job_type, provider):
+        raise RetryableJobError("model result did not prove allowed local execution")
     return result
 
 
@@ -219,6 +325,7 @@ async def lane_loop(
     model: httpx.AsyncClient,
     lane: Lane,
     active: dict[str, str | None],
+    scheduler: GpuScheduler,
 ) -> None:
     failures = 0
     while True:
@@ -238,7 +345,7 @@ async def lane_loop(
             started = time.monotonic()
             renew = asyncio.create_task(renew_loop(gateway, lane, job_id))
             try:
-                result = await execute_job(gateway, model, job)
+                result = await execute_job(gateway, model, job, scheduler)
                 await complete_job(
                     gateway, lane, job_id, result, int((time.monotonic() - started) * 1_000)
                 )
@@ -265,10 +372,15 @@ async def run() -> None:
         health = await verify_model_worker(model)
         metadata = {**cuda_metadata(), **health}
         active: dict[str, str | None] = {lane.suffix: None for lane in LANES}
-        tasks = []
+        scheduler = GpuScheduler(
+            asr_uses_gpu=str(health.get("asr_provider", "")).endswith("@cuda")
+        )
+        tasks = [asyncio.create_task(model_health_loop(model))]
         for lane in LANES:
             tasks.append(asyncio.create_task(heartbeat_loop(gateway, lane, metadata, active)))
-            tasks.append(asyncio.create_task(lane_loop(gateway, model, lane, active)))
+            tasks.append(
+                asyncio.create_task(lane_loop(gateway, model, lane, active, scheduler))
+            )
         await asyncio.gather(*tasks)
 
 

@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- The Android client uses the same forest and lime status colors as the desktop console. -->
-    <color name="forest">#152D22</color>
-    <color name="paper">#FBFAF5</color>
-    <color name="lime">#C7E66B</color>
-    <color name="ink">#18221C</color>
+    <color name="ink">#111111</color>
+    <color name="paper">#FFFFFF</color>
+    <color name="muted">#666666</color>
+    <color name="danger">#B00020</color>
 </resources>
