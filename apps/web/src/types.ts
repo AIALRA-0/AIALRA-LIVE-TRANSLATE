@@ -49,6 +49,64 @@ export interface ProjectUpdate {
   created_at: string;
 }
 
+export interface WorkspaceFolder {
+  id: string;
+  owner_subject: string;
+  parent_id: string | null;
+  title: string;
+  sort_order: number;
+  version: number;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceProjectPlacement {
+  project_id: string;
+  folder_id: string | null;
+  sort_order: number;
+  archived_at: string | null;
+  updated_at: string;
+}
+
+export interface WorkspaceSessionMetadata {
+  session_id: string;
+  pinned: boolean;
+  sort_order: number;
+  archived_at: string | null;
+  updated_at: string;
+}
+
+export type LanguageView = "bilingual" | "source" | "translation";
+
+export interface WorkspacePreference {
+  owner_subject: string;
+  device_id: string;
+  active_project_id: string | null;
+  active_session_id: string | null;
+  language_view: LanguageView;
+  sidebar_collapsed: boolean;
+  updated_at: string;
+}
+
+export interface WorkspaceSnapshot {
+  folders: WorkspaceFolder[];
+  projects: Project[];
+  project_placements: WorkspaceProjectPlacement[];
+  sessions: Session[];
+  session_projects: Record<string, string>;
+  session_metadata: WorkspaceSessionMetadata[];
+  preference: WorkspacePreference | null;
+}
+
+export interface WorkspaceUpdate {
+  cursor: number;
+  owner_subject: string;
+  update_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface RecordingLease {
   project_id: string;
   session_id: string;
@@ -66,6 +124,15 @@ export interface ReadWeaveStatus {
   conflicts: number;
   updated_at: string | null;
   note_url: string | null;
+  targets?: ReadWeaveTarget[];
+}
+
+export interface ReadWeaveTarget {
+  node_type: "project" | "session" | "overview" | "transcript" | "explanations" | "assets" | "user_notes";
+  local_id: string;
+  title: string;
+  note_url: string;
+  sync_status: "waiting" | "syncing" | "synced" | "conflict";
 }
 
 export interface ReadWeavePreview {
@@ -81,11 +148,15 @@ export interface ReadWeavePreview {
 // TimelineItem groups revisions under stable segment, card, or page identifiers.
 export interface TimelineItem {
   id: string;
-  kind: "segment" | "translation" | "explanation" | "asset" | "status";
+  kind: "paragraph" | "summary" | "context" | "term" | "asr-warning" | "review" | "asset" | "status" | "session-summary";
   title: string;
   body: string;
   evidenceIds: string[];
   occurredAt: string;
   provider?: string;
   imageUrl?: string;
+  original?: string;
+  translation?: string;
+  sourceProvider?: string;
+  translationProvider?: string;
 }

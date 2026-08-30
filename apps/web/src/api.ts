@@ -1,4 +1,4 @@
-import type { EventEnvelope, Project, ProjectUpdate, ReadWeavePreview, ReadWeaveStatus, RecordingLease, Session } from "./types";
+import type { EventEnvelope, LanguageView, Project, ProjectUpdate, ReadWeavePreview, ReadWeaveStatus, RecordingLease, Session, WorkspaceFolder, WorkspaceProjectPlacement, WorkspaceSnapshot, WorkspaceUpdate } from "./types";
 
 export interface DingtalkCapabilities {
   configured: boolean;
@@ -46,6 +46,16 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
 // All calls use relative URLs so browser, Tauri, and the Rust static host share one client.
 export const api = {
   health: () => checked<RuntimeHealth>(fetch("/api/v1/health")),
+  workspace: (deviceId: string) => checked<WorkspaceSnapshot>(fetch(`/api/v1/workspace?device_id=${encodeURIComponent(deviceId)}`)),
+  createFolder: (input: { title: string; parent_id: string | null; sort_order?: number }) => checked<WorkspaceFolder>(fetch("/api/v1/workspace/folders", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+  })),
+  updateFolder: (folderId: string, input: { title: string; parent_id: string | null; sort_order: number; archived: boolean }) => checked<WorkspaceFolder>(fetch(`/api/v1/workspace/folders/${folderId}`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+  })),
+  updatePreference: (deviceId: string, input: { active_project_id: string | null; active_session_id: string | null; language_view: LanguageView; sidebar_collapsed: boolean }) => checked(fetch(`/api/v1/workspace/preferences/${deviceId}`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+  })),
   listSessions: () => checked<Session[]>(fetch("/api/v1/sessions")),
   listProjects: () => checked<Project[]>(fetch("/api/v1/projects")),
   createProject: (title: string) => checked<Project>(fetch("/api/v1/projects", {
@@ -53,7 +63,16 @@ export const api = {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ title, source_language: "en", target_language: "zh-CN" }),
   })),
+  updateProject: (projectId: string, title: string) => checked<Project>(fetch(`/api/v1/projects/${projectId}`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }),
+  })),
+  placeProject: (projectId: string, input: { folder_id: string | null; sort_order: number; archived: boolean }) => checked<WorkspaceProjectPlacement>(fetch(`/api/v1/projects/${projectId}/placement`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+  })),
   listProjectSessions: (projectId: string) => checked<Session[]>(fetch(`/api/v1/projects/${projectId}/sessions`)),
+  updateSession: (projectId: string, sessionId: string, input: { title?: string; pinned: boolean; sort_order: number; archived: boolean }) => checked(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+  })),
   createProjectSession: (projectId: string, input: { title: string; consent_confirmed: boolean; device_id: string }) =>
     checked<Session>(fetch(`/api/v1/projects/${projectId}/sessions`, {
       method: "POST",
@@ -72,6 +91,8 @@ export const api = {
     checked<Session>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/recording/stop`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: leaseToken }),
     })),
+  createDevicePairing: (projectId: string, sessionId: string) =>
+    checked<{ code: string; expires_at: string }>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/device-pairing`, { method: "POST" })),
   readWeaveStatus: (projectId: string) => checked<ReadWeaveStatus>(fetch(`/api/v1/projects/${projectId}/readweave`)),
   readWeavePreview: (projectId: string) => checked<ReadWeavePreview>(fetch(`/api/v1/projects/${projectId}/readweave/preview`)),
   reconcileReadWeave: (projectId: string) => checked<{ queued: boolean }>(fetch(`/api/v1/projects/${projectId}/readweave/reconcile`, { method: "POST" })),
@@ -117,6 +138,16 @@ export const api = {
     );
   },
 };
+
+export function subscribeWorkspace(onUpdate: (update: WorkspaceUpdate) => void, onConnection: (connected: boolean) => void): () => void {
+  const source = new EventSource("/api/v1/workspace/stream");
+  source.onopen = () => onConnection(true);
+  source.onerror = () => onConnection(false);
+  ["workspace.folder.created", "workspace.folder.updated", "workspace.folder.moved", "workspace.folder.archived", "workspace.project.created", "workspace.project.updated", "workspace.project.placed", "workspace.session.created", "workspace.session.updated"].forEach((eventName) => {
+    source.addEventListener(eventName, (message) => onUpdate(JSON.parse((message as MessageEvent).data) as WorkspaceUpdate));
+  });
+  return () => source.close();
+}
 
 export function subscribeProject(
   projectId: string,

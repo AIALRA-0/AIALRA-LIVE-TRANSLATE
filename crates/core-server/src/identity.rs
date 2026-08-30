@@ -15,7 +15,27 @@ pub async fn identity_and_session_scope(
     next: Next,
 ) -> Result<Response, ApiError> {
     let deployment = std::env::var("AIALRA_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".to_owned());
-    let subject = if deployment == "local" {
+    let bearer = request
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let subject = if let Some(token) = bearer {
+        let credential = state
+            .store
+            .authenticate_device(&crate::pairing::hash_secret(token))?
+            .ok_or_else(|| ApiError::unauthorized("device credential is invalid or expired"))?;
+        if !device_scope_allows(
+            request.uri().path(),
+            &credential.project_id,
+            &credential.session_id,
+        ) {
+            return Err(ApiError::forbidden(
+                "device credential is limited to its paired recording session",
+            ));
+        }
+        credential.owner_subject
+    } else if deployment == "local" {
         "local-user".to_owned()
     } else {
         request
@@ -38,6 +58,14 @@ pub async fn identity_and_session_scope(
     }
     request.extensions_mut().insert(CurrentUser(subject));
     Ok(next.run(request).await)
+}
+
+fn device_scope_allows(path: &str, project_id: &str, session_id: &str) -> bool {
+    let project_recording_prefix =
+        format!("/projects/{project_id}/sessions/{session_id}/recording/");
+    let session_audio_prefix = format!("/sessions/{session_id}/sources/");
+    path.starts_with(&project_recording_prefix)
+        || (path.starts_with(&session_audio_prefix) && path.ends_with("/audio"))
 }
 
 pub fn valid_identifier(value: &str) -> bool {
@@ -73,5 +101,24 @@ mod tests {
             Some("session_123")
         );
         assert_eq!(session_id_from_path("/projects/project_123"), None);
+    }
+
+    #[test]
+    fn paired_device_is_restricted_to_one_recording_session() {
+        assert!(device_scope_allows(
+            "/projects/project_1/sessions/session_1/recording/acquire",
+            "project_1",
+            "session_1"
+        ));
+        assert!(device_scope_allows(
+            "/sessions/session_1/sources/android/audio",
+            "project_1",
+            "session_1"
+        ));
+        assert!(!device_scope_allows(
+            "/projects/project_2/sessions/session_1/recording/acquire",
+            "project_1",
+            "session_1"
+        ));
     }
 }

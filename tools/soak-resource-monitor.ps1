@@ -9,6 +9,31 @@ $ErrorActionPreference = "Stop"
 $samples = [System.Collections.Generic.List[object]]::new()
 $deadline = (Get-Date).AddMinutes($Minutes)
 
+function Invoke-BoundedSsh([string]$command) {
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'ssh.exe'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-o', 'ConnectTimeout=10',
+        '-o', 'ServerAliveInterval=5',
+        '-o', 'ServerAliveCountMax=2',
+        $SshTarget,
+        $command
+    )) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::Start($startInfo)
+    if (!$process.WaitForExit(15000)) {
+        $process.Kill($true)
+        $process.WaitForExit()
+        return ''
+    }
+    return $process.StandardOutput.ReadToEnd()
+}
+
 function Convert-MemoryToMiB([string]$value) {
     if ($value -match '([0-9.]+)([KMG]iB)') {
         $amount = [double]$Matches[1]
@@ -43,8 +68,9 @@ while ((Get-Date) -lt $deadline) {
         }
     }
     $gpuUsed = (& nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
-    $remoteUsage = (& ssh $SshTarget 'docker stats --no-stream --format "{{.MemUsage}}" aialra-live-translate-core-1' 2>$null)
-    $cgroupStats = @(& ssh $SshTarget 'docker exec aialra-live-translate-core-1 cat /sys/fs/cgroup/memory.stat' 2>$null)
+    $remoteUsage = Invoke-BoundedSsh 'timeout 10s docker stats --no-stream --format "{{.MemUsage}}" aialra-live-translate-core-1'
+    $cgroupText = Invoke-BoundedSsh 'timeout 10s docker exec aialra-live-translate-core-1 cat /sys/fs/cgroup/memory.stat'
+    $cgroupStats = @($cgroupText -split "`r?`n")
     $coreAnonBytes = ($cgroupStats | Where-Object { $_ -match '^anon\s+([0-9]+)$' } | ForEach-Object { [long]$Matches[1] } | Select-Object -First 1)
     $coreFileBytes = ($cgroupStats | Where-Object { $_ -match '^file\s+([0-9]+)$' } | ForEach-Object { [long]$Matches[1] } | Select-Object -First 1)
     $coreInactiveFileBytes = ($cgroupStats | Where-Object { $_ -match '^inactive_file\s+([0-9]+)$' } | ForEach-Object { [long]$Matches[1] } | Select-Object -First 1)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendEvent, eventToTimelineItem } from "./timeline";
+import { appendEvent, buildCourseDocument } from "./timeline";
 import type { EventEnvelope } from "./types";
 
 // Fixture creation keeps protocol metadata stable across reducer tests.
@@ -23,7 +23,7 @@ function event(eventType: string, payload: Record<string, unknown>): EventEnvelo
 
 describe("timeline mapping", () => {
   it("keeps segment and page evidence on explanation cards", () => {
-    const item = eventToTimelineItem(
+    const items = buildCourseDocument([
       event("explanation.card.created", {
         card_id: "card-1",
         result: {
@@ -33,8 +33,17 @@ describe("timeline mapping", () => {
           provider: "local",
         },
       }),
-    );
-    expect(item?.evidenceIds).toEqual(["seg-1", "page-2"]);
+    ]);
+    expect(items[0]?.evidenceIds).toEqual(["seg-1", "page-2"]);
+  });
+
+  it("pairs translations with their source paragraph", () => {
+    const source = event("segment.finalized", { segment_id: "seg-1", text: "attention", provider: "asr" });
+    const translation = { ...event("translation.finalized", { segment_id: "seg-1", text: "注意力", provider: "llm" }), event_id: "evt-translation" };
+    const [paragraph] = buildCourseDocument([source, translation]);
+    expect(paragraph.kind).toBe("paragraph");
+    expect(paragraph.original).toBe("attention");
+    expect(paragraph.translation).toBe("注意力");
   });
 
   it("deduplicates a replayed event by event ID", () => {

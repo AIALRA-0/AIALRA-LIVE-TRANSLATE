@@ -3,7 +3,7 @@
 use aialra_core_domain::SessionState;
 use aialra_event_protocol::EventEnvelope;
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +15,10 @@ const MODEL_JOBS_MIGRATION: &str = include_str!("../migrations/0002_model_jobs.s
 const PROJECTS_CONNECTORS_MIGRATION: &str =
     include_str!("../migrations/0003_projects_connectors.sql");
 const JOB_METRICS_MIGRATION: &str = include_str!("../migrations/0004_job_metrics.sql");
+const WORKSPACE_MIGRATION: &str = include_str!("../migrations/0005_workspace.migration");
+const DEVICE_PAIRING_MIGRATION: &str = include_str!("../migrations/0006_device_pairing.migration");
+const SUMMARY_MODEL_GATE_MIGRATION: &str =
+    include_str!("../migrations/0007_summary_model_gate.migration");
 
 #[derive(Clone)]
 pub struct EventStore {
@@ -65,6 +69,54 @@ impl EventStore {
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?1)",
             [Utc::now().to_rfc3339()],
         )?;
+        let workspace_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 5)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !workspace_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(WORKSPACE_MIGRATION)
+                .context("apply workspace migration")?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (5, ?1)",
+                [Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
+        let pairing_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 6)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !pairing_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(DEVICE_PAIRING_MIGRATION)
+                .context("apply device pairing migration")?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (6, ?1)",
+                [Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
+        let summary_gate_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 7)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !summary_gate_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(SUMMARY_MODEL_GATE_MIGRATION)
+                .context("apply summary model gate migration")?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (7, ?1)",
+                [Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -140,6 +192,20 @@ impl EventStore {
             .context("query session")
     }
 
+    pub fn update_session_title(
+        &self,
+        session_id: &str,
+        title: &str,
+    ) -> Result<Option<SessionRecord>> {
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE sessions SET title = ?2, updated_at = ?3 WHERE id = ?1",
+            params![session_id, title, Utc::now().to_rfc3339()],
+        )?;
+        drop(connection);
+        self.get_session(session_id)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
@@ -157,6 +223,14 @@ impl EventStore {
         connection.execute(
             "INSERT INTO projects(id, owner_subject, title, source_language, target_language, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
             params![project.id, project.owner_subject, project.title, project.source_language, project.target_language, now.to_rfc3339()],
+        )?;
+        connection.execute(
+            "INSERT INTO workspace_project_placements(project_id, updated_at) VALUES (?1, ?2)",
+            params![project.id, now.to_rfc3339()],
+        )?;
+        connection.execute(
+            "INSERT INTO project_ai_policies(project_id, updated_at) VALUES (?1, ?2)",
+            params![project.id, now.to_rfc3339()],
         )?;
         drop(connection);
         self.get_project(&project.id)?
@@ -212,6 +286,10 @@ impl EventStore {
         connection.execute(
             "INSERT INTO project_sessions(project_id, session_id, created_by_subject, created_by_device, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![project_id, session_id, subject, device_id, Utc::now().to_rfc3339()],
+        )?;
+        connection.execute(
+            "INSERT INTO workspace_session_metadata(session_id, updated_at) VALUES (?1, ?2)",
+            params![session_id, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -294,6 +372,237 @@ impl EventStore {
         Ok(statement
             .query_map(params![project_id, cursor], map_project_update)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_workspace_folders(
+        &self,
+        owner_subject: &str,
+    ) -> Result<Vec<WorkspaceFolderRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, owner_subject, parent_id, title, sort_order, version, archived_at, created_at, updated_at FROM workspace_folders WHERE owner_subject = ?1 ORDER BY archived_at IS NOT NULL, sort_order, title, id",
+        )?;
+        Ok(statement
+            .query_map([owner_subject], map_workspace_folder)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_workspace_folder(&self, folder_id: &str) -> Result<Option<WorkspaceFolderRecord>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT id, owner_subject, parent_id, title, sort_order, version, archived_at, created_at, updated_at FROM workspace_folders WHERE id = ?1",
+                [folder_id],
+                map_workspace_folder,
+            )
+            .optional()
+            .context("query workspace folder")
+    }
+
+    pub fn create_workspace_folder(
+        &self,
+        folder: &NewWorkspaceFolder,
+    ) -> Result<WorkspaceFolderRecord> {
+        let now = Utc::now();
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO workspace_folders(id, owner_subject, parent_id, title, sort_order, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
+            params![folder.id, folder.owner_subject, folder.parent_id, folder.title, folder.sort_order, now.to_rfc3339()],
+        )?;
+        drop(connection);
+        self.get_workspace_folder(&folder.id)?
+            .context("workspace folder disappeared after creation")
+    }
+
+    pub fn update_workspace_folder(
+        &self,
+        folder_id: &str,
+        owner_subject: &str,
+        title: &str,
+        parent_id: Option<&str>,
+        sort_order: i64,
+        archived: bool,
+    ) -> Result<Option<WorkspaceFolderRecord>> {
+        let now = Utc::now();
+        let archived_at = archived.then(|| now.to_rfc3339());
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE workspace_folders SET title = ?3, parent_id = ?4, sort_order = ?5, archived_at = ?6, version = version + 1, updated_at = ?7 WHERE id = ?1 AND owner_subject = ?2",
+            params![folder_id, owner_subject, title, parent_id, sort_order, archived_at, now.to_rfc3339()],
+        )?;
+        drop(connection);
+        self.get_workspace_folder(folder_id)
+    }
+
+    pub fn list_workspace_project_placements(
+        &self,
+        owner_subject: &str,
+    ) -> Result<Vec<WorkspaceProjectPlacementRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT w.project_id, w.folder_id, w.sort_order, w.archived_at, w.updated_at FROM workspace_project_placements w JOIN projects p ON p.id = w.project_id WHERE p.owner_subject = ?1 ORDER BY w.archived_at IS NOT NULL, w.sort_order, p.updated_at DESC",
+        )?;
+        Ok(statement
+            .query_map([owner_subject], map_workspace_project_placement)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_workspace_project_placement(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<WorkspaceProjectPlacementRecord>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT project_id, folder_id, sort_order, archived_at, updated_at FROM workspace_project_placements WHERE project_id = ?1",
+                [project_id],
+                map_workspace_project_placement,
+            )
+            .optional()
+            .context("query workspace project placement")
+    }
+
+    pub fn update_workspace_project_placement(
+        &self,
+        project_id: &str,
+        folder_id: Option<&str>,
+        sort_order: i64,
+        archived: bool,
+    ) -> Result<WorkspaceProjectPlacementRecord> {
+        let now = Utc::now();
+        let archived_at = archived.then(|| now.to_rfc3339());
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO workspace_project_placements(project_id, folder_id, sort_order, archived_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(project_id) DO UPDATE SET folder_id = excluded.folder_id, sort_order = excluded.sort_order, archived_at = excluded.archived_at, updated_at = excluded.updated_at",
+            params![project_id, folder_id, sort_order, archived_at, now.to_rfc3339()],
+        )?;
+        connection.query_row(
+            "SELECT project_id, folder_id, sort_order, archived_at, updated_at FROM workspace_project_placements WHERE project_id = ?1",
+            [project_id],
+            map_workspace_project_placement,
+        ).context("query workspace project placement")
+    }
+
+    pub fn list_workspace_session_metadata(
+        &self,
+        owner_subject: &str,
+    ) -> Result<Vec<WorkspaceSessionMetadataRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT w.session_id, w.pinned, w.sort_order, w.archived_at, w.updated_at FROM workspace_session_metadata w JOIN project_sessions ps ON ps.session_id = w.session_id JOIN projects p ON p.id = ps.project_id WHERE p.owner_subject = ?1 ORDER BY w.archived_at IS NOT NULL, w.pinned DESC, w.sort_order",
+        )?;
+        Ok(statement
+            .query_map([owner_subject], map_workspace_session_metadata)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn update_workspace_session_metadata(
+        &self,
+        session_id: &str,
+        pinned: bool,
+        sort_order: i64,
+        archived: bool,
+    ) -> Result<WorkspaceSessionMetadataRecord> {
+        let now = Utc::now();
+        let archived_at = archived.then(|| now.to_rfc3339());
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO workspace_session_metadata(session_id, pinned, sort_order, archived_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(session_id) DO UPDATE SET pinned = excluded.pinned, sort_order = excluded.sort_order, archived_at = excluded.archived_at, updated_at = excluded.updated_at",
+            params![session_id, pinned, sort_order, archived_at, now.to_rfc3339()],
+        )?;
+        connection.query_row(
+            "SELECT session_id, pinned, sort_order, archived_at, updated_at FROM workspace_session_metadata WHERE session_id = ?1",
+            [session_id],
+            map_workspace_session_metadata,
+        ).context("query workspace session metadata")
+    }
+
+    pub fn get_workspace_preference(
+        &self,
+        owner_subject: &str,
+        device_id: &str,
+    ) -> Result<Option<WorkspaceDevicePreferenceRecord>> {
+        let connection = self.lock()?;
+        connection.query_row(
+            "SELECT owner_subject, device_id, active_project_id, active_session_id, language_view, sidebar_collapsed, updated_at FROM workspace_device_preferences WHERE owner_subject = ?1 AND device_id = ?2",
+            params![owner_subject, device_id],
+            map_workspace_device_preference,
+        ).optional().context("query workspace device preference")
+    }
+
+    pub fn upsert_workspace_preference(
+        &self,
+        preference: &WorkspaceDevicePreferenceRecord,
+    ) -> Result<WorkspaceDevicePreferenceRecord> {
+        let now = Utc::now();
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO workspace_device_preferences(owner_subject, device_id, active_project_id, active_session_id, language_view, sidebar_collapsed, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(owner_subject, device_id) DO UPDATE SET active_project_id = excluded.active_project_id, active_session_id = excluded.active_session_id, language_view = excluded.language_view, sidebar_collapsed = excluded.sidebar_collapsed, updated_at = excluded.updated_at",
+            params![preference.owner_subject, preference.device_id, preference.active_project_id, preference.active_session_id, preference.language_view, preference.sidebar_collapsed, now.to_rfc3339()],
+        )?;
+        drop(connection);
+        self.get_workspace_preference(&preference.owner_subject, &preference.device_id)?
+            .context("workspace preference disappeared after update")
+    }
+
+    pub fn insert_workspace_update(
+        &self,
+        owner_subject: &str,
+        update_type: &str,
+        payload: &Value,
+    ) -> Result<WorkspaceUpdateRecord> {
+        let created_at = Utc::now();
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO workspace_updates(owner_subject, update_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![owner_subject, update_type, serde_json::to_string(payload)?, created_at.to_rfc3339()],
+        )?;
+        Ok(WorkspaceUpdateRecord {
+            cursor: connection.last_insert_rowid(),
+            owner_subject: owner_subject.to_owned(),
+            update_type: update_type.to_owned(),
+            payload: payload.clone(),
+            created_at,
+        })
+    }
+
+    pub fn list_workspace_updates_after(
+        &self,
+        owner_subject: &str,
+        cursor: i64,
+    ) -> Result<Vec<WorkspaceUpdateRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT cursor, owner_subject, update_type, payload_json, created_at FROM workspace_updates WHERE owner_subject = ?1 AND cursor > ?2 ORDER BY cursor",
+        )?;
+        Ok(statement
+            .query_map(params![owner_subject, cursor], map_workspace_update)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_project_ai_policy(&self, project_id: &str) -> Result<ProjectAiPolicyRecord> {
+        let connection = self.lock()?;
+        connection.query_row(
+            "SELECT project_id, cloud_enabled, allowed_modalities_json, local_translation_model, local_explanation_model, local_summary_model, local_vision_model, updated_at FROM project_ai_policies WHERE project_id = ?1",
+            [project_id],
+            map_project_ai_policy,
+        ).context("query project AI policy")
+    }
+
+    pub fn update_project_ai_policy(
+        &self,
+        project_id: &str,
+        cloud_enabled: bool,
+        allowed_modalities: &[String],
+    ) -> Result<ProjectAiPolicyRecord> {
+        let now = Utc::now();
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE project_ai_policies SET cloud_enabled = ?2, allowed_modalities_json = ?3, updated_at = ?4 WHERE project_id = ?1",
+            params![project_id, cloud_enabled, serde_json::to_string(allowed_modalities)?, now.to_rfc3339()],
+        )?;
+        drop(connection);
+        self.get_project_ai_policy(project_id)
     }
 
     /// `INSERT OR IGNORE` turns retransmitted source events into a successful idempotent acknowledgement.
@@ -812,6 +1121,31 @@ impl EventStore {
             .context("query latest worker")
     }
 
+    pub fn list_workers(&self) -> Result<Vec<WorkerNodeRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, status, capabilities_json, model_metadata_json, active_job_id, last_seen_at FROM worker_nodes ORDER BY last_seen_at DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let capabilities: String = row.get(2)?;
+            let metadata: String = row.get(3)?;
+            let last_seen: String = row.get(5)?;
+            Ok(WorkerNodeRecord {
+                id: row.get(0)?,
+                status: row.get(1)?,
+                capabilities: serde_json::from_str(&capabilities)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                model_metadata: serde_json::from_str(&metadata)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                active_job_id: row.get(4)?,
+                last_seen_at: DateTime::parse_from_rfc3339(&last_seen)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?
+                    .with_timezone(&Utc),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn enqueue_connector_job(&self, job: &NewConnectorJob) -> Result<ConnectorJobRecord> {
         let now = Utc::now();
         let available_at = now + chrono::Duration::seconds(job.delay_seconds.clamp(0, 3_600));
@@ -943,6 +1277,106 @@ impl EventStore {
         Ok(())
     }
 
+    pub fn get_remote_object_details(
+        &self,
+        connector: &str,
+        object_type: &str,
+        local_id: &str,
+    ) -> Result<Option<RemoteObjectDetailsRecord>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT connector, object_type, local_id, remote_branch_id, node_type, last_synced_version, updated_at FROM remote_object_details WHERE connector = ?1 AND object_type = ?2 AND local_id = ?3",
+                params![connector, object_type, local_id],
+                map_remote_object_details,
+            )
+            .optional()
+            .context("query remote object details")
+    }
+
+    pub fn upsert_remote_object_details(&self, record: &RemoteObjectDetailsRecord) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO remote_object_details(connector, object_type, local_id, remote_branch_id, node_type, last_synced_version, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(connector, object_type, local_id) DO UPDATE SET remote_branch_id = excluded.remote_branch_id, node_type = excluded.node_type, last_synced_version = excluded.last_synced_version, updated_at = excluded.updated_at",
+            params![record.connector, record.object_type, record.local_id, record.remote_branch_id, record.node_type, record.last_synced_version, record.updated_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_device_pairing_code(&self, record: &DevicePairingCodeRecord) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO device_pairing_codes(code_hash, owner_subject, project_id, session_id, expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![record.code_hash, record.owner_subject, record.project_id, record.session_id, record.expires_at.to_rfc3339(), record.created_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn exchange_device_pairing_code(
+        &self,
+        code_hash: &str,
+        token_hash: &str,
+        device_id: &str,
+        credential_expires_at: DateTime<Utc>,
+    ) -> Result<Option<DeviceCredentialRecord>> {
+        let now = Utc::now();
+        let connection = self.lock()?;
+        let transaction = connection.unchecked_transaction()?;
+        let pairing = transaction
+            .query_row(
+                "SELECT owner_subject, project_id, session_id, expires_at FROM device_pairing_codes WHERE code_hash = ?1 AND consumed_at IS NULL",
+                [code_hash],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+            )
+            .optional()?;
+        let Some((owner_subject, project_id, session_id, expires_at)) = pairing else {
+            return Ok(None);
+        };
+        if parse_time(expires_at)? <= now {
+            return Ok(None);
+        }
+        if transaction.execute(
+            "UPDATE device_pairing_codes SET consumed_at = ?2 WHERE code_hash = ?1 AND consumed_at IS NULL",
+            params![code_hash, now.to_rfc3339()],
+        )? != 1 {
+            return Ok(None);
+        }
+        transaction.execute(
+            "INSERT INTO device_credentials(token_hash, owner_subject, project_id, session_id, device_id, expires_at, created_at, last_used_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![token_hash, owner_subject, project_id, session_id, device_id, credential_expires_at.to_rfc3339(), now.to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(Some(DeviceCredentialRecord {
+            token_hash: token_hash.to_owned(),
+            owner_subject,
+            project_id,
+            session_id,
+            device_id: device_id.to_owned(),
+            expires_at: credential_expires_at,
+            created_at: now,
+            last_used_at: now,
+        }))
+    }
+
+    pub fn authenticate_device(&self, token_hash: &str) -> Result<Option<DeviceCredentialRecord>> {
+        let now = Utc::now();
+        let connection = self.lock()?;
+        let record = connection
+            .query_row(
+                "SELECT token_hash, owner_subject, project_id, session_id, device_id, expires_at, created_at, last_used_at FROM device_credentials WHERE token_hash = ?1 AND revoked_at IS NULL AND expires_at > ?2",
+                params![token_hash, now.to_rfc3339()],
+                map_device_credential,
+            )
+            .optional()?;
+        if record.is_some() {
+            connection.execute(
+                "UPDATE device_credentials SET last_used_at = ?2 WHERE token_hash = ?1",
+                params![token_hash, now.to_rfc3339()],
+            )?;
+        }
+        Ok(record)
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.connection
             .lock()
@@ -1004,6 +1438,78 @@ pub struct ProjectUpdateRecord {
     pub update_type: String,
     pub payload: Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewWorkspaceFolder {
+    pub id: String,
+    pub owner_subject: String,
+    pub parent_id: Option<String>,
+    pub title: String,
+    pub sort_order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceFolderRecord {
+    pub id: String,
+    pub owner_subject: String,
+    pub parent_id: Option<String>,
+    pub title: String,
+    pub sort_order: i64,
+    pub version: u64,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceProjectPlacementRecord {
+    pub project_id: String,
+    pub folder_id: Option<String>,
+    pub sort_order: i64,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSessionMetadataRecord {
+    pub session_id: String,
+    pub pinned: bool,
+    pub sort_order: i64,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDevicePreferenceRecord {
+    pub owner_subject: String,
+    pub device_id: String,
+    pub active_project_id: Option<String>,
+    pub active_session_id: Option<String>,
+    pub language_view: String,
+    pub sidebar_collapsed: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceUpdateRecord {
+    pub cursor: i64,
+    pub owner_subject: String,
+    pub update_type: String,
+    pub payload: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectAiPolicyRecord {
+    pub project_id: String,
+    pub cloud_enabled: bool,
+    pub allowed_modalities: Vec<String>,
+    pub local_translation_model: String,
+    pub local_explanation_model: String,
+    pub local_summary_model: String,
+    pub local_vision_model: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1139,6 +1645,39 @@ pub struct RemoteObjectMapRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemoteObjectDetailsRecord {
+    pub connector: String,
+    pub object_type: String,
+    pub local_id: String,
+    pub remote_branch_id: Option<String>,
+    pub node_type: Option<String>,
+    pub last_synced_version: Option<i64>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DevicePairingCodeRecord {
+    pub code_hash: String,
+    pub owner_subject: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceCredentialRecord {
+    pub token_hash: String,
+    pub owner_subject: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub device_id: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelJobRecord {
     pub id: String,
@@ -1227,18 +1766,17 @@ fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         privacy_mode: row.get(5)?,
         consent_confirmed: row.get(6)?,
         demo_mode: row.get(7)?,
-        created_at: DateTime::parse_from_rfc3339(&created)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?
-            .with_timezone(&Utc),
-        updated_at: DateTime::parse_from_rfc3339(&updated)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?
-            .with_timezone(&Utc),
+        created_at: parse_time(created)?,
+        updated_at: parse_time(updated)?,
     })
 }
 
 fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(&value)
-        .map(|time| time.with_timezone(&Utc))
+    if let Ok(time) = DateTime::parse_from_rfc3339(&value) {
+        return Ok(time.with_timezone(&Utc));
+    }
+    NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S")
+        .map(|time| DateTime::<Utc>::from_naive_utc_and_offset(time, Utc))
         .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
@@ -1264,6 +1802,87 @@ fn map_project_update(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectUpdate
         update_type: row.get(3)?,
         payload: serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?,
         created_at: parse_time(row.get(5)?)?,
+    })
+}
+
+fn map_workspace_folder(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceFolderRecord> {
+    let archived: Option<String> = row.get(6)?;
+    Ok(WorkspaceFolderRecord {
+        id: row.get(0)?,
+        owner_subject: row.get(1)?,
+        parent_id: row.get(2)?,
+        title: row.get(3)?,
+        sort_order: row.get(4)?,
+        version: row.get(5)?,
+        archived_at: archived.map(parse_time).transpose()?,
+        created_at: parse_time(row.get(7)?)?,
+        updated_at: parse_time(row.get(8)?)?,
+    })
+}
+
+fn map_workspace_project_placement(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceProjectPlacementRecord> {
+    let archived: Option<String> = row.get(3)?;
+    Ok(WorkspaceProjectPlacementRecord {
+        project_id: row.get(0)?,
+        folder_id: row.get(1)?,
+        sort_order: row.get(2)?,
+        archived_at: archived.map(parse_time).transpose()?,
+        updated_at: parse_time(row.get(4)?)?,
+    })
+}
+
+fn map_workspace_session_metadata(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceSessionMetadataRecord> {
+    let archived: Option<String> = row.get(3)?;
+    Ok(WorkspaceSessionMetadataRecord {
+        session_id: row.get(0)?,
+        pinned: row.get(1)?,
+        sort_order: row.get(2)?,
+        archived_at: archived.map(parse_time).transpose()?,
+        updated_at: parse_time(row.get(4)?)?,
+    })
+}
+
+fn map_workspace_device_preference(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceDevicePreferenceRecord> {
+    Ok(WorkspaceDevicePreferenceRecord {
+        owner_subject: row.get(0)?,
+        device_id: row.get(1)?,
+        active_project_id: row.get(2)?,
+        active_session_id: row.get(3)?,
+        language_view: row.get(4)?,
+        sidebar_collapsed: row.get(5)?,
+        updated_at: parse_time(row.get(6)?)?,
+    })
+}
+
+fn map_workspace_update(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceUpdateRecord> {
+    let payload: String = row.get(3)?;
+    Ok(WorkspaceUpdateRecord {
+        cursor: row.get(0)?,
+        owner_subject: row.get(1)?,
+        update_type: row.get(2)?,
+        payload: serde_json::from_str(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        created_at: parse_time(row.get(4)?)?,
+    })
+}
+
+fn map_project_ai_policy(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectAiPolicyRecord> {
+    let modalities: String = row.get(2)?;
+    Ok(ProjectAiPolicyRecord {
+        project_id: row.get(0)?,
+        cloud_enabled: row.get(1)?,
+        allowed_modalities: serde_json::from_str(&modalities)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        local_translation_model: row.get(3)?,
+        local_explanation_model: row.get(4)?,
+        local_summary_model: row.get(5)?,
+        local_vision_model: row.get(6)?,
+        updated_at: parse_time(row.get(7)?)?,
     })
 }
 
@@ -1329,6 +1948,33 @@ fn map_remote_object_map(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteObje
         content_hash: row.get(5)?,
         created_at: parse_time(row.get(6)?)?,
         updated_at: parse_time(row.get(7)?)?,
+    })
+}
+
+fn map_remote_object_details(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RemoteObjectDetailsRecord> {
+    Ok(RemoteObjectDetailsRecord {
+        connector: row.get(0)?,
+        object_type: row.get(1)?,
+        local_id: row.get(2)?,
+        remote_branch_id: row.get(3)?,
+        node_type: row.get(4)?,
+        last_synced_version: row.get(5)?,
+        updated_at: parse_time(row.get(6)?)?,
+    })
+}
+
+fn map_device_credential(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceCredentialRecord> {
+    Ok(DeviceCredentialRecord {
+        token_hash: row.get(0)?,
+        owner_subject: row.get(1)?,
+        project_id: row.get(2)?,
+        session_id: row.get(3)?,
+        device_id: row.get(4)?,
+        expires_at: parse_time(row.get(5)?)?,
+        created_at: parse_time(row.get(6)?)?,
+        last_used_at: parse_time(row.get(7)?)?,
     })
 }
 
@@ -1415,6 +2061,12 @@ mod tests {
             id: id.to_owned(),
             ..test_session()
         }
+    }
+
+    #[test]
+    fn sqlite_legacy_timestamp_is_read_as_utc() {
+        let parsed = parse_time("2026-08-28 08:57:06".to_owned()).unwrap();
+        assert_eq!(parsed.to_rfc3339(), "2026-08-28T08:57:06+00:00");
     }
 
     #[test]

@@ -18,9 +18,9 @@ const HEADER_BYTES: usize = 16;
 const SAMPLE_RATE: u32 = 16_000;
 const CHANNELS: u16 = 1;
 const PCM_BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * 2;
-const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 2;
-const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 8;
-const SILENCE_LOOKBACK_BYTES: usize = PCM_BYTES_PER_SECOND;
+const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 3 / 2;
+const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 5;
+const SILENCE_LOOKBACK_BYTES: usize = PCM_BYTES_PER_SECOND * 450 / 1_000;
 const SILENCE_MEAN_ABSOLUTE_PCM: i64 = 550;
 const MAX_FRAME_BYTES: usize = PCM_BYTES_PER_SECOND * 3 + HEADER_BYTES;
 const FIRST_AUDIO_SEQUENCE: u64 = 1;
@@ -165,7 +165,7 @@ async fn persist_frame(
 }
 
 fn trailing_audio_is_silent(pcm: &[u8]) -> bool {
-    // One second of low-amplitude PCM closes a phrase without sending its trailing silence onward.
+    // A 450 ms quiet tail closes a phrase after the 1.5 second minimum window.
     let lookback_start = pcm.len().saturating_sub(SILENCE_LOOKBACK_BYTES);
     let trailing = &pcm[lookback_start..];
     let mut total = 0_i64;

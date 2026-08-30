@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyLeaseAcquired, shouldRefreshProjectSessions, shouldRefreshReadWeave } from "./sessionState";
+import { applyLeaseAcquired, applySessionStateEvent, shouldRefreshProjectSessions, shouldRefreshReadWeave } from "./sessionState";
 import type { Session } from "./types";
 
 const session = (state: Session["state"]): Session => ({
@@ -22,6 +22,19 @@ describe("project lease replay", () => {
 
   it("does not regress a completed session", () => {
     expect(applyLeaseAcquired(session("completed")).state).toBe("completed");
+  });
+});
+
+describe("session event replay", () => {
+  it("does not regress a completed snapshot while old events replay", () => {
+    expect(applySessionStateEvent(session("completed"), "session.recording.started").state).toBe("completed");
+    expect(applySessionStateEvent(session("completed"), "session.processing").state).toBe("completed");
+  });
+
+  it("advances a live session through the durable state machine", () => {
+    expect(applySessionStateEvent(session("ready"), "session.recording.started").state).toBe("recording");
+    expect(applySessionStateEvent(session("recording"), "session.processing").state).toBe("processing");
+    expect(applySessionStateEvent(session("processing"), "session.completed").state).toBe("completed");
   });
 });
 

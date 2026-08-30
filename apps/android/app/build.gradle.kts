@@ -14,7 +14,11 @@ android {
         versionCode = 1 // First internal bootstrap build.
         versionName = "0.1.0" // Human-readable bootstrap version.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" // Reserved for device tests.
+        val pairingServer = providers.environmentVariable("AIALRA_ANDROID_PAIRING_SERVER").orElse("").get()
+        buildConfigField("String", "PAIRING_SERVER_URL", "\"${pairingServer.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
+
+    buildFeatures { buildConfig = true }
 
     buildTypes {
         release {

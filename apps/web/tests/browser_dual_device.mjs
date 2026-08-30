@@ -177,9 +177,9 @@ try {
     }
   }
   await recorder.getByRole("button", { name: /停止并保存/ }).click();
-  await recorder.getByText("课程会话已安全结束，模型队列已排空").waitFor({ timeout: 10 * 60_000 });
-  await observer.getByText("课程会话已安全结束，模型队列已排空").waitFor({ timeout: 60_000 });
-  await observer.locator(".readweave-preview > div p").first().waitFor({ timeout: 30_000 });
+  await recorder.getByText("录音和模型处理均已完成").waitFor({ timeout: 10 * 60_000 });
+  await observer.getByText("已完成", { exact: true }).last().waitFor({ timeout: 60_000 });
+  await observer.locator(".readweave-card > p").first().waitFor({ timeout: 30_000 });
   const events = await checked(fetch(`${apiUrl}/sessions/${session.id}/events`, { headers: { "X-authentik-uid": identity } }));
   const segments = events.filter((event) => event.event_type === "segment.finalized");
   const translations = events.filter((event) => event.event_type === "translation.finalized");

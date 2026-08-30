@@ -3,7 +3,9 @@
 use crate::dingtalk::DingtalkClient;
 use aialra_asset_store::ObjectStore;
 use aialra_event_protocol::EventEnvelope;
-use aialra_event_store::{EventStore, ModelJobRecord, NewModelJob, ProjectUpdateRecord};
+use aialra_event_store::{
+    EventStore, ModelJobRecord, NewModelJob, ProjectUpdateRecord, WorkspaceUpdateRecord,
+};
 use anyhow::{Context, Result};
 use axum::Json;
 use axum::http::StatusCode;
@@ -26,6 +28,7 @@ pub struct AppState {
     pub events: broadcast::Sender<EventEnvelope>,
     pub sequence_lock: Arc<Mutex<()>>,
     pub project_updates: broadcast::Sender<ProjectUpdateRecord>,
+    pub workspace_updates: broadcast::Sender<WorkspaceUpdateRecord>,
     pub audio_pending: broadcast::Sender<(String, String)>,
 }
 
@@ -38,6 +41,7 @@ impl AppState {
         // their cursor instead of forcing the process to retain a long lecture in memory.
         let (events, _) = broadcast::channel(REPLAYABLE_EVENT_BUFFER);
         let (project_updates, _) = broadcast::channel(REPLAYABLE_EVENT_BUFFER);
+        let (workspace_updates, _) = broadcast::channel(REPLAYABLE_EVENT_BUFFER);
         let (audio_pending, _) = broadcast::channel(AUDIO_WAKE_BUFFER);
         Ok(Self {
             store,
@@ -46,6 +50,7 @@ impl AppState {
             events,
             sequence_lock: Arc::new(Mutex::new(())),
             project_updates,
+            workspace_updates,
             audio_pending,
         })
     }
@@ -159,6 +164,19 @@ impl AppState {
         Ok(update)
     }
 
+    pub fn record_workspace_update(
+        &self,
+        owner_subject: &str,
+        update_type: &str,
+        payload: Value,
+    ) -> Result<WorkspaceUpdateRecord> {
+        let update = self
+            .store
+            .insert_workspace_update(owner_subject, update_type, &payload)?;
+        let _ = self.workspace_updates.send(update.clone());
+        Ok(update)
+    }
+
     fn record_session_event_update(&self, event: &EventEnvelope) -> Result<()> {
         if let Some(project) = self.store.project_for_session(&event.session_id)? {
             self.record_project_update(
@@ -173,6 +191,7 @@ impl AppState {
             "segment.finalized"
                 | "translation.finalized"
                 | "explanation.card.created"
+                | "session.summary.created"
                 | "asset.page.extracted"
                 | "session.processing"
                 | "session.completed"
@@ -223,6 +242,13 @@ impl ApiError {
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
         }
     }

@@ -44,6 +44,17 @@ pub struct RareTerm {
     pub asset_page_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SummaryResponse {
+    pub overview: String,
+    pub key_points: Vec<String>,
+    pub terminology: Vec<RareTerm>,
+    pub open_questions: Vec<String>,
+    pub evidence_segment_ids: Vec<String>,
+    pub asset_page_ids: Vec<String>,
+    pub provider: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AssetParseResponse {
     pub parser: String,

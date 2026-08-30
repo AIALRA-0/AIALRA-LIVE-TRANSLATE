@@ -1,7 +1,9 @@
 //! Private persistent model-job API used only by authenticated GPU agents.
 
 use crate::app::{ApiError, AppState};
-use crate::worker::{AsrResponse, AssetParseResponse, ExplanationResponse, TranslationResponse};
+use crate::worker::{
+    AsrResponse, AssetParseResponse, ExplanationResponse, SummaryResponse, TranslationResponse,
+};
 use aialra_core_domain::SessionState;
 use aialra_event_store::{AssetPageRecord, NewModelJob, WorkerHeartbeat};
 use anyhow::Context;
@@ -238,6 +240,7 @@ fn apply_result(
         "asr" => apply_asr_result(state, job, result, elapsed_ms),
         "translate" => apply_translation_result(state, job, result, elapsed_ms),
         "explain" => apply_explanation_result(state, job, result, elapsed_ms),
+        "summarize" => apply_summary_result(state, job, result, elapsed_ms),
         "asset_parse" => apply_asset_result(state, job, result, elapsed_ms),
         _ => Err(ApiError::bad_request("unsupported model job type")),
     }
@@ -419,6 +422,56 @@ fn apply_explanation_result(
     Ok(())
 }
 
+fn apply_summary_result(
+    state: &AppState,
+    job: &aialra_event_store::ModelJobRecord,
+    result: &Value,
+    elapsed_ms: u64,
+) -> Result<(), ApiError> {
+    let summary: SummaryResponse = serde_json::from_value(result.clone())?;
+    require_provider(&summary.provider, "ollama:", &["@cuda"])?;
+    let allowed_segments = job
+        .input
+        .get("segments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .collect::<std::collections::HashSet<_>>();
+    let allowed_pages = job
+        .input
+        .get("asset_pages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .collect::<std::collections::HashSet<_>>();
+    if summary
+        .evidence_segment_ids
+        .iter()
+        .any(|id| !allowed_segments.contains(id.as_str()))
+        || summary
+            .asset_page_ids
+            .iter()
+            .any(|id| !allowed_pages.contains(id.as_str()))
+    {
+        return Err(ApiError::bad_request(
+            "summary returned an invalid evidence reference",
+        ));
+    }
+    state.emit_idempotent(
+        &format!("{}:session_summary", job.id),
+        &job.session_id,
+        "gpu_summarizer",
+        "session.summary.created",
+        0,
+        &job.id,
+        None,
+        json!({"summary_id": format!("summary_{}", job.id.trim_start_matches("job_")), "elapsed_ms": elapsed_ms, "result": summary}),
+    )?;
+    Ok(())
+}
+
 fn apply_asset_result(
     state: &AppState,
     job: &aialra_event_store::ModelJobRecord,
@@ -475,6 +528,17 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
     }
     let counts = state.store.model_queue_counts(Some(session_id))?;
     if counts.queued + counts.leased > 0 {
+        return Ok(());
+    }
+    let events = state.store.list_events(session_id)?;
+    let has_segments = events
+        .iter()
+        .any(|event| event.event_type == "segment.finalized");
+    let has_summary = events
+        .iter()
+        .any(|event| event.event_type == "session.summary.created");
+    if counts.failed == 0 && has_segments && !has_summary {
+        enqueue_summary(state, session_id, "recording_stopped")?;
         return Ok(());
     }
     let (next, event_type, payload) = if counts.failed > 0 {
@@ -544,6 +608,92 @@ pub fn finish_session_after_stop(state: &AppState, session_id: &str) -> Result<(
     finish_session_if_drained(state, session_id)
 }
 
+pub fn enqueue_summary(
+    state: &AppState,
+    session_id: &str,
+    trigger: &str,
+) -> Result<aialra_event_store::ModelJobRecord, ApiError> {
+    let session = state
+        .store
+        .get_session(session_id)?
+        .ok_or_else(|| ApiError::not_found("session not found"))?;
+    let events = state.store.list_events(session_id)?;
+    let all_segments = events
+        .iter()
+        .filter_map(|event| {
+            if event.event_type != "segment.finalized" {
+                return None;
+            }
+            Some(json!({
+                "id": event.payload.get("segment_id")?.as_str()?,
+                "text": event.payload.get("text")?.as_str()?,
+            }))
+        })
+        .collect::<Vec<_>>();
+    let segments = evenly_sample(&all_segments, 160);
+    if segments.is_empty() {
+        return Err(ApiError::bad_request(
+            "stable transcript is required before summary",
+        ));
+    }
+    let all_pages = events
+        .iter()
+        .filter_map(|event| {
+            if event.event_type != "asset.page.extracted" {
+                return None;
+            }
+            Some(json!({
+                "id": event.payload.get("page_id")?.as_str()?,
+                "title": event.payload.get("title").and_then(Value::as_str).unwrap_or(""),
+                "text": event.payload.get("text").and_then(Value::as_str).unwrap_or(""),
+            }))
+        })
+        .collect::<Vec<_>>();
+    let pages = evenly_sample(&all_pages, 24);
+    let all_rolling_summaries = events
+        .iter()
+        .filter(|event| event.event_type == "explanation.card.created")
+        .filter_map(|event| {
+            event
+                .payload
+                .get("result")?
+                .get("summary")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let rolling_summaries = evenly_sample(&all_rolling_summaries, 48);
+    let evidence_key = segments
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(":");
+    Ok(state.enqueue_job(NewModelJob {
+        id: format!("job_{}", Uuid::now_v7().simple()),
+        session_id: session_id.to_owned(),
+        job_type: "summarize".to_owned(),
+        priority: 20,
+        input: json!({"segments": segments, "asset_pages": pages, "rolling_summaries": rolling_summaries, "target_language": session.target_language, "trigger": trigger}),
+        input_object_hash: None,
+        idempotency_key: format!("summarize:{session_id}:{evidence_key}"),
+    })?)
+}
+
+fn evenly_sample<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
+    if items.len() <= limit {
+        return items.to_vec();
+    }
+    if limit <= 1 {
+        return items.first().cloned().into_iter().collect();
+    }
+    (0..limit)
+        .map(|index| {
+            let source_index = index * (items.len() - 1) / (limit - 1);
+            items[source_index].clone()
+        })
+        .collect()
+}
+
 fn authorize(headers: &HeaderMap) -> Result<(), ApiError> {
     let expected = std::env::var("AIALRA_WORKER_TOKEN_SHA256")
         .map_err(|_| ApiError::unavailable("worker gateway token is not configured"))?;
@@ -581,7 +731,7 @@ fn allowed_capabilities(values: Vec<String>) -> Vec<String> {
         .filter(|value| {
             matches!(
                 value.as_str(),
-                "asr" | "translate" | "explain" | "asset_parse"
+                "asr" | "translate" | "explain" | "summarize" | "asset_parse"
             )
         })
         .collect()
@@ -618,7 +768,7 @@ use axum::response::IntoResponse;
 
 #[cfg(test)]
 mod tests {
-    use super::require_provider;
+    use super::{evenly_sample, require_provider};
 
     #[test]
     fn provider_gate_allows_cpu_asr_and_requires_cuda_llm() {
@@ -632,5 +782,12 @@ mod tests {
         );
         assert!(require_provider("ollama:qwen2.5:3b-instruct@cuda", "ollama:", &["@cuda"]).is_ok());
         assert!(require_provider("ollama:qwen2.5:3b-instruct@cpu", "ollama:", &["@cuda"]).is_err());
+    }
+
+    #[test]
+    fn summary_sampling_covers_the_whole_timeline_in_order() {
+        let sampled = evenly_sample(&(0..100).collect::<Vec<_>>(), 5);
+        assert_eq!(sampled, vec![0, 24, 49, 74, 99]);
+        assert_eq!(evenly_sample(&[3, 5, 8], 5), vec![3, 5, 8]);
     }
 }

@@ -5,19 +5,24 @@ from __future__ import annotations
 import asyncio
 import io
 
+import httpx
+import pytest
 from pptx import Presentation
 
+import workers.model_worker.main as model_worker
 from workers.model_worker.main import (
     ASR_CPU_THREADS,
     EvidencePage,
     EvidenceSegment,
     ExplanationRequest,
     ExplanationResponse,
+    SummaryRequest,
     _has_explanation_shape,
     _has_nonempty_string,
     _ollama_model_uses_gpu,
     _parse_asset_sync,
     _parse_model_json,
+    _restore_realtime_translation_model,
     _uses_requested_explanation_language,
 )
 
@@ -123,3 +128,52 @@ def test_chinese_explanation_requires_chinese_summary() -> None:
     assert _uses_requested_explanation_language({"summary": "中文总结"}, "zh-CN")
     assert not _uses_requested_explanation_language({"summary": "English summary"}, "zh-CN")
     assert _uses_requested_explanation_language({"summary": "English summary"}, "en")
+
+
+def test_background_model_restores_translation_before_releasing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def unload(model: str) -> None:
+        calls.append(f"unload:{model}")
+
+    class Response:
+        def raise_for_status(self) -> None:
+            calls.append("loaded:qwen2.5:3b-instruct")
+
+    class Client:
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, _url: str, *, json: dict[str, object]) -> Response:
+            assert json["model"] == model_worker.TRANSLATION_MODEL
+            return Response()
+
+    async def resident(model: str) -> bool:
+        calls.append(f"resident:{model}")
+        return True
+
+    monkeypatch.setattr(model_worker, "_unload_ollama_model", unload)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(model_worker, "_ollama_gpu_resident", resident)
+
+    asyncio.run(_restore_realtime_translation_model("qwen2.5:7b-instruct"))
+
+    assert calls == [
+        "unload:qwen2.5:7b-instruct",
+        "loaded:qwen2.5:3b-instruct",
+        "resident:qwen2.5:3b-instruct",
+    ]
+
+
+def test_summary_contract_accepts_the_core_rolling_summary_limit() -> None:
+    request = SummaryRequest(
+        segments=[EvidenceSegment(id="segment-1", text="Forwarding reduces stalls.")],
+        rolling_summaries=[f"rolling-{index}" for index in range(48)],
+        target_language="zh-CN",
+    )
+    assert len(request.rolling_summaries) == 48

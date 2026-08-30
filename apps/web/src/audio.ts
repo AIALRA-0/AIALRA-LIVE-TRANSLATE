@@ -389,3 +389,92 @@ export class BrowserCapture {
     this.revoke();
   }
 }
+
+export interface MicrophoneTestProgress {
+  phase: "quiet" | "speech";
+  elapsedMs: number;
+  levelDbfs: number;
+}
+
+export interface MicrophoneTestResult {
+  passed: boolean;
+  noiseFloorDbfs: number;
+  speechP95Dbfs: number;
+  peakDbfs: number;
+  clippingRatio: number;
+  sampleRate: number;
+  message: string;
+}
+
+function amplitudeDbfs(value: number): number {
+  return value <= 0 ? -96 : Math.max(-96, 20 * Math.log10(value));
+}
+
+function percentile(values: number[], ratio: number): number {
+  if (values.length === 0) return -96;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
+}
+
+// The preflight test reads the selected microphone locally and never opens a recording lease or network request.
+export async function testMicrophone(
+  deviceId: string | undefined,
+  onProgress: (progress: MicrophoneTestProgress) => void,
+): Promise<MicrophoneTestResult> {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error("当前浏览器不支持麦克风测试");
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    },
+  });
+  const context = new AudioContext({ latencyHint: "interactive" });
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 2048;
+  const source = context.createMediaStreamSource(stream);
+  source.connect(analyser);
+  const samples = new Float32Array(analyser.fftSize);
+  const quietLevels: number[] = [];
+  const speechLevels: number[] = [];
+  let peak = 0;
+  let clipped = 0;
+  let total = 0;
+  const started = performance.now();
+  try {
+    while (performance.now() - started < 4_000) {
+      analyser.getFloatTimeDomainData(samples);
+      let squared = 0;
+      for (const sample of samples) {
+        const absolute = Math.abs(sample);
+        squared += sample * sample;
+        peak = Math.max(peak, absolute);
+        if (absolute >= 0.891) clipped += 1;
+        total += 1;
+      }
+      const level = amplitudeDbfs(Math.sqrt(squared / samples.length));
+      const elapsedMs = performance.now() - started;
+      if (elapsedMs < 1_000) quietLevels.push(level);
+      else speechLevels.push(level);
+      onProgress({ phase: elapsedMs < 1_000 ? "quiet" : "speech", elapsedMs, levelDbfs: level });
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    }
+  } finally {
+    source.disconnect();
+    stream.getTracks().forEach((track) => track.stop());
+    await context.close();
+  }
+  const noiseFloorDbfs = percentile(quietLevels, 0.5);
+  const speechP95Dbfs = percentile(speechLevels, 0.95);
+  const peakDbfs = amplitudeDbfs(peak);
+  const clippingRatio = total > 0 ? clipped / total : 0;
+  const passed = speechP95Dbfs >= -45 && speechP95Dbfs - noiseFloorDbfs >= 12 && clippingRatio <= 0.01;
+  const message = clippingRatio > 0.01
+    ? "输入音量过高，请降低系统麦克风增益"
+    : passed
+      ? "麦克风收音正常"
+      : "语音信号偏弱，请靠近麦克风或检查输入设备";
+  return { passed, noiseFloorDbfs, speechP95Dbfs, peakDbfs, clippingRatio, sampleRate: context.sampleRate, message };
+}

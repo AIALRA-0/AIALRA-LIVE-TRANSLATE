@@ -1,7 +1,10 @@
 //! ReadWeave is an eventually consistent projection of append-only AIALRA events
 
 use crate::app::{ApiError, AppState};
-use aialra_event_store::{ConnectorJobRecord, NewConnectorJob, RemoteObjectMapRecord};
+use aialra_event_store::{
+    ConnectorJobRecord, NewConnectorJob, RemoteObjectDetailsRecord, RemoteObjectMapRecord,
+    WorkspaceFolderRecord,
+};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use reqwest::Client;
@@ -28,12 +31,33 @@ struct ReadWeaveClient {
 #[derive(Debug, Deserialize)]
 struct CreateNoteResponse {
     note: CreatedNote,
+    branch: CreatedBranch,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreatedNote {
     note_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatedBranch {
+    branch_id: String,
+    note_id: String,
+    parent_note_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteNote {
+    parent_branch_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+struct CreatedPlacement {
+    note_id: String,
+    branch_id: String,
 }
 
 enum ProjectionError {
@@ -70,14 +94,106 @@ impl ReadWeaveClient {
         format!("{}/etapi{}", self.base_url, path)
     }
 
-    async fn create_note(&self, parent: &str, title: &str, content: &str) -> Result<String> {
+    async fn create_note(
+        &self,
+        parent: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<CreatedPlacement> {
         let response = self.http.post(self.endpoint("/create-note"))
             .header("Authorization", &self.token)
             .json(&json!({"parentNoteId": parent, "title": title, "type": "text", "content": content}))
             .send().await.context("send ReadWeave create-note")?
             .error_for_status().context("ReadWeave create-note rejected")?
             .json::<CreateNoteResponse>().await.context("decode ReadWeave create-note")?;
-        Ok(response.note.note_id)
+        Ok(CreatedPlacement {
+            note_id: response.note.note_id,
+            branch_id: response.branch.branch_id,
+        })
+    }
+
+    async fn patch_title(&self, note_id: &str, title: &str) -> Result<()> {
+        self.http
+            .patch(self.endpoint(&format!("/notes/{note_id}")))
+            .header("Authorization", &self.token)
+            .json(&json!({"title": title}))
+            .send()
+            .await
+            .context("send ReadWeave title update")?
+            .error_for_status()
+            .context("ReadWeave title update rejected")?;
+        Ok(())
+    }
+
+    async fn create_branch(
+        &self,
+        note_id: &str,
+        parent_id: &str,
+        position: i64,
+    ) -> Result<CreatedBranch> {
+        self.http
+            .post(self.endpoint("/branches"))
+            .header("Authorization", &self.token)
+            .json(&json!({
+                "noteId": note_id,
+                "parentNoteId": parent_id,
+                "prefix": "",
+                "notePosition": position,
+                "isExpanded": false
+            }))
+            .send()
+            .await
+            .context("send ReadWeave branch creation")?
+            .error_for_status()
+            .context("ReadWeave branch creation rejected")?
+            .json::<CreatedBranch>()
+            .await
+            .context("decode ReadWeave branch")
+    }
+
+    async fn delete_branch(&self, branch_id: &str) -> Result<()> {
+        self.http
+            .delete(self.endpoint(&format!("/branches/{branch_id}")))
+            .header("Authorization", &self.token)
+            .send()
+            .await
+            .context("send ReadWeave branch deletion")?
+            .error_for_status()
+            .context("ReadWeave branch deletion rejected")?;
+        Ok(())
+    }
+
+    async fn find_branch(&self, note_id: &str, parent_id: &str) -> Result<Option<CreatedBranch>> {
+        let note = self
+            .http
+            .get(self.endpoint(&format!("/notes/{note_id}")))
+            .header("Authorization", &self.token)
+            .send()
+            .await
+            .context("send ReadWeave note read")?
+            .error_for_status()
+            .context("ReadWeave note read rejected")?
+            .json::<RemoteNote>()
+            .await
+            .context("decode ReadWeave note")?;
+        for branch_id in note.parent_branch_ids {
+            let branch = self
+                .http
+                .get(self.endpoint(&format!("/branches/{branch_id}")))
+                .header("Authorization", &self.token)
+                .send()
+                .await
+                .context("send ReadWeave branch read")?
+                .error_for_status()
+                .context("ReadWeave branch read rejected")?
+                .json::<CreatedBranch>()
+                .await
+                .context("decode ReadWeave branch")?;
+            if branch.note_id == note_id && branch.parent_note_id == parent_id {
+                return Ok(Some(branch));
+            }
+        }
+        Ok(None)
     }
 
     async fn get_content(&self, note_id: &str) -> Result<String> {
@@ -245,6 +361,15 @@ fn release_projection_memory() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn release_projection_memory() {}
 
+struct NoteSeed<'a> {
+    object_type: &'a str,
+    local_id: &'a str,
+    parent_id: &'a str,
+    title: &'a str,
+    initial_content: String,
+    position: i64,
+}
+
 async fn project_job(
     state: &AppState,
     client: &ReadWeaveClient,
@@ -272,21 +397,29 @@ async fn project_job(
     let root = ensure_note(
         state,
         client,
-        "root",
-        "aialra-root",
-        &client.root_parent_id,
-        "AIALRA 课程",
-        managed_region("<p>AIALRA 自动课程笔记</p>"),
+        NoteSeed {
+            object_type: "root",
+            local_id: "aialra-root",
+            parent_id: &client.root_parent_id,
+            title: "AIALRA 课程",
+            initial_content: managed_region("<p>AIALRA 自动课程笔记</p>"),
+            position: 100,
+        },
     )
     .await?;
+    let project_parent =
+        ensure_workspace_path(state, client, &project.owner_subject, &project.id, &root).await?;
     let project_note = ensure_note(
         state,
         client,
-        "project",
-        &project.id,
-        &root,
-        &project.title,
-        managed_region("<p>课程项目</p>"),
+        NoteSeed {
+            object_type: "project",
+            local_id: &project.id,
+            parent_id: &project_parent,
+            title: &project.title,
+            initial_content: managed_region("<p>课程项目</p>"),
+            position: 100,
+        },
     )
     .await?;
     let session_title = format!(
@@ -297,61 +430,84 @@ async fn project_job(
     let session_note = ensure_note(
         state,
         client,
-        "session",
-        &session.id,
-        &project_note,
-        &session_title,
-        managed_region("<p>课程会话</p>"),
+        NoteSeed {
+            object_type: "session",
+            local_id: &session.id,
+            parent_id: &project_note,
+            title: &session_title,
+            initial_content: managed_region("<p>课程会话</p>"),
+            position: 100,
+        },
     )
     .await?;
+    let overview_id = format!("{}:overview", session.id);
     let overview = ensure_note(
         state,
         client,
-        "section",
-        &format!("{}:overview", session.id),
-        &session_note,
-        "00 课程概览",
-        managed_region(""),
+        NoteSeed {
+            object_type: "section",
+            local_id: &overview_id,
+            parent_id: &session_note,
+            title: "00 课程概览",
+            initial_content: managed_region(""),
+            position: 10,
+        },
     )
     .await?;
+    let transcript_id = format!("{}:transcript", session.id);
     let transcript = ensure_note(
         state,
         client,
-        "section",
-        &format!("{}:transcript", session.id),
-        &session_note,
-        "01 实时转写与翻译",
-        managed_region(""),
+        NoteSeed {
+            object_type: "section",
+            local_id: &transcript_id,
+            parent_id: &session_note,
+            title: "01 实时转写与翻译",
+            initial_content: managed_region(""),
+            position: 20,
+        },
     )
     .await?;
+    let explanations_id = format!("{}:explanations", session.id);
     let explanations = ensure_note(
         state,
         client,
-        "section",
-        &format!("{}:explanations", session.id),
-        &session_note,
-        "02 生僻词与补充解释",
-        managed_region(""),
+        NoteSeed {
+            object_type: "section",
+            local_id: &explanations_id,
+            parent_id: &session_note,
+            title: "02 生僻词与补充解释",
+            initial_content: managed_region(""),
+            position: 30,
+        },
     )
     .await?;
+    let assets_id = format!("{}:assets", session.id);
     let assets = ensure_note(
         state,
         client,
-        "section",
-        &format!("{}:assets", session.id),
-        &session_note,
-        "03 课件与证据索引",
-        managed_region(""),
+        NoteSeed {
+            object_type: "section",
+            local_id: &assets_id,
+            parent_id: &session_note,
+            title: "03 课件与证据索引",
+            initial_content: managed_region(""),
+            position: 40,
+        },
     )
     .await?;
+    let user_notes_id = format!("{}:user", session.id);
     ensure_note(
         state,
         client,
-        "user_notes",
-        &format!("{}:user", session.id),
-        &session_note,
-        "99 我的笔记",
-        "<p>这里的内容只由你编辑，AIALRA 不会覆盖</p>".to_owned(),
+        NoteSeed {
+            object_type: "user_notes",
+            local_id: &user_notes_id,
+            parent_id: &session_note,
+            title: "99 我的笔记",
+            initial_content: "<p>这里的内容只由你编辑，AIALRA 不会覆盖</p>".to_owned(),
+            position: 990,
+        },
     )
     .await?;
 
@@ -394,23 +550,94 @@ async fn project_job(
     Ok(())
 }
 
+async fn ensure_workspace_path(
+    state: &AppState,
+    client: &ReadWeaveClient,
+    owner_subject: &str,
+    project_id: &str,
+    root_id: &str,
+) -> Result<String, ProjectionError> {
+    let Some(folder_id) = state
+        .store
+        .get_workspace_project_placement(project_id)
+        .map_err(ProjectionError::Retry)?
+        .and_then(|placement| placement.folder_id)
+    else {
+        return Ok(root_id.to_owned());
+    };
+    let folders = state
+        .store
+        .list_workspace_folders(owner_subject)
+        .map_err(ProjectionError::Retry)?;
+    let mut chain = Vec::<WorkspaceFolderRecord>::new();
+    let mut cursor = Some(folder_id);
+    while let Some(folder_id) = cursor {
+        let folder = folders
+            .iter()
+            .find(|folder| folder.id == folder_id && folder.archived_at.is_none())
+            .cloned()
+            .ok_or_else(|| {
+                ProjectionError::Retry(anyhow::anyhow!(
+                    "workspace folder missing during ReadWeave projection"
+                ))
+            })?;
+        cursor = folder.parent_id.clone();
+        chain.push(folder);
+        if chain.len() > 5 {
+            return Err(ProjectionError::Retry(anyhow::anyhow!(
+                "workspace folder depth exceeds projection limit"
+            )));
+        }
+    }
+    chain.reverse();
+    let mut parent = root_id.to_owned();
+    for folder in chain {
+        parent = ensure_note(
+            state,
+            client,
+            NoteSeed {
+                object_type: "workspace_folder",
+                local_id: &folder.id,
+                parent_id: &parent,
+                title: &folder.title,
+                initial_content: managed_region("<p>AIALRA 工作区文件夹</p>"),
+                position: folder
+                    .sort_order
+                    .saturating_mul(10)
+                    .clamp(0, i32::MAX as i64),
+            },
+        )
+        .await?;
+    }
+    Ok(parent)
+}
+
 async fn ensure_note(
     state: &AppState,
     client: &ReadWeaveClient,
-    object_type: &str,
-    local_id: &str,
-    parent_id: &str,
-    title: &str,
-    initial_content: String,
+    seed: NoteSeed<'_>,
 ) -> Result<String, ProjectionError> {
+    let NoteSeed {
+        object_type,
+        local_id,
+        parent_id,
+        title,
+        initial_content,
+        position,
+    } = seed;
     if let Some(record) = state
         .store
         .get_remote_object_map(CONNECTOR, object_type, local_id)
         .map_err(ProjectionError::Retry)?
     {
+        client
+            .patch_title(&record.remote_id, title)
+            .await
+            .map_err(ProjectionError::Retry)?;
+        ensure_parent_branch(state, client, &record, parent_id, position).await?;
         return Ok(record.remote_id);
     }
-    let remote_id = client
+    let placement = client
         .create_note(parent_id, title, &initial_content)
         .await
         .map_err(ProjectionError::Retry)?;
@@ -421,14 +648,94 @@ async fn ensure_note(
             connector: CONNECTOR.to_owned(),
             object_type: object_type.to_owned(),
             local_id: local_id.to_owned(),
-            remote_id: remote_id.clone(),
+            remote_id: placement.note_id.clone(),
             remote_parent_id: Some(parent_id.to_owned()),
             content_hash: Some(content_hash(&initial_content)),
             created_at: now,
             updated_at: now,
         })
         .map_err(ProjectionError::Retry)?;
-    Ok(remote_id)
+    state
+        .store
+        .upsert_remote_object_details(&RemoteObjectDetailsRecord {
+            connector: CONNECTOR.to_owned(),
+            object_type: object_type.to_owned(),
+            local_id: local_id.to_owned(),
+            remote_branch_id: Some(placement.branch_id),
+            node_type: Some(object_type.to_owned()),
+            last_synced_version: None,
+            updated_at: now,
+        })
+        .map_err(ProjectionError::Retry)?;
+    Ok(placement.note_id)
+}
+
+async fn ensure_parent_branch(
+    state: &AppState,
+    client: &ReadWeaveClient,
+    mapping: &RemoteObjectMapRecord,
+    desired_parent: &str,
+    position: i64,
+) -> Result<(), ProjectionError> {
+    if mapping.remote_parent_id.as_deref() == Some(desired_parent) {
+        return Ok(());
+    }
+    let old_parent = mapping.remote_parent_id.as_deref().ok_or_else(|| {
+        ProjectionError::Conflict(anyhow::anyhow!("ReadWeave mapping has no current parent"))
+    })?;
+    let old_branch = match state
+        .store
+        .get_remote_object_details(CONNECTOR, &mapping.object_type, &mapping.local_id)
+        .map_err(ProjectionError::Retry)?
+        .and_then(|details| details.remote_branch_id)
+    {
+        Some(branch_id) => Some(branch_id),
+        None => client
+            .find_branch(&mapping.remote_id, old_parent)
+            .await
+            .map_err(ProjectionError::Retry)?
+            .map(|branch| branch.branch_id),
+    }
+    .ok_or_else(|| {
+        ProjectionError::Conflict(anyhow::anyhow!(
+            "ReadWeave source branch cannot be identified safely"
+        ))
+    })?;
+
+    // The new branch must exist before the old branch is deleted. ETAPI deletes the note when
+    // the last branch is deleted, so reversing this order would make a workspace move destructive.
+    let new_branch = client
+        .create_branch(&mapping.remote_id, desired_parent, position)
+        .await
+        .map_err(ProjectionError::Retry)?;
+    if new_branch.branch_id != old_branch {
+        client
+            .delete_branch(&old_branch)
+            .await
+            .map_err(ProjectionError::Retry)?;
+    }
+    let now = Utc::now();
+    state
+        .store
+        .upsert_remote_object_map(&RemoteObjectMapRecord {
+            remote_parent_id: Some(desired_parent.to_owned()),
+            updated_at: now,
+            ..mapping.clone()
+        })
+        .map_err(ProjectionError::Retry)?;
+    state
+        .store
+        .upsert_remote_object_details(&RemoteObjectDetailsRecord {
+            connector: CONNECTOR.to_owned(),
+            object_type: mapping.object_type.clone(),
+            local_id: mapping.local_id.clone(),
+            remote_branch_id: Some(new_branch.branch_id),
+            node_type: Some(mapping.object_type.clone()),
+            last_synced_version: None,
+            updated_at: now,
+        })
+        .map_err(ProjectionError::Retry)?;
+    Ok(())
 }
 
 async fn update_managed_note(
@@ -503,7 +810,7 @@ async fn ensure_recovery_note(
         ProjectionError::Retry(anyhow::anyhow!("conflicted section parent is missing"))
     })?;
     let title = format!("AIALRA 恢复副本 {}", Utc::now().format("%Y-%m-%d %H%M%S"));
-    let remote_id = client
+    let placement = client
         .create_note(parent, &title, managed)
         .await
         .map_err(ProjectionError::Retry)?;
@@ -513,11 +820,23 @@ async fn ensure_recovery_note(
         .upsert_remote_object_map(&RemoteObjectMapRecord {
             connector: CONNECTOR.to_owned(),
             object_type: "recovery".to_owned(),
-            local_id: recovery_id,
-            remote_id,
+            local_id: recovery_id.clone(),
+            remote_id: placement.note_id,
             remote_parent_id: Some(parent.to_owned()),
             content_hash: Some(content_hash(managed)),
             created_at: now,
+            updated_at: now,
+        })
+        .map_err(ProjectionError::Retry)?;
+    state
+        .store
+        .upsert_remote_object_details(&RemoteObjectDetailsRecord {
+            connector: CONNECTOR.to_owned(),
+            object_type: "recovery".to_owned(),
+            local_id: recovery_id,
+            remote_branch_id: Some(placement.branch_id),
+            node_type: Some("recovery".to_owned()),
+            last_synced_version: None,
             updated_at: now,
         })
         .map_err(ProjectionError::Retry)?;
@@ -561,17 +880,39 @@ fn render_overview(
     session: &aialra_event_store::SessionRecord,
     events: &[aialra_event_protocol::EventEnvelope],
 ) -> String {
-    let summary = events
+    let final_summary = events
         .iter()
         .rev()
-        .find(|event| event.event_type == "explanation.card.created")
-        .and_then(|event| event.payload.get("result"))
-        .and_then(|result| result.get("summary"))
+        .find(|event| event.event_type == "session.summary.created")
+        .and_then(|event| event.payload.get("result"));
+    let summary = final_summary
+        .and_then(|result| result.get("overview"))
         .and_then(Value::as_str)
+        .or_else(|| {
+            events
+                .iter()
+                .rev()
+                .find(|event| event.event_type == "explanation.card.created")
+                .and_then(|event| event.payload.get("result"))
+                .and_then(|result| result.get("summary"))
+                .and_then(Value::as_str)
+        })
         .map(html)
         .unwrap_or_else(|| "等待课程讲解".to_owned());
+    let key_points = final_summary
+        .and_then(|result| result.get("key_points"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|item| format!("<li>{}</li>", html(item)))
+                .collect::<String>()
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| "<li>等待最终总结</li>".to_owned());
     format!(
-        "<h2>课程信息</h2><ul><li>名称：{}</li><li>时间：{}</li><li>语言：{} → {}</li><li>状态：{:?}</li></ul><h2>最新讲解</h2><p>{summary}</p>",
+        "<h2>课程信息</h2><ul><li>名称：{}</li><li>时间：{}</li><li>语言：{} → {}</li><li>状态：{:?}</li></ul><h2>课程总结</h2><p>{summary}</p><h3>关键知识点</h3><ul>{key_points}</ul>",
         html(&session.title),
         session.created_at.to_rfc3339(),
         html(&session.source_language),
@@ -774,8 +1115,70 @@ pub fn status_payload(state: &AppState, project_id: &str) -> Result<Value, ApiEr
         .and_then(|client| client.public_url)
         .zip(project_map.as_ref().map(|record| record.remote_id.clone()))
         .map(|(base, note)| format!("{base}/#root/{note}"));
+    let mut targets = Vec::new();
+    if let Some(base) = ReadWeaveClient::from_env().and_then(|client| client.public_url) {
+        let sync_status = if status.conflicts > 0 {
+            "conflict"
+        } else if status.leased > 0 || status.queued > 0 {
+            "syncing"
+        } else {
+            "synced"
+        };
+        if let Some(record) = project_map.as_ref() {
+            targets.push(json!({"node_type": "project", "local_id": project_id, "title": "项目笔记", "note_url": format!("{base}/#root/{}", record.remote_id), "sync_status": sync_status}));
+        }
+        for session in state.store.list_project_sessions(project_id)? {
+            let definitions = [
+                (
+                    "session",
+                    "session",
+                    session.id.clone(),
+                    session.title.clone(),
+                ),
+                (
+                    "overview",
+                    "section",
+                    format!("{}:overview", session.id),
+                    "00 课程概览".to_owned(),
+                ),
+                (
+                    "transcript",
+                    "section",
+                    format!("{}:transcript", session.id),
+                    "01 实时转写与翻译".to_owned(),
+                ),
+                (
+                    "explanations",
+                    "section",
+                    format!("{}:explanations", session.id),
+                    "02 生僻词与补充解释".to_owned(),
+                ),
+                (
+                    "assets",
+                    "section",
+                    format!("{}:assets", session.id),
+                    "03 课件与证据索引".to_owned(),
+                ),
+                (
+                    "user_notes",
+                    "user_notes",
+                    format!("{}:user", session.id),
+                    "99 我的笔记".to_owned(),
+                ),
+            ];
+            for (node_type, object_type, local_id, title) in definitions {
+                if let Some(record) =
+                    state
+                        .store
+                        .get_remote_object_map(CONNECTOR, object_type, &local_id)?
+                {
+                    targets.push(json!({"node_type": node_type, "local_id": local_id, "title": title, "note_url": format!("{base}/#root/{}", record.remote_id), "sync_status": sync_status}));
+                }
+            }
+        }
+    }
     Ok(
-        json!({"configured": configured(), "queued": status.queued, "syncing": status.leased, "completed": status.completed, "conflicts": status.conflicts, "updated_at": status.updated_at, "note_url": note_url}),
+        json!({"configured": configured(), "queued": status.queued, "syncing": status.leased, "completed": status.completed, "conflicts": status.conflicts, "updated_at": status.updated_at, "note_url": note_url, "targets": targets}),
     )
 }
 

@@ -51,6 +51,7 @@ class RecordingService : Service() {
     private lateinit var sessionId: String
     private lateinit var projectId: String
     private lateinit var deviceId: String
+    private lateinit var deviceToken: String
     private var leaseToken: String = ""
     private var leaseGeneration: Long = 0
     private lateinit var controlBaseUrl: String // HTTP control uses the same trusted local route as the WebSocket audio connection.
@@ -69,7 +70,8 @@ class RecordingService : Service() {
         sessionId = intent?.getStringExtra(EXTRA_SESSION_ID).orEmpty()
         projectId = intent?.getStringExtra(EXTRA_PROJECT_ID).orEmpty()
         val serverBase = intent?.getStringExtra(EXTRA_SERVER_URL).orEmpty().trimEnd('/')
-        if (projectId.isBlank() || sessionId.isBlank() || !serverBase.startsWith("ws")) {
+        deviceToken = intent?.getStringExtra(EXTRA_DEVICE_TOKEN).orEmpty()
+        if (projectId.isBlank() || sessionId.isBlank() || deviceToken.isBlank() || (!serverBase.startsWith("https://") && !serverBase.startsWith("http://") && !serverBase.startsWith("ws://") && !serverBase.startsWith("wss://"))) {
             stopSelf()
             return START_NOT_STICKY
         }
@@ -77,6 +79,8 @@ class RecordingService : Service() {
             .replaceFirst("wss://", "https://")
             .replaceFirst("ws://", "http://")
         websocketUrl = serverBase
+            .replaceFirst("https://", "wss://")
+            .replaceFirst("http://", "ws://")
         val leasePreferences = getSharedPreferences("recording-lease", MODE_PRIVATE)
         deviceId = leasePreferences.getString("deviceId", null) ?: "android-${UUID.randomUUID()}".also {
             leasePreferences.edit().putString("deviceId", it).apply()
@@ -234,6 +238,7 @@ class RecordingService : Service() {
         }.toString().toRequestBody("application/json".toMediaType())
         val request = Request.Builder()
             .url("$controlBaseUrl/api/v1/projects/$projectId/sessions/$sessionId/recording/$action")
+            .header("Authorization", "Bearer $deviceToken")
             .post(body)
             .build()
         networkClient.newCall(request).enqueue(object : Callback {
@@ -271,6 +276,7 @@ class RecordingService : Service() {
         // The bounded stop request tells the core to drain accepted model work after phone capture ends.
         val request = Request.Builder()
             .url("$controlBaseUrl/api/v1/projects/$projectId/sessions/$sessionId/recording/stop")
+            .header("Authorization", "Bearer $deviceToken")
             .post(JSONObject().put("device_id", deviceId).put("lease_token", leaseToken).toString().toRequestBody("application/json".toMediaType()))
             .build()
         val stopped = runCatching {
@@ -309,6 +315,7 @@ class RecordingService : Service() {
         if (!running.get()) return
         inFlight.clear()
         val request = Request.Builder().url("$websocketUrl/api/v1/sessions/$sessionId/sources/android-g$leaseGeneration/audio")
+            .header("Authorization", "Bearer $deviceToken")
             .header("Sec-WebSocket-Protocol", "aialra.audio.v1, lease.$leaseToken")
             .build()
         socket = networkClient.newWebSocket(request, object : WebSocketListener() {
@@ -383,6 +390,7 @@ class RecordingService : Service() {
         const val EXTRA_SERVER_URL = "serverUrl"
         const val EXTRA_PROJECT_ID = "projectId"
         const val EXTRA_SESSION_ID = "sessionId"
+        const val EXTRA_DEVICE_TOKEN = "deviceToken"
         const val ACTION_GRACEFUL_STOP = "online.aialra.capture.action.GRACEFUL_STOP"
         private const val SAMPLE_RATE = 16_000
         private const val CHANNEL_ID = "aialra-recording"

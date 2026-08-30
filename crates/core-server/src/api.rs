@@ -12,6 +12,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{Json, response::IntoResponse};
 use chrono::Utc;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::time::Duration;
 use uuid::Uuid;
@@ -20,15 +21,29 @@ const MAX_ASSET_BYTES: usize = 50 * 1024 * 1024;
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let queue = state.store.model_queue_counts(None).ok();
-    let worker = state.store.latest_worker().ok().flatten().map(|record| {
-        let online = (Utc::now() - record.last_seen_at).num_seconds() <= 30;
+    let workers = state.store.list_workers().unwrap_or_default();
+    let online_workers = workers
+        .iter()
+        .filter(|record| (Utc::now() - record.last_seen_at).num_seconds() <= 30)
+        .collect::<Vec<_>>();
+    let worker = online_workers.first().map(|latest| {
+        let capabilities = online_workers
+            .iter()
+            .flat_map(|record| record.capabilities.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let active_job_ids = online_workers
+            .iter()
+            .filter_map(|record| record.active_job_id.clone())
+            .collect::<Vec<_>>();
         json!({
-            "id": record.id,
-            "online": online,
-            "capabilities": record.capabilities,
-            "model_metadata": record.model_metadata,
-            "active_job_id": record.active_job_id,
-            "last_seen_at": record.last_seen_at
+            "id": latest.id,
+            "online": true,
+            "capabilities": capabilities,
+            "model_metadata": latest.model_metadata,
+            "active_job_id": active_job_ids.first(),
+            "active_job_ids": active_job_ids,
+            "lane_count": online_workers.len(),
+            "last_seen_at": latest.last_seen_at
         })
     });
     Json(json!({
