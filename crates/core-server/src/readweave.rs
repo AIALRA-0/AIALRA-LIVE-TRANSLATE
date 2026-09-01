@@ -138,7 +138,7 @@ impl ReadWeaveClient {
         &self,
         parent: &str,
         title: &str,
-        _initial_content: &str,
+        identity_marker: &str,
     ) -> Result<Option<CreatedPlacement>> {
         let search = format!("\"{}\"", title.replace(['"', '\\'], " "));
         let response = self
@@ -165,14 +165,11 @@ impl ReadWeaveClient {
         for candidate in response.results.into_iter().filter(|candidate| {
             candidate.title == title && candidate.parent_note_ids.iter().any(|id| id == parent)
         }) {
-            // AIALRA-owned notes retain the managed marker even after their
-            // generated region changes.  This excludes unrelated user notes
-            // with the same visible title.
-            if !self
-                .get_content(&candidate.note_id)
-                .await?
-                .contains(MANAGED_BEGIN)
-            {
+            // AIALRA-owned notes retain the opaque object marker even after
+            // their generated region changes. This excludes unrelated notes
+            // and older same-title projections without exposing local IDs.
+            let content = self.get_content(&candidate.note_id).await?;
+            if !content.contains(identity_marker) {
                 continue;
             }
             if let Some(branch) = self.find_branch(&candidate.note_id, parent).await? {
@@ -562,7 +559,11 @@ async fn project_job(
             local_id: "aialra-root",
             parent_id: &client.root_parent_id,
             title: "AIALRA 课程",
-            initial_content: managed_region("<p>AIALRA 自动课程笔记</p>"),
+            initial_content: managed_object_region(
+                "root",
+                "aialra-root",
+                "<p>AIALRA 自动课程笔记</p>",
+            ),
             position: 100,
         },
     )
@@ -577,7 +578,7 @@ async fn project_job(
             local_id: &project.id,
             parent_id: &project_parent,
             title: &project.title,
-            initial_content: managed_region("<p>课程项目</p>"),
+            initial_content: managed_object_region("project", &project.id, "<p>课程项目</p>"),
             position: 100,
         },
     )
@@ -595,7 +596,7 @@ async fn project_job(
             local_id: &session.id,
             parent_id: &project_note,
             title: &session_title,
-            initial_content: managed_region("<p>课程会话</p>"),
+            initial_content: managed_object_region("session", &session.id, "<p>课程会话</p>"),
             position: 100,
         },
     )
@@ -609,7 +610,7 @@ async fn project_job(
             local_id: &overview_id,
             parent_id: &session_note,
             title: "00 课程概览",
-            initial_content: managed_region(""),
+            initial_content: managed_object_region("section", &overview_id, ""),
             position: 10,
         },
     )
@@ -623,7 +624,7 @@ async fn project_job(
             local_id: &transcript_id,
             parent_id: &session_note,
             title: "01 实时转写与翻译",
-            initial_content: managed_region(""),
+            initial_content: managed_object_region("section", &transcript_id, ""),
             position: 20,
         },
     )
@@ -637,7 +638,7 @@ async fn project_job(
             local_id: &explanations_id,
             parent_id: &session_note,
             title: "02 生僻词与补充解释",
-            initial_content: managed_region(""),
+            initial_content: managed_object_region("section", &explanations_id, ""),
             position: 30,
         },
     )
@@ -651,7 +652,7 @@ async fn project_job(
             local_id: &assets_id,
             parent_id: &session_note,
             title: "03 课件与证据索引",
-            initial_content: managed_region(""),
+            initial_content: managed_object_region("section", &assets_id, ""),
             position: 40,
         },
     )
@@ -665,7 +666,11 @@ async fn project_job(
             local_id: &user_notes_id,
             parent_id: &session_note,
             title: "99 我的笔记",
-            initial_content: managed_region("<p>这里的内容只由你编辑，AIALRA 不会覆盖</p>"),
+            initial_content: managed_object_region(
+                "user_notes",
+                &user_notes_id,
+                "<p>这里的内容只由你编辑，AIALRA 不会覆盖</p>",
+            ),
             position: 990,
         },
     )
@@ -760,7 +765,11 @@ async fn ensure_workspace_path(
                 local_id: &folder.id,
                 parent_id: &parent,
                 title: &folder.title,
-                initial_content: managed_region("<p>AIALRA 工作区文件夹</p>"),
+                initial_content: managed_object_region(
+                    "workspace_folder",
+                    &folder.id,
+                    "<p>AIALRA 工作区文件夹</p>",
+                ),
                 position: folder
                     .sort_order
                     .saturating_mul(10)
@@ -798,7 +807,11 @@ async fn ensure_note(
         return Ok(record.remote_id);
     }
     let placement = match client
-        .find_created_note(parent_id, title, &initial_content)
+        .find_created_note(
+            parent_id,
+            title,
+            &object_identity_marker(object_type, local_id),
+        )
         .await
         .map_err(ProjectionError::Retry)?
     {
@@ -1015,13 +1028,21 @@ async fn ensure_recovery_note(
     let managed_hash = content_hash(managed);
     let title = format!("AIALRA 恢复副本 {}", &managed_hash[..16]);
     let placement = match client
-        .find_created_note(parent, &title, managed)
+        .find_created_note(
+            parent,
+            &title,
+            &object_identity_marker("recovery", &recovery_id),
+        )
         .await
         .map_err(ProjectionError::Retry)?
     {
         Some(placement) => placement,
         None => client
-            .create_note(parent, &title, managed)
+            .create_note(
+                parent,
+                &title,
+                &managed_object_region("recovery", &recovery_id, managed),
+            )
             .await
             .map_err(ProjectionError::Retry)?,
     };
@@ -1075,6 +1096,20 @@ fn merge_managed_content(current: &str, managed: &str) -> Result<String> {
 
 fn managed_region(body: &str) -> String {
     format!("{MANAGED_BEGIN}\n{body}\n{MANAGED_END}")
+}
+
+fn object_identity_marker(object_type: &str, local_id: &str) -> String {
+    let identity = format!("{object_type}:{local_id}");
+    let digest = hex::encode(Sha256::digest(identity.as_bytes()));
+    format!("<!-- AIALRA:OBJECT:{digest} -->")
+}
+
+fn managed_object_region(object_type: &str, local_id: &str, body: &str) -> String {
+    format!(
+        "{}\n{}",
+        object_identity_marker(object_type, local_id),
+        managed_region(body)
+    )
 }
 fn content_hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
@@ -1595,6 +1630,27 @@ mod tests {
     #[test]
     fn missing_markers_never_overwrite_manual_notes() {
         assert!(merge_managed_content("<p>manual</p>", &managed_region("<p>new</p>")).is_err());
+    }
+
+    #[test]
+    fn object_marker_is_stable_and_does_not_expose_local_id() {
+        let first = object_identity_marker("session", "session_private_example");
+        let second = object_identity_marker("session", "session_private_example");
+        assert_eq!(first, second);
+        assert!(first.starts_with("<!-- AIALRA:OBJECT:"));
+        assert!(first.ends_with(" -->"));
+        assert!(!first.contains("session_private_example"));
+    }
+
+    #[test]
+    fn object_marker_survives_managed_region_updates() {
+        let current = managed_object_region("project", "project_private_example", "<p>old</p>");
+        let updated = merge_managed_content(&current, &managed_region("<p>new</p>")).unwrap();
+        assert!(updated.contains(&object_identity_marker(
+            "project",
+            "project_private_example"
+        )));
+        assert!(updated.contains("<p>new</p>"));
     }
 
     #[test]
