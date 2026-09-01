@@ -4,21 +4,22 @@
 
 状态日期：2026-09-01
 
-当前版本：`0.5.0` 连贯课程段落与强模型分层
+当前版本：`0.5.2` v25 快速上线版本
 
-当前判断：`quality-v24-20260831` 继续在线；v25 快速上线候选已经实现分阶段失败诊断、`build_id`／`BUILD_ID`／OCI revision 追溯、部署前检查与失败回滚，并扩展真实生产链路冒烟工具，尚未合并或部署
+当前判断：`quality-v25-20260901-43a61ad` 已上线；分阶段失败诊断、`build_id`／`BUILD_ID`／OCI revision 追溯、部署前检查与失败回滚已经生效，生产合成音频链路冒烟通过
 
-当前发布门：`V25 QUICK RELEASE CANDIDATE / NOT YET DEPLOYED`
+当前发布门：`V25 ONLINE / TECHNICAL SMOKE PASSED`
 
-### 0.0 v25 快速上线候选
+### 0.0 v25 快速上线（已部署）
 
 - 模型失败接口保持原有路由和必填字段，仅新增五值 `error_stage` 与固定格式 `diagnostic_id` 两个可选字段；旧客户端兼容，不新增数据库迁移
 - GPU Agent 已按网关响应、任务载荷、模型 HTTP、模型 JSON 和执行设备分阶段报告，同一失败报告的传输重试复用诊断标识；日志不记录模型正文、转写、音频、令牌、真实会话 ID或完整载荷
 - Core 健康响应新增 `build_id`，生产 Compose、发布目录 `BUILD_ID` 与 OCI revision 使用同一完整 `main` SHA；部署器新增磁盘、活动租约、队列、SQLite/WAL/SHM 备份及失败回滚检查
 - 本轮快速检查已通过 Rust workspace 48 项、Clippy、Python 33 项、Ruff、mypy、Web 21 项、类型检查、ESLint、生产构建、Node 语法和 `git diff --check`；VPS Bash `-n` 也已通过
-- VPS 只读预检确认 v24 Core healthy、无活动录音租约、模型队列 queued／leased 均为 0、根分区剩余 33 GiB；v25 尚未部署，生产冒烟尚未执行
+- GitHub 运行源码提交、发布目录 `BUILD_ID`、Core `build_id` 与 OCI revision 均为 `43a61adc2ef6c13c8b2bb96c67575dd3f56bbfc8`；Core healthy、重启计数 0，GPU Worker 在线且队列排空
+- 生产合成音频冒烟在 60.866 秒内完成：第二设备返回 `409`，21／21 个音频块收到带 `commit_id` 的 durable ACK，生成 6 条稳定字幕、2 条稳定译文、1 页材料抽取和 1 张讲解卡，安全停止后会话完成，ReadWeave 可读
 
-### 0.1 公开主干收敛兼容性（未部署）
+### 0.1 公开主干收敛兼容性
 
 - 早期四个纯文本 SQLite 迁移与后续迁移统一使用 `.migration` 后缀，`include_str!` 引用同步更新；迁移内容和执行顺序不变
 - ReadWeave 概览渲染的局部参数改用不与凭据规则冲突的名称；Python 与 pnpm 锁文件只调整等价序列化，依赖版本和制品摘要不变
@@ -27,7 +28,7 @@
 - 2026-09-01 的本地合成运行复核已通过浏览器 durable ACK 与安全停止、对象租约授权、工作区树、单录音租约第二设备 `409`、租约接管、旧租约拒绝和 SSE 游标重放；IDOR WebSocket 用例已改为攻击者身份加未签发租约，避免把已签发高熵租约错误建模为公开对象 ID
 - GitHub PR #2 已经完整 diff 自审、隔离签名认证并以 squash 方式合并；合并后 `main` 文件树与认证候选精确一致，短期分支已删除，旧 PR #1 已注明被取代并关闭
 - 本地日常仓库已收敛为一个工作目录和一个跟踪 `origin/main` 的长期 `main`；旧私有 refs 只保留在已验证的离线 bundle，不进入 GitHub 历史
-- VPS 继续运行 `quality-v24-20260831`，183／183 个发布文件与私有归档源精确匹配；Core healthy、重启计数 0、私有健康接口 `200`、公开入口 `302`、公开 `/internal/` 为 `404`
+- VPS 已切换到 `quality-v25-20260901-43a61ad`；Core healthy、重启计数 0、私有健康接口正常、公开入口进入 Authentik、公开 `/internal/` 为 `404`
 
 ### 1.0 本轮浏览器优先录音修正（已部署）
 

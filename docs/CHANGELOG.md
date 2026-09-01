@@ -1,13 +1,15 @@
 # 变更记录
 
-## 0.5.2 2026-09-01 v25 快速上线候选
+## 0.5.2 2026-09-01 v25 快速上线
 
 - 模型任务失败请求新增向后兼容的 `error_stage` 和 `diagnostic_id`；GPU Agent 将失败分为网关响应、任务载荷、模型 HTTP、模型 JSON 与执行设备，并在失败报告重试时复用诊断标识
 - 隐私安全日志只保留诊断标识、任务类型、阶段、错误类别、HTTP 状态、响应长度与摘要，不写入模型正文、转写、音频、令牌、真实会话 ID或完整载荷
 - Core 健康响应新增 `build_id`；发布目录 `BUILD_ID`、生产 Compose 和 OCI revision 绑定同一完整 `main` SHA
 - 部署器在构建后、切换前检查磁盘、活动录音租约和模型队列，短暂停 Core 后备份 SQLite/WAL/SHM；失败只回滚代码、容器与配置，不自动覆盖持久数据
 - 生产冒烟工具支持本地 SSH 隧道控制 API 与公网 WSS 音频入口，并验证第二设备 `409`、durable ACK `commit_id`、字幕、译文、讲解、停止、会话完成、ReadWeave 读回和队列排空
-- 候选已通过 Rust workspace 48 项、Clippy、Python 33 项、Ruff、mypy、Web 21 项、类型检查、ESLint、生产构建、Node 语法、VPS Bash `-n` 和 `git diff --check`；尚未合并或部署
+- 候选已通过 Rust workspace 48 项、Clippy、Python 33 项、Ruff、mypy、Web 21 项、类型检查、ESLint、生产构建、Node 语法、VPS Bash `-n` 和 `git diff --check`
+- `quality-v25-20260901-43a61ad` 已从已发布源码提交部署；`BUILD_ID`、Core `build_id` 和 OCI revision 一致，Core healthy、重启计数 0
+- 生产合成音频冒烟通过：第二设备 `409`、21／21 个 durable ACK 均含 `commit_id`、6 条稳定字幕、2 条稳定译文、1 页材料抽取、1 张讲解卡、安全停止、会话完成、ReadWeave 可读且队列排空
 
 ## 0.5.1 2026-09-01 公开候选自审加固
 
