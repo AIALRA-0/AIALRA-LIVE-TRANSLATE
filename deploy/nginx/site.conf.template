@@ -38,9 +38,71 @@ server {
         return 404;
     }
 
+    # The Android pairing exchange is authenticated by a short-lived, one-time
+    # server-issued code.  It must reach Core before the browser Authentik
+    # redirect, while every other API and WebSocket route remains protected.
+    location = /api/v1/device-pairing/exchange {
+        auth_request off;
+        proxy_set_header X-Aialra-Auth-Proxy "";
+        proxy_set_header X-authentik-uid "";
+        proxy_pass http://127.0.0.1:__SERVICE_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host __SITE_HOST__;
+        proxy_set_header X-Forwarded-Host __SITE_HOST__;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        client_max_body_size 64k;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    # Native devices use a narrowly scoped, Core-issued bearer token after pairing.
+    # These routes must bypass the browser login redirect, while Core still checks
+    # the token, project/session scope, lease generation, origin and request body.
+    location ~ ^/api/v1/projects/[^/]+/sessions/[^/]+/recording/(acquire|renew|stop)$ {
+        auth_request off;
+        proxy_set_header X-Aialra-Auth-Proxy "";
+        proxy_set_header X-authentik-uid "";
+        proxy_pass http://127.0.0.1:__SERVICE_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host __SITE_HOST__;
+        proxy_set_header X-Forwarded-Host __SITE_HOST__;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        client_max_body_size 64k;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    location ~ ^/api/v1/sessions/[^/]+/sources/[^/]+/audio$ {
+        auth_request off;
+        proxy_set_header X-Aialra-Auth-Proxy "";
+        proxy_set_header X-authentik-uid "";
+        proxy_pass http://127.0.0.1:__SERVICE_PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Host __SITE_HOST__;
+        proxy_set_header X-Forwarded-Host __SITE_HOST__;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
     location / {
+        # Clear client-supplied identity markers before the trusted Authentik include
+        # writes its verified subject.  The Core rejects missing or untrusted markers
+        # in production, so a browser cannot impersonate another project owner.
+        proxy_set_header X-Aialra-Auth-Proxy "";
+        proxy_set_header X-authentik-uid "";
         include __PLATFORM_ROOT__/config/nginx/snippets/aialra-auth-identity-headers.conf;
-        # This value overwrites any client-supplied header with the stable subject returned by the trusted auth gateway
+        # These values overwrite any client-supplied header with the stable subject returned by the trusted auth gateway
+        proxy_set_header X-Aialra-Auth-Proxy 1;
         proxy_set_header X-authentik-uid $aialra_identity_sub;
         proxy_pass http://127.0.0.1:__SERVICE_PORT__;
         proxy_http_version 1.1;

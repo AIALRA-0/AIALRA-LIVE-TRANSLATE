@@ -114,12 +114,12 @@ if docker inspect "$readweave_container" >/dev/null 2>&1; then
 fi
 
 for _ in {1..60}; do
-  if curl -fsS --max-time 5 -H 'X-authentik-uid: deployment-health' "http://127.0.0.1:$service_port/api/v1/health" >/dev/null; then
+  if curl -fsS --max-time 5 -H 'X-aialra-auth-proxy: 1' -H 'X-authentik-uid: deployment-health' "http://127.0.0.1:$service_port/api/v1/health" >/dev/null; then
     break
   fi
   sleep 2
 done
-curl -fsS --max-time 5 -H 'X-authentik-uid: deployment-health' "http://127.0.0.1:$service_port/api/v1/health" >/dev/null
+curl -fsS --max-time 5 -H 'X-aialra-auth-proxy: 1' -H 'X-authentik-uid: deployment-health' "http://127.0.0.1:$service_port/api/v1/health" >/dev/null
 
 apps_stage="$(mktemp "$backup_dir/.apps.XXXXXX")"
 jq \

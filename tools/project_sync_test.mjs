@@ -2,11 +2,16 @@ import WebSocket from "ws";
 
 const API = process.env.AIALRA_API_URL || "http://127.0.0.1:8787/api/v1";
 const SUBJECT = process.env.AIALRA_TEST_SUBJECT || "project-sync-owner";
+const PROXY_MARKER = process.env.AIALRA_TEST_PROXY_MARKER === "true";
 
 async function request(path, init = {}, subject = SUBJECT) {
   const response = await fetch(`${API}${path}`, {
     ...init,
-    headers: { ...(init.headers || {}), "X-authentik-uid": subject },
+    headers: {
+      ...(init.headers || {}),
+      "X-authentik-uid": subject,
+      ...(PROXY_MARKER ? { "X-aialra-Auth-Proxy": "1" } : {}),
+    },
   });
   return response;
 }
@@ -23,7 +28,12 @@ async function expectOldLeaseRejected(sessionId, token) {
     const socket = new WebSocket(
       `${wsBase}/api/v1/sessions/${sessionId}/sources/expired-lease/audio`,
       ["aialra.audio.v1", `lease.${token}`],
-      { headers: { "X-authentik-uid": SUBJECT } },
+      {
+        headers: {
+          "X-authentik-uid": SUBJECT,
+          ...(PROXY_MARKER ? { "X-aialra-Auth-Proxy": "1" } : {}),
+        },
+      },
     );
     const timer = setTimeout(() => reject(new Error("expired lease WebSocket was not rejected")), 10_000);
     socket.onopen = () => reject(new Error("expired lease opened an audio WebSocket"));

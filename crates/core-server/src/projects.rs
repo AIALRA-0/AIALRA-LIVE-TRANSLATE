@@ -82,7 +82,7 @@ pub async fn create_project(
     validate_title(&request.title)?;
     let record = state.store.create_project(&NewProject {
         id: format!("project_{}", Uuid::now_v7().simple()),
-        owner_subject: user.0,
+        owner_subject: user.0.clone(),
         title: request.title.trim().to_owned(),
         source_language: request.source_language,
         target_language: request.target_language,
@@ -91,6 +91,11 @@ pub async fn create_project(
         &record.id,
         None,
         "project.created",
+        json!({"project": record}),
+    )?;
+    state.record_workspace_update(
+        &user.0,
+        "workspace.project.created",
         json!({"project": record}),
     )?;
     if crate::readweave::configured() {
@@ -123,6 +128,11 @@ pub async fn update_project(
         &project_id,
         None,
         "project.updated",
+        json!({"project": record}),
+    )?;
+    state.record_workspace_update(
+        &user.0,
+        "workspace.project.updated",
         json!({"project": record}),
     )?;
     Ok(Json(record))
@@ -191,6 +201,11 @@ pub async fn create_project_session(
         &format!("create_{session_id}"),
         None,
         json!({}),
+    )?;
+    state.record_workspace_update(
+        &user.0,
+        "workspace.session.created",
+        json!({"project_id": project_id, "session": ready}),
     )?;
     Ok(Json(ready))
 }
@@ -350,17 +365,21 @@ pub async fn stream_project(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
+    let mut receiver = state.project_updates.subscribe();
     let history = state
         .store
         .list_project_updates_after(&project_id, cursor)?;
-    let mut receiver = state.project_updates.subscribe();
+    // Subscribe before loading history, then ignore broadcasts already covered
+    // by the snapshot cursor.  This closes the refresh race without keeping an
+    // unbounded set of event IDs in every browser connection.
+    let watermark = history.last().map(|update| update.cursor).unwrap_or(cursor);
     let output = stream! {
         for update in history {
             yield Ok(project_sse_event(&update));
         }
         loop {
             match receiver.recv().await {
-                Ok(update) if update.project_id == project_id => yield Ok(project_sse_event(&update)),
+                Ok(update) if update.project_id == project_id && update.cursor > watermark => yield Ok(project_sse_event(&update)),
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -377,6 +396,18 @@ pub async fn readweave_status(
 ) -> Result<Json<Value>, ApiError> {
     owned_project(&state, &user.0, &project_id)?;
     Ok(Json(crate::readweave::status_payload(&state, &project_id)?))
+}
+
+pub async fn readweave_targets(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    owned_project(&state, &user.0, &project_id)?;
+    let status = crate::readweave::status_payload(&state, &project_id)?;
+    Ok(Json(
+        status.get("targets").cloned().unwrap_or_else(|| json!([])),
+    ))
 }
 
 pub async fn readweave_preview(
@@ -400,6 +431,16 @@ pub async fn reconcile_readweave(
     crate::readweave::enqueue_manual_reconcile(&state, &project_id)?;
     state.record_project_update(&project_id, None, "readweave.reconcile.queued", json!({}))?;
     Ok(Json(json!({"queued": true})))
+}
+
+pub async fn summarize_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((project_id, session_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    owned_project_session(&state, &user.0, &project_id, &session_id)?;
+    let job = crate::jobs::enqueue_summary(&state, &session_id, "manual")?;
+    Ok(Json(json!({"job_id": job.id, "status": job.status})))
 }
 
 fn project_sse_event(update: &ProjectUpdateRecord) -> Event {

@@ -24,7 +24,7 @@
 @rem ##########################################################################
 
 @rem Set local scope for the variables with windows NT shell
-if "%OS%"=="Windows_NT" setlocal
+if "%OS%"=="Windows_NT" setlocal EnableExtensions EnableDelayedExpansion
 
 set DIRNAME=%~dp0
 if "%DIRNAME%"=="" set DIRNAME=.
@@ -71,10 +71,26 @@ goto fail
 @rem Setup the command line
 
 set CLASSPATH=
+set WRAPPER_EXPECTED_SHA256=7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172
+set WRAPPER_SOURCE=%APP_HOME%\gradle\wrapper\gradle-wrapper.jar.b64
+if defined GRADLE_USER_HOME (
+    set WRAPPER_CACHE_ROOT=%GRADLE_USER_HOME%\caches\aialra-wrapper
+) else (
+    set WRAPPER_CACHE_ROOT=%USERPROFILE%\.gradle\caches\aialra-wrapper
+)
+set WRAPPER_JAR=%WRAPPER_CACHE_ROOT%\gradle-wrapper-%WRAPPER_EXPECTED_SHA256%.jar
+set WRAPPER_PROPERTIES_SOURCE=%APP_HOME%\gradle\wrapper\gradle-wrapper.properties
+set WRAPPER_PROPERTIES=%WRAPPER_CACHE_ROOT%\gradle-wrapper-%WRAPPER_EXPECTED_SHA256%.properties
+set WRAPPER_TEMP=%WRAPPER_JAR%.%RANDOM%.tmp
+set WRAPPER_PROPERTIES_TEMP=%WRAPPER_PROPERTIES%.%RANDOM%.tmp
+if not exist "%WRAPPER_CACHE_ROOT%" mkdir "%WRAPPER_CACHE_ROOT%"
+if errorlevel 1 goto fail
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; function Get-Sha256([string]$path) { $stream=[IO.File]::OpenRead($path); $sha=[Security.Cryptography.SHA256]::Create(); try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose(); $stream.Dispose() } }; $restore=-not (Test-Path -LiteralPath $env:WRAPPER_JAR -PathType Leaf); if (-not $restore) { $restore=(Get-Sha256 $env:WRAPPER_JAR) -ne $env:WRAPPER_EXPECTED_SHA256 }; if ($restore) { $bytes=[Convert]::FromBase64String([IO.File]::ReadAllText($env:WRAPPER_SOURCE)); $sha=[Security.Cryptography.SHA256]::Create(); try { $actual=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }; if ($actual -ne $env:WRAPPER_EXPECTED_SHA256) { throw 'Decoded Gradle wrapper SHA-256 mismatch' }; [IO.File]::WriteAllBytes($env:WRAPPER_TEMP,$bytes); Move-Item -LiteralPath $env:WRAPPER_TEMP -Destination $env:WRAPPER_JAR -Force }; if ((Get-Sha256 $env:WRAPPER_JAR) -ne $env:WRAPPER_EXPECTED_SHA256) { throw 'Cached Gradle wrapper SHA-256 mismatch' }; Copy-Item -LiteralPath $env:WRAPPER_PROPERTIES_SOURCE -Destination $env:WRAPPER_PROPERTIES_TEMP -Force; Move-Item -LiteralPath $env:WRAPPER_PROPERTIES_TEMP -Destination $env:WRAPPER_PROPERTIES -Force"
+if errorlevel 1 goto fail
 
 
 @rem Execute Gradle
-"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" -jar "%APP_HOME%\gradle\wrapper\gradle-wrapper.jar" %*
+"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" -jar "%WRAPPER_JAR%" %*
 
 :end
 @rem End local scope for the variables with windows NT shell

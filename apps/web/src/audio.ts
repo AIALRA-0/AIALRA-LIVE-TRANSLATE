@@ -5,6 +5,15 @@ const METADATA_STORE_NAME = "metadata";
 const MAX_IN_FLIGHT_FRAMES = 8;
 
 export type CaptureMode = "microphone" | "screen";
+export type CapturePhase =
+  | "idle"
+  | "requesting-permission"
+  | "acquiring-lease"
+  | "connecting"
+  | "recording"
+  | "stopping"
+  | "processing"
+  | "error";
 
 interface PersistedFrame {
   key: string;
@@ -62,6 +71,26 @@ export function nextFramesToSend(
     .filter((sequence) => !inFlight.has(sequence))
     .sort((left, right) => left - right)
     .slice(0, available);
+}
+
+export interface DurableAudioAck {
+  type: "audio.ack";
+  sequence: number;
+  commit_id: string;
+}
+
+// A frame is safe to delete locally only after Core has returned its durable
+// SQLite/object-store commit identifier.  Older or malformed responses remain
+// pending so a reconnect can retry them instead of turning an ACK into loss.
+export function isDurableAudioAck(message: unknown): message is DurableAudioAck {
+  if (!message || typeof message !== "object") return false;
+  const candidate = message as Partial<DurableAudioAck>;
+  return candidate.type === "audio.ack"
+    && typeof candidate.sequence === "number"
+    && Number.isSafeInteger(candidate.sequence)
+    && candidate.sequence >= 1
+    && typeof candidate.commit_id === "string"
+    && candidate.commit_id.length > 0;
 }
 
 function openOutbox(): Promise<IDBDatabase> {
@@ -156,48 +185,139 @@ function workletModuleUrl(): string {
   return URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
 }
 
+function requestMediaWithTimeout(request: Promise<MediaStream>, timeoutMs = 15_000): Promise<MediaStream> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      settled = true;
+      reject(new Error("麦克风权限请求超时，请点击地址栏的权限图标允许收音后重试"));
+    }, timeoutMs);
+    request.then((stream) => {
+      if (settled) stream.getTracks().forEach((track) => track.stop());
+      else {
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(stream);
+      }
+    }).catch((error) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
 // AudioWorklet keeps capture off the UI thread while IndexedDB survives refreshes and short outages.
 export class BrowserCapture {
   private context: AudioContext | null = null;
   private stream: MediaStream | null = null;
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
   private worklet: AudioWorkletNode | null = null;
+  private outputGain: GainNode | null = null;
   private socket: WebSocket | null = null;
   private sequence = 1;
   private pending = new Map<number, ArrayBuffer>();
   private inFlight = new Set<number>();
   private reconnectTimer: number | null = null;
   private renewTimer: number | null = null;
+  private socketOpenTimer: number | null = null;
   private stopped = false;
   private stopping = false;
+  private prepared = false;
+  private activated = false;
+  private leaseToken = "";
+  private leaseGeneration = 0;
   private sampleChunks: Float32Array[] = [];
   private sampleCount = 0;
   private writeChain = Promise.resolve();
-  private readonly sourceId: string;
-  private readonly sequenceStorageKey: string;
+  private sourceId = "";
+  private sequenceStorageKey = "";
 
   constructor(
     private readonly projectId: string,
     private readonly sessionId: string,
     private readonly recorderDeviceId: string,
-    private readonly leaseToken: string,
-    leaseGeneration: number,
     private readonly onStatus: (message: string) => void,
     private readonly mode: CaptureMode = "microphone",
     private readonly deviceId?: string,
     private readonly onRevoked?: () => void,
-  ) {
-    this.sourceId = `browser-${mode === "screen" ? "screen" : "mic"}-g${leaseGeneration}`;
-    this.sequenceStorageKey = `aialra-audio-next-sequence:${sessionId}:${this.sourceId}`;
-  }
+  ) {}
 
-  async start(): Promise<void> {
-    this.stopped = false;
+  // Prepare the browser input before asking Core for a recording lease.  This
+  // keeps denied permissions and unsupported browsers from creating orphaned
+  // server-side recording sessions.
+  async prepare(): Promise<void> {
+    if (this.prepared) return;
     if (!window.isSecureContext && window.location.hostname !== "localhost") {
       throw new Error("浏览器录音需要 HTTPS 安全连接");
     }
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error("当前浏览器不支持录音，请改用最新版 Chrome 或 Edge");
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices) throw new Error("当前浏览器没有可用的媒体设备，请改用最新版 Chrome 或 Edge");
+    if (!("AudioContext" in window) || !("AudioWorkletNode" in window)) {
+      throw new Error("当前浏览器不支持低延迟音频采集，请改用最新版 Chrome 或 Edge");
     }
+    if (this.mode === "microphone" && !mediaDevices.getUserMedia) {
+      throw new Error("当前浏览器不支持麦克风录音，请改用最新版 Chrome 或 Edge");
+    }
+    if (this.mode === "screen" && !mediaDevices.getDisplayMedia) {
+      throw new Error("当前浏览器不支持共享音频，请改用最新版 Chrome 或 Edge");
+    }
+    try {
+      this.stream = this.mode === "screen"
+        ? await requestMediaWithTimeout(mediaDevices.getDisplayMedia({ audio: true, video: true }))
+        : await requestMediaWithTimeout(mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              ...(this.deviceId ? { deviceId: { exact: this.deviceId } } : {}),
+            },
+          }));
+      if (this.mode === "screen") {
+        this.stream.getVideoTracks().forEach((track) => track.stop());
+        if (this.stream.getAudioTracks().length === 0) {
+          throw new Error("共享内容没有音频，请在浏览器共享框中勾选音频");
+        }
+      }
+      this.context = new AudioContext({ latencyHint: "interactive" });
+      const moduleUrl = workletModuleUrl();
+      try {
+        await this.context.audioWorklet.addModule(moduleUrl);
+      } finally {
+        URL.revokeObjectURL(moduleUrl);
+      }
+      this.sourceNode = this.context.createMediaStreamSource(this.stream);
+      this.worklet = new AudioWorkletNode(this.context, "aialra-pcm");
+      this.worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
+        this.acceptSamples(event.data);
+      };
+      this.sourceNode.connect(this.worklet);
+      // Keep the worklet alive without playing the microphone back through the
+      // speakers, which would create an echo loop during a lecture.
+      this.outputGain = this.context.createGain();
+      this.outputGain.gain.value = 0;
+      this.worklet.connect(this.outputGain);
+      this.outputGain.connect(this.context.destination);
+      await this.context.resume().catch(() => undefined);
+      this.prepared = true;
+    } catch (error) {
+      this.disposeInput();
+      throw new Error(this.mediaError(error));
+    }
+  }
+
+  // Activate an already prepared input with a server-issued lease.  A retry
+  // after a transient WebSocket failure can reuse the same lease safely.
+  async activate(leaseToken: string, leaseGeneration: number): Promise<void> {
+    if (!leaseToken) throw new Error("录音租约无效，请重新开始录音");
+    await this.prepare();
+    if (this.activated) return;
+    this.leaseToken = leaseToken;
+    this.leaseGeneration = leaseGeneration;
+    this.sourceId = `browser-${this.mode === "screen" ? "screen" : "mic"}-g${leaseGeneration}`;
+    this.sequenceStorageKey = `aialra-audio-next-sequence:${this.sessionId}:${this.sourceId}`;
     const recovered = await listFrames(this.sessionId, this.sourceId);
     recovered.forEach((item) => this.pending.set(item.sequence, item.frame));
     const storedSequence = await loadNextSequence(this.sequenceStorageKey);
@@ -205,46 +325,27 @@ export class BrowserCapture {
       storedSequence,
       recovered.map((item) => item.sequence),
     );
-    this.stream = this.mode === "screen"
-      ? await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true })
-      : await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            ...(this.deviceId ? { deviceId: { exact: this.deviceId } } : {}),
-          },
-        });
-    if (this.mode === "screen") {
-      this.stream.getVideoTracks().forEach((track) => track.stop());
-      if (this.stream.getAudioTracks().length === 0) {
-        this.stream.getTracks().forEach((track) => track.stop());
-        throw new Error("共享内容没有音频，请在浏览器共享框中勾选音频");
-      }
-    }
-    this.context = new AudioContext({ latencyHint: "interactive" });
-    const moduleUrl = workletModuleUrl();
-    try {
-      await this.context.audioWorklet.addModule(moduleUrl);
-    } finally {
-      URL.revokeObjectURL(moduleUrl);
-    }
-    const source = this.context.createMediaStreamSource(this.stream);
-    this.worklet = new AudioWorkletNode(this.context, "aialra-pcm");
-    this.worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
-      this.acceptSamples(event.data);
-    };
-    source.connect(this.worklet);
-    this.worklet.connect(this.context.destination);
+    this.stopped = false;
+    this.stopping = false;
+    this.activated = true;
+    this.onStatus("正在连接服务器，音频会先保存到本机恢复缓存");
     this.connect();
     this.renewTimer = window.setInterval(() => void this.renewLease(), 10_000);
+  }
+
+  // Compatibility wrapper for callers that do not need to display the
+  // preparation and lease phases separately.
+  async start(leaseToken: string, leaseGeneration: number): Promise<void> {
+    await this.prepare();
+    await this.activate(leaseToken, leaseGeneration);
   }
 
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopping = true;
+    this.sourceNode?.disconnect();
     this.worklet?.disconnect();
+    this.outputGain?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
     await this.context?.close();
     if (this.sampleCount > 0) {
@@ -254,6 +355,7 @@ export class BrowserCapture {
     await this.writeChain;
     const deadline = Date.now() + 30_000;
     while (this.pending.size > 0 && Date.now() < deadline) {
+      if (this.socket?.readyState !== WebSocket.OPEN) this.connect();
       this.sendPending();
       await new Promise((resolve) => window.setTimeout(resolve, 100));
     }
@@ -264,21 +366,56 @@ export class BrowserCapture {
     this.stopped = true;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     if (this.renewTimer !== null) window.clearInterval(this.renewTimer);
+    if (this.socketOpenTimer !== null) window.clearTimeout(this.socketOpenTimer);
     this.socket?.close();
+    this.activated = false;
     this.onStatus("录音已停止，已采集音频均得到服务器确认");
   }
 
-  revoke(): void {
+  // Dispose a prepared input without presenting a lease-takeover message.
+  dispose(): void {
+    this.revoke(undefined, false);
+  }
+
+  revoke(message?: string, notify = true): void {
+    const wasActivated = this.activated;
     this.stopped = true;
     this.stopping = false;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     if (this.renewTimer !== null) window.clearInterval(this.renewTimer);
-    this.worklet?.disconnect();
-    this.stream?.getTracks().forEach((track) => track.stop());
-    void this.context?.close();
+    if (this.socketOpenTimer !== null) window.clearTimeout(this.socketOpenTimer);
+    this.disposeInput();
     this.socket?.close();
-    this.onStatus(`录音权限已由另一台设备接管，${this.pending.size} 个未确认音频块保留在本机`);
-    this.onRevoked?.();
+    this.activated = false;
+    if (notify && wasActivated) {
+      this.onStatus(message ?? `录音权限已由另一台设备接管，${this.pending.size} 个未确认音频块保留在本机`);
+      this.onRevoked?.();
+    }
+  }
+
+  private disposeInput(): void {
+    this.sourceNode?.disconnect();
+    this.worklet?.disconnect();
+    this.outputGain?.disconnect();
+    this.stream?.getTracks().forEach((track) => track.stop());
+    const context = this.context;
+    if (context) void context.close().catch(() => undefined);
+    this.sourceNode = null;
+    this.worklet = null;
+    this.outputGain = null;
+    this.stream = null;
+    this.context = null;
+    this.prepared = false;
+  }
+
+  private mediaError(error: unknown): string {
+    const name = typeof error === "object" && error !== null && "name" in error ? String((error as { name?: unknown }).name) : "";
+    if (name === "NotAllowedError" || name === "SecurityError") return "麦克风权限被拒绝，请允许当前网站使用麦克风后重试";
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") return "没有找到可用麦克风，请连接麦克风或选择其他输入设备";
+    if (name === "NotReadableError" || name === "TrackStartError") return "麦克风正在被其他应用占用，请关闭占用它的应用后重试";
+    if (name === "OverconstrainedError") return "所选输入设备当前不可用，请重新选择麦克风后重试";
+    if (error instanceof Error) return error.message;
+    return "浏览器无法打开音频输入，请检查麦克风权限和设备状态";
   }
 
   private acceptSamples(samples: Float32Array): void {
@@ -323,32 +460,61 @@ export class BrowserCapture {
   }
 
   private connect(): void {
+    if (this.stopped || !this.leaseToken) return;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     this.socket = new WebSocket(
       `${scheme}://${window.location.host}/api/v1/sessions/${this.sessionId}/sources/${this.sourceId}/audio`,
       ["aialra.audio.v1", `lease.${this.leaseToken}`],
     );
     this.socket.binaryType = "arraybuffer";
+    const socket = this.socket;
+    this.socketOpenTimer = window.setTimeout(() => {
+      if (socket === this.socket && socket.readyState === WebSocket.CONNECTING) {
+        this.onStatus("服务器连接超时，音频已安全缓存，正在重试");
+        socket.close();
+      }
+    }, 10_000);
     this.socket.onopen = () => {
+      if (this.socketOpenTimer !== null) window.clearTimeout(this.socketOpenTimer);
+      this.socketOpenTimer = null;
       this.inFlight.clear();
       this.onStatus(`${this.mode === "screen" ? "共享音频" : "麦克风"}已连接，等待服务器确认音频块`);
       this.sendPending();
     };
     this.socket.onmessage = (event) => {
-      const message = JSON.parse(String(event.data)) as { type: string; sequence?: number; message?: string };
-      if (message.type === "audio.ack" && typeof message.sequence === "number") {
+      let message: { type: string; sequence?: number; commit_id?: string; message?: string };
+      try {
+        message = JSON.parse(String(event.data)) as { type: string; sequence?: number; commit_id?: string; message?: string };
+      } catch {
+        this.onStatus("服务器返回了无法识别的音频确认，音频块继续保留并等待重试");
+        this.socket?.close();
+        return;
+      }
+      if (isDurableAudioAck(message)) {
         this.inFlight.delete(message.sequence);
         this.pending.delete(message.sequence);
         void deleteFrame(`${this.sessionId}:${this.sourceId}:${message.sequence}`);
         if (this.pending.size === 0) this.onStatus("收音正常，服务器已确认全部音频块");
         this.sendPending();
+      } else if (message.type === "audio.ack") {
+        this.onStatus("服务器返回了非持久确认，音频块继续保留并等待重试");
+        this.socket?.close();
       } else if (message.type === "audio.error") {
         this.onStatus(message.message || "服务器拒绝了音频块，等待连接恢复");
         this.socket?.close();
       }
     };
+    this.socket.onerror = () => {
+      if (!this.stopped && !this.stopping) this.onStatus(`服务器连接失败，${this.pending.size} 个音频块已安全缓存，正在重试`);
+    };
     this.socket.onclose = () => {
-      if (this.stopped) return;
+      if (this.socketOpenTimer !== null) window.clearTimeout(this.socketOpenTimer);
+      this.socketOpenTimer = null;
+      if (this.stopped || (this.stopping && this.pending.size === 0)) return;
       this.inFlight.clear();
       this.onStatus(`连接恢复中，${this.pending.size} 个音频块已安全缓存`);
       this.reconnectTimer = window.setTimeout(() => this.connect(), 1_500);
@@ -388,4 +554,93 @@ export class BrowserCapture {
     this.onStatus("录音权限已由另一台设备接管，本机停止采集，未确认块仍保留");
     this.revoke();
   }
+}
+
+export interface MicrophoneTestProgress {
+  phase: "quiet" | "speech";
+  elapsedMs: number;
+  levelDbfs: number;
+}
+
+export interface MicrophoneTestResult {
+  passed: boolean;
+  noiseFloorDbfs: number;
+  speechP95Dbfs: number;
+  peakDbfs: number;
+  clippingRatio: number;
+  sampleRate: number;
+  message: string;
+}
+
+function amplitudeDbfs(value: number): number {
+  return value <= 0 ? -96 : Math.max(-96, 20 * Math.log10(value));
+}
+
+function percentile(values: number[], ratio: number): number {
+  if (values.length === 0) return -96;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
+}
+
+// The preflight test reads the selected microphone locally and never opens a recording lease or network request.
+export async function testMicrophone(
+  deviceId: string | undefined,
+  onProgress: (progress: MicrophoneTestProgress) => void,
+): Promise<MicrophoneTestResult> {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error("当前浏览器不支持麦克风测试");
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    },
+  });
+  const context = new AudioContext({ latencyHint: "interactive" });
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 2048;
+  const source = context.createMediaStreamSource(stream);
+  source.connect(analyser);
+  const samples = new Float32Array(analyser.fftSize);
+  const quietLevels: number[] = [];
+  const speechLevels: number[] = [];
+  let peak = 0;
+  let clipped = 0;
+  let total = 0;
+  const started = performance.now();
+  try {
+    while (performance.now() - started < 4_000) {
+      analyser.getFloatTimeDomainData(samples);
+      let squared = 0;
+      for (const sample of samples) {
+        const absolute = Math.abs(sample);
+        squared += sample * sample;
+        peak = Math.max(peak, absolute);
+        if (absolute >= 0.891) clipped += 1;
+        total += 1;
+      }
+      const level = amplitudeDbfs(Math.sqrt(squared / samples.length));
+      const elapsedMs = performance.now() - started;
+      if (elapsedMs < 1_000) quietLevels.push(level);
+      else speechLevels.push(level);
+      onProgress({ phase: elapsedMs < 1_000 ? "quiet" : "speech", elapsedMs, levelDbfs: level });
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    }
+  } finally {
+    source.disconnect();
+    stream.getTracks().forEach((track) => track.stop());
+    await context.close();
+  }
+  const noiseFloorDbfs = percentile(quietLevels, 0.5);
+  const speechP95Dbfs = percentile(speechLevels, 0.95);
+  const peakDbfs = amplitudeDbfs(peak);
+  const clippingRatio = total > 0 ? clipped / total : 0;
+  const passed = speechP95Dbfs >= -45 && speechP95Dbfs - noiseFloorDbfs >= 12 && clippingRatio <= 0.01;
+  const message = clippingRatio > 0.01
+    ? "输入音量过高，请降低系统麦克风增益"
+    : passed
+      ? "麦克风收音正常"
+      : "语音信号偏弱，请靠近麦克风或检查输入设备";
+  return { passed, noiseFloorDbfs, speechP95Dbfs, peakDbfs, clippingRatio, sampleRate: context.sampleRate, message };
 }

@@ -73,7 +73,11 @@ function repeatedPcmWav(source, seconds) {
 const privateFixturePath = path.join(tmpdir(), `aialra-browser-${randomUUID()}.wav`);
 await writeFile(privateFixturePath, repeatedPcmWav(fixture, captureSeconds + 120));
 
-const apiHeaders = { "content-type": "application/json", "X-authentik-uid": identity };
+const apiHeaders = {
+  "content-type": "application/json",
+  "X-authentik-uid": identity,
+  ...(process.env.AIALRA_TEST_PROXY_MARKER === "true" ? { "X-aialra-Auth-Proxy": "1" } : {}),
+};
 async function checked(responsePromise) {
   const response = await responsePromise;
   if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
@@ -130,34 +134,41 @@ const launchOptions = {
 };
 if (browserChannel !== "chromium") launchOptions.channel = browserChannel;
 const browser = await chromium.launch(launchOptions);
-const recorderContext = await browser.newContext({ extraHTTPHeaders: { "X-authentik-uid": identity } });
-const observerContext = await browser.newContext({ extraHTTPHeaders: { "X-authentik-uid": identity } });
+const browserHeaders = {
+  "X-authentik-uid": identity,
+  ...(process.env.AIALRA_TEST_PROXY_MARKER === "true" ? { "X-Aialra-Auth-Proxy": "1" } : {}),
+};
+const recorderContext = await browser.newContext({ extraHTTPHeaders: browserHeaders });
+const observerContext = await browser.newContext({ extraHTTPHeaders: browserHeaders });
 const recorder = await recorderContext.newPage();
 const observer = await observerContext.newPage();
 
+async function openSession(page) {
+  // Stable deep links are the contract for refreshes and multi-device observers
+  // so the test never depends on a transient marketing or setup screen.
+  await page.goto(`${baseUrl}/app/projects/${project.id}/sessions/${session.id}`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: session.title, exact: true }).waitFor({ timeout: 30_000 });
+}
+
 try {
-  await Promise.all([recorder.goto(baseUrl), observer.goto(baseUrl)]);
-  await Promise.all([
-    recorder.getByRole("button", { name: session.title }).click(),
-    observer.getByRole("button", { name: session.title }).click(),
-  ]);
-  await recorder.getByRole("button", { name: "开始理解" }).click();
+  await Promise.all([openSession(recorder), openSession(observer)]);
+  await recorder.getByText("默认使用当前设备的麦克风；只有本机没有麦克风时才需要安卓手机", { exact: true }).waitFor({ timeout: 10_000 });
+  if (await recorder.locator("details.device-pairing[open]").count()) throw new Error("Android fallback must be collapsed by default");
+  await recorder.getByRole("button", { name: "开始录音", exact: true }).click();
   await recorder.getByText("收音正常，服务器已确认全部音频块").waitFor({ timeout: 30_000 });
-  await observer.getByText("另一台设备正在录音，本机保持同步查看").waitFor({ timeout: 30_000 });
+  await observer.getByText("另一台设备正在录音，请在录音设备停止").waitFor({ timeout: 30_000 });
   await new Promise((resolve) => setTimeout(resolve, 8_000));
   await recorderContext.setOffline(true);
   await new Promise((resolve) => setTimeout(resolve, offlineSeconds * 1_000));
   await recorderContext.setOffline(false);
-  await recorder.reload();
-  await recorder.getByRole("button", { name: session.title }).click();
-  await recorder.getByText("已恢复本机录音权限，点击继续收音后会补传缓存音频").waitFor({ timeout: 20_000 });
-  await recorder.getByRole("button", { name: "继续本机收音" }).click();
+  await recorder.reload({ waitUntil: "domcontentloaded" });
+  await recorder.getByText("录音租约已恢复，可继续收音").waitFor({ timeout: 20_000 });
+  await recorder.getByRole("button", { name: "继续连接收音", exact: true }).click();
   await recorder.getByText("收音正常，服务器已确认全部音频块").waitFor({ timeout: 30_000 });
   await new Promise((resolve) => setTimeout(resolve, 3_000));
-  await recorder.reload();
-  await recorder.getByRole("button", { name: session.title }).click();
-  await recorder.getByText("已恢复本机录音权限，点击继续收音后会补传缓存音频").waitFor({ timeout: 20_000 });
-  await recorder.getByRole("button", { name: "继续本机收音" }).click();
+  await recorder.reload({ waitUntil: "domcontentloaded" });
+  await recorder.getByText("录音租约已恢复，可继续收音").waitFor({ timeout: 20_000 });
+  await recorder.getByRole("button", { name: "继续连接收音", exact: true }).click();
   await recorder.getByText("收音正常，服务器已确认全部音频块").waitFor({ timeout: 30_000 });
   const captureDeadline = Date.now() + Math.max(10, captureSeconds - 13) * 1_000;
   let previousCaptured = 0;
@@ -176,11 +187,11 @@ try {
       throw new Error(`server audio acknowledgements stopped progressing for 90 seconds with ${progress.pending} cached frames`);
     }
   }
-  await recorder.getByRole("button", { name: /停止并保存/ }).click();
-  await recorder.getByText("课程会话已安全结束，模型队列已排空").waitFor({ timeout: 10 * 60_000 });
-  await observer.getByText("课程会话已安全结束，模型队列已排空").waitFor({ timeout: 60_000 });
-  await observer.locator(".readweave-preview > div p").first().waitFor({ timeout: 30_000 });
-  const events = await checked(fetch(`${apiUrl}/sessions/${session.id}/events`, { headers: { "X-authentik-uid": identity } }));
+  await recorder.getByRole("button", { name: "停止并完成处理", exact: true }).click();
+  await recorder.getByText("录音和模型处理均已完成").waitFor({ timeout: 10 * 60_000 });
+  await observer.getByText("已完成", { exact: true }).last().waitFor({ timeout: 60_000 });
+  await observer.locator(".readweave-card > p").first().waitFor({ timeout: 30_000 });
+  const events = await checked(fetch(`${apiUrl}/sessions/${session.id}/events`, { headers: apiHeaders }));
   const segments = events.filter((event) => event.event_type === "segment.finalized");
   const translations = events.filter((event) => event.event_type === "translation.finalized");
   if (!segments.length || !translations.length) throw new Error("browser capture produced no real final transcript or translation");

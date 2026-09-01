@@ -21,9 +21,16 @@ GATEWAY_URL = os.getenv("AIALRA_GPU_GATEWAY_URL", "http://127.0.0.1:8787").rstri
 MODEL_WORKER_URL = os.getenv("AIALRA_MODEL_WORKER_URL", "http://127.0.0.1:8790").rstrip("/")
 WORKER_TOKEN = os.getenv("AIALRA_WORKER_TOKEN", "")
 WORKER_ID = os.getenv("AIALRA_GPU_WORKER_ID", "rtx4080")
-HEARTBEAT_SECONDS = 10
+HEARTBEAT_SECONDS = 5
 RENEW_SECONDS = 20
 BACKOFF_SECONDS = (1, 2, 4, 8, 16, 30)
+# A translation lane may yield after a bounded ASR burst.  ASR keeps the first
+# claim on CUDA, but an always-ready ASR queue must not starve readable output
+# for the entire duration of a long recording.
+MAX_ASR_BURST_BEFORE_TRANSLATION = 8
+SUMMARY_HTTP_TIMEOUT_SECONDS = max(
+    60.0, min(float(os.getenv("AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS", "150")), 180.0)
+)
 
 
 @dataclass(frozen=True)
@@ -44,7 +51,7 @@ LANES = (
     # leases also make the server-side pickup metric reflect actual worker
     # availability instead of the duration of the previous LLM generation.
     Lane("translate", ("translate",)),
-    Lane("explain", ("explain", "asset_parse")),
+    Lane("explain", ("explain", "summarize", "asset_parse")),
 )
 
 
@@ -53,54 +60,127 @@ class RetryableJobError(RuntimeError):
 
 
 class GpuScheduler:
-    """Serialize shared-GPU work while allowing CPU ASR to overlap one GPU LLM request."""
+    """Keep ASR responsive while serializing the longer Ollama requests."""
 
     def __init__(self, *, asr_uses_gpu: bool = True) -> None:
         self._asr_uses_gpu = asr_uses_gpu
         self._llm_lock = asyncio.Lock()
         self._condition = asyncio.Condition()
         self._active_kind: str | None = None
+        # ASR may overlap an active realtime LLM, so `_active_kind` alone is
+        # not enough to tell an exclusive model that CUDA work is still live.
+        self._active_asr = 0
         self._asr_waiters = 0
+        self._translation_waiters = 0
         self._last_asr_completed: float | None = None
         self._llm_start_window_seconds = 2.0
+        self._asr_since_translation = 0
 
     async def run_asr(
         self, request: Callable[[], Awaitable[httpx.Response]]
     ) -> httpx.Response:
         if not self._asr_uses_gpu:
             return await request()
+        concurrent_with_llm = False
         async with self._condition:
             self._asr_waiters += 1
             try:
-                await self._condition.wait_for(lambda: self._active_kind is None)
-                self._active_kind = "asr"
+                if self._active_kind == "llm":
+                    # Ollama generation cannot be preempted.  The measured RTX 4080
+                    # memory envelope leaves room for small ASR, so run it alongside
+                    # the active LLM instead of adding up to nine seconds of queueing.
+                    concurrent_with_llm = True
+                else:
+                    await self._condition.wait_for(lambda: self._active_kind is None)
+                    self._active_kind = "asr"
+                self._active_asr += 1
             finally:
                 self._asr_waiters -= 1
         try:
             return await request()
         finally:
             async with self._condition:
-                self._active_kind = None
+                self._active_asr -= 1
+                if not concurrent_with_llm:
+                    self._active_kind = None
+                    self._asr_since_translation += 1
                 self._last_asr_completed = time.monotonic()
                 self._condition.notify_all()
 
     async def run_llm(
         self, request: Callable[[], Awaitable[httpx.Response]]
     ) -> httpx.Response:
+        return await self._run_llm(request, translation_priority=False)
+
+    async def run_exclusive(
+        self, request: Callable[[], Awaitable[httpx.Response]]
+    ) -> httpx.Response:
+        """Run a model that must not share VRAM with ASR or another LLM.
+
+        Final summaries and image understanding can evict the realtime Whisper
+        model on a 16 GB card.  They therefore wait for every active lane and
+        advertise an ``exclusive`` state so a concurrently arriving ASR job
+        waits instead of loading another large model into the same device.
+        """
+
         if not self._asr_uses_gpu:
             async with self._llm_lock:
                 return await request()
         async with self._condition:
-            while True:
-                within_window = (
-                    self._last_asr_completed is not None
-                    and time.monotonic() - self._last_asr_completed
-                    <= self._llm_start_window_seconds
-                )
-                if self._active_kind is None and self._asr_waiters == 0 and within_window:
-                    break
-                await self._condition.wait()
-            self._active_kind = "llm"
+            await self._condition.wait_for(
+                lambda: self._active_kind is None
+                and self._active_asr == 0
+                and self._asr_waiters == 0
+                and self._translation_waiters == 0
+            )
+            self._active_kind = "exclusive"
+        try:
+            return await request()
+        finally:
+            async with self._condition:
+                self._active_kind = None
+                self._condition.notify_all()
+
+    async def run_translation(
+        self, request: Callable[[], Awaitable[httpx.Response]]
+    ) -> httpx.Response:
+        return await self._run_llm(request, translation_priority=True)
+
+    async def _run_llm(
+        self,
+        request: Callable[[], Awaitable[httpx.Response]],
+        *,
+        translation_priority: bool,
+    ) -> httpx.Response:
+        if not self._asr_uses_gpu:
+            async with self._llm_lock:
+                return await request()
+        async with self._condition:
+            if translation_priority:
+                self._translation_waiters += 1
+            if self._last_asr_completed is None:
+                try:
+                    await asyncio.wait_for(self._condition.wait(), timeout=0.05)
+                except TimeoutError:
+                    pass
+            try:
+                while True:
+                    asr_yielded_for_translation = (
+                        translation_priority
+                        and self._asr_since_translation >= MAX_ASR_BURST_BEFORE_TRANSLATION
+                    )
+                    no_higher_priority_work = (
+                        self._asr_waiters == 0 or asr_yielded_for_translation
+                    ) and (translation_priority or self._translation_waiters == 0)
+                    if self._active_kind is None and no_higher_priority_work:
+                        break
+                    await self._condition.wait()
+                self._active_kind = "llm"
+                if translation_priority:
+                    self._asr_since_translation = 0
+            finally:
+                if translation_priority:
+                    self._translation_waiters -= 1
         try:
             return await request()
         finally:
@@ -119,7 +199,7 @@ def provider_proves_local_execution(job_type: str, provider: str) -> bool:
 
     if job_type == "asr":
         return provider.startswith("faster-whisper:") and provider.endswith(("@cpu", "@cuda"))
-    if job_type in {"translate", "explain"}:
+    if job_type in {"translate", "explain", "summarize"}:
         return provider.startswith("ollama:") and provider.endswith("@cuda")
     return True
 
@@ -153,6 +233,34 @@ def cuda_metadata() -> dict[str, Any]:
     }
 
 
+def cuda_telemetry() -> dict[str, Any]:
+    """Return one privacy-safe live sample without process IDs, UUIDs, or host names."""
+
+    command = [
+        "nvidia-smi",
+        "--query-gpu=name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,temperature.gpu",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=True)
+        values = [value.strip() for value in result.stdout.strip().splitlines()[0].split(",")]
+        if len(values) != 8:
+            return {}
+        return {
+            "name": values[0],
+            "utilization_percent": float(values[1]),
+            "memory_utilization_percent": float(values[2]),
+            "memory_used_mib": float(values[3]),
+            "memory_total_mib": float(values[4]),
+            "power_w": round(float(values[5]), 1),
+            "power_limit_w": round(float(values[6]), 1),
+            "temperature_c": float(values[7]),
+            "sampled_at_unix_ms": int(time.time() * 1_000),
+        }
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return {}
+
+
 async def verify_model_worker(client: httpx.AsyncClient) -> dict[str, Any]:
     response = await client.get(f"{MODEL_WORKER_URL}/health", timeout=10)
     response.raise_for_status()
@@ -169,6 +277,16 @@ async def verify_model_worker(client: httpx.AsyncClient) -> dict[str, Any]:
     return health
 
 
+def model_worker_remains_available(health: dict[str, Any]) -> bool:
+    """A one-shot background model may replace the resident translation model temporarily."""
+
+    return bool(
+        health.get("status") == "ok"
+        and health.get("asr_available")
+        and health.get("ollama_available")
+    )
+
+
 async def model_health_loop(client: httpx.AsyncClient) -> None:
     """Exit only when the worker process is unreachable, not while a local model is busy."""
 
@@ -179,7 +297,7 @@ async def model_health_loop(client: httpx.AsyncClient) -> None:
             response = await client.get(f"{MODEL_WORKER_URL}/health", timeout=10)
             response.raise_for_status()
             health = response.json()
-            if health.get("status") != "ok" or not health.get("ollama_gpu_resident"):
+            if not model_worker_remains_available(health):
                 raise RuntimeError("local model worker health status is not ok")
             failures = 0
         except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as error:
@@ -198,12 +316,17 @@ async def heartbeat_loop(
 ) -> None:
     while True:
         try:
+            live_metadata = {
+                **metadata,
+                "gpu": cuda_telemetry(),
+                "active_job_type": lane.suffix if active.get(lane.suffix) else None,
+            }
             await gateway.post(
                 f"{GATEWAY_URL}/internal/v1/workers/heartbeat",
                 json={
                     "worker_id": lane.worker_id,
                     "capabilities": list(lane.capabilities),
-                    "model_metadata": metadata,
+                    "model_metadata": live_metadata,
                     "active_job_id": active.get(lane.suffix),
                 },
                 timeout=10,
@@ -231,11 +354,16 @@ async def execute_job(
     model: httpx.AsyncClient,
     job: dict[str, Any],
     scheduler: GpuScheduler,
+    worker_id: str,
 ) -> dict[str, Any]:
     job_type = str(job["job_type"])
     model_input = dict(job["input"])
     if job_type == "asr":
-        binary = await gateway.get(f"{GATEWAY_URL}/internal/v1/jobs/{job['id']}/input", timeout=30)
+        binary = await gateway.get(
+            f"{GATEWAY_URL}/internal/v1/jobs/{job['id']}/input",
+            headers={"X-Aialra-Worker-ID": worker_id},
+            timeout=30,
+        )
         binary.raise_for_status()
         expected = binary.headers.get("x-aialra-content-sha256", "")
         if expected and hashlib.sha256(binary.content).hexdigest() != expected:
@@ -247,38 +375,64 @@ async def execute_job(
             )
         )
     elif job_type == "translate":
-        response = await scheduler.run_llm(
+        response = await scheduler.run_translation(
             lambda: model.post(
-                f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=180
+                f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=120
             )
         )
     elif job_type == "explain":
         response = await scheduler.run_llm(
             lambda: model.post(
-                f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=300
+                f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=180
+            )
+        )
+    elif job_type == "summarize":
+        response = await scheduler.run_exclusive(
+            lambda: model.post(
+                f"{MODEL_WORKER_URL}/v1/summarize",
+                json=model_input,
+                timeout=SUMMARY_HTTP_TIMEOUT_SECONDS,
             )
         )
     elif job_type == "asset_parse":
-        binary = await gateway.get(f"{GATEWAY_URL}/internal/v1/jobs/{job['id']}/input", timeout=60)
-        binary.raise_for_status()
-        response = await model.post(
-            f"{MODEL_WORKER_URL}/v1/assets/parse",
-            files={
-                "file": (
-                    model_input.get("file_name", "asset.bin"),
-                    binary.content,
-                    model_input.get("media_type", "application/octet-stream"),
-                )
-            },
-            timeout=300,
+        binary = await gateway.get(
+            f"{GATEWAY_URL}/internal/v1/jobs/{job['id']}/input",
+            headers={"X-Aialra-Worker-ID": worker_id},
+            timeout=60,
         )
+        binary.raise_for_status()
+
+        async def request_asset_parse() -> httpx.Response:
+            return await model.post(
+                f"{MODEL_WORKER_URL}/v1/assets/parse",
+                files={
+                    "file": (
+                        model_input.get("file_name", "asset.bin"),
+                        binary.content,
+                        model_input.get("media_type", "application/octet-stream"),
+                    )
+                },
+                timeout=300,
+            )
+
+        if str(model_input.get("media_type", "")).startswith("image/"):
+            response = await scheduler.run_exclusive(request_asset_parse)
+        else:
+            response = await request_asset_parse()
     else:
         raise RuntimeError("unsupported model job type")
     if response.status_code >= 500:
         raise RetryableJobError(f"provider unavailable for {job_type}")
     response.raise_for_status()
     result = cast(dict[str, Any], response.json())
-    provider = str(result.get("provider", ""))
+    provider = str(result.get("provider") or result.get("parser") or "")
+    is_image_parse = job_type == "asset_parse" and str(
+        model_input.get("media_type", "")
+    ).startswith("image/")
+    if is_image_parse and not (
+        provider.startswith("ollama:") and provider.endswith("@cuda")
+    ):
+        raise RetryableJobError("image parser did not prove local CUDA execution")
     if not provider_proves_local_execution(job_type, provider):
         raise RetryableJobError("model result did not prove allowed local execution")
     return result
@@ -287,13 +441,34 @@ async def execute_job(
 async def complete_job(
     gateway: httpx.AsyncClient,
     lane: Lane,
+    job: dict[str, Any],
     job_id: str,
     result: dict[str, Any],
     elapsed_ms: int,
 ) -> None:
+    provider = str(result.get("provider") or result.get("parser") or "")
+    if "@" in provider:
+        model_name, execution_device = provider.rsplit("@", 1)
+    else:
+        # Format-specific document parsers are local CPU adapters.  Image
+        # parsing always returns an Ollama provider with an explicit CUDA
+        # suffix and is therefore still covered by the server result gate.
+        model_name, execution_device = provider, "cpu"
     response = await gateway.post(
         f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/complete",
-        json={"worker_id": lane.worker_id, "result": result, "elapsed_ms": elapsed_ms},
+        json={
+            "worker_id": lane.worker_id,
+            "idempotency_key": str(job["idempotency_key"]),
+            "result": result,
+            "elapsed_ms": elapsed_ms,
+            "runtime_proof": {
+                "worker_id": lane.worker_id,
+                "provider": provider,
+                "execution_device": execution_device,
+                "model": model_name,
+                "observed_at_unix_ms": int(time.time() * 1_000),
+            },
+        },
         timeout=30,
     )
     response.raise_for_status()
@@ -345,9 +520,14 @@ async def lane_loop(
             started = time.monotonic()
             renew = asyncio.create_task(renew_loop(gateway, lane, job_id))
             try:
-                result = await execute_job(gateway, model, job, scheduler)
+                result = await execute_job(gateway, model, job, scheduler, lane.worker_id)
                 await complete_job(
-                    gateway, lane, job_id, result, int((time.monotonic() - started) * 1_000)
+                    gateway,
+                    lane,
+                    job,
+                    job_id,
+                    result,
+                    int((time.monotonic() - started) * 1_000),
                 )
             except RetryableJobError:
                 await fail_job(gateway, lane, job_id, "provider_unavailable", True)

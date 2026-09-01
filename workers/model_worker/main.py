@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import io
 import json
 import os
@@ -50,10 +51,27 @@ _register_bundled_cuda_dlls()
 app = FastAPI(title="AIALRA Local Model Worker", version="1.0.0")
 
 OLLAMA_URL = os.getenv("AIALRA_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("AIALRA_OLLAMA_MODEL", "qwen2.5:3b-instruct")
+OLLAMA_MODEL = os.getenv("AIALRA_OLLAMA_MODEL", "qwen2.5:7b-instruct")
+TRANSLATION_MODEL = os.getenv("AIALRA_TRANSLATION_MODEL", OLLAMA_MODEL)
+EXPLANATION_MODEL = os.getenv("AIALRA_EXPLANATION_MODEL", "qwen2.5:7b-instruct")
+SUMMARY_MODEL = os.getenv("AIALRA_SUMMARY_MODEL", "qwen2.5:14b-instruct")
+# A 14B model can require a one-time cold CUDA load on a 16 GB card.  Keep that
+# delay inside the explicit asynchronous summary lane instead of allowing the
+# request to be cut off at the old 120-second transport timeout.  The core still
+# keeps the session in ``processing`` until the real result arrives.
+SUMMARY_TIMEOUT_SECONDS = max(
+    30.0, min(float(os.getenv("AIALRA_SUMMARY_TIMEOUT_SECONDS", "120")), 120.0)
+)
+SUMMARY_CONTEXT_TOKENS = max(
+    512, min(int(os.getenv("AIALRA_SUMMARY_CONTEXT_TOKENS", "2048")), 8192)
+)
+SUMMARY_MAX_TOKENS = max(
+    160, min(int(os.getenv("AIALRA_SUMMARY_MAX_TOKENS", "320")), 600)
+)
+VISION_MODEL = os.getenv("AIALRA_VISION_MODEL", "qwen3-vl:8b-instruct")
 ASR_MODEL_NAME = os.getenv("AIALRA_ASR_MODEL", "small")
-ASR_DEVICE = os.getenv("AIALRA_ASR_DEVICE", "cpu")
-ASR_COMPUTE_TYPE = os.getenv("AIALRA_ASR_COMPUTE_TYPE", "int8")
+ASR_DEVICE = os.getenv("AIALRA_ASR_DEVICE", "cuda")
+ASR_COMPUTE_TYPE = os.getenv("AIALRA_ASR_COMPUTE_TYPE", "float16")
 ASR_CPU_THREADS = max(0, min(32, int(os.getenv("AIALRA_ASR_CPU_THREADS", "12"))))
 LLM_DEVICE = os.getenv("AIALRA_LLM_DEVICE", "cuda")
 
@@ -114,6 +132,7 @@ class TranslationRequest(BaseModel):
 class TranslationResponse(BaseModel):
     """Provider identity lets the timeline verify the model and execution device."""
 
+    source_text: str
     text: str
     provider: str
 
@@ -168,6 +187,27 @@ class ExplanationResponse(BaseModel):
     evidence_segment_ids: list[str]
     asset_page_ids: list[str]
     confidence: float = Field(ge=0, le=1)
+    provider: str
+
+
+class SummaryRequest(BaseModel):
+    """A final summary receives stable evidence only after the real-time queue drains."""
+
+    segments: list[EvidenceSegment] = Field(min_length=1, max_length=64)
+    asset_pages: list[EvidencePage] = Field(default_factory=list, max_length=24)
+    rolling_summaries: list[str] = Field(default_factory=list, max_length=24)
+    target_language: str
+
+
+class SummaryResponse(BaseModel):
+    """Every final summary remains traceable to stable transcript and page identifiers."""
+
+    overview: str
+    key_points: list[str]
+    terminology: list[RareTerm]
+    open_questions: list[str]
+    evidence_segment_ids: list[str]
+    asset_page_ids: list[str]
     provider: str
 
 
@@ -230,9 +270,16 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
         for item in request.glossary
     ]
     system = (
-        "You translate stable lecture captions. Return only the translated text. "
+        "You clean and translate one provisional ASR lecture paragraph. Return JSON only. "
+        "source_text must stay in the source language: restore punctuation and casing, join "
+        "clearly split clauses, and remove only immediate accidental repetition from adjacent "
+        "ASR windows. Never paraphrase, translate, invent, or remove meaning in source_text. "
+        "translation must be one natural, meaning-based target-language paragraph that preserves "
+        "the cleaned source's logical connections without adding facts. "
+        "Context is previous-course context for terminology "
+        "and pronoun resolution only: never translate, quote, or repeat Context. "
         "Preserve formulas, code, model numbers, and do-not-translate terms. "
-        "Do not return JSON, labels, or commentary."
+        "Do not return labels or commentary outside JSON."
     )
     user = (
         f"Source language: {request.source_language}\n"
@@ -241,9 +288,31 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
         f"Glossary: {'; '.join(glossary_lines)}\n"
         f"Text: {request.text}"
     )
-    text = await _ollama_text(system, user, max_tokens=512)
-    if text:
-        return TranslationResponse(text=text, provider=f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}")
+    result = await _ollama_json(
+        system,
+        user,
+        {
+            "type": "object",
+            "properties": {
+                "source_text": {"type": "string", "maxLength": 20_000},
+                "translation": {"type": "string", "maxLength": 20_000},
+            },
+            "required": ["source_text", "translation"],
+            "additionalProperties": False,
+        },
+        max_tokens=1200,
+        model=TRANSLATION_MODEL,
+        timeout_seconds=45.0,
+        attempts=2,
+        accept=lambda payload: _has_nonempty_string(payload, "source_text")
+        and _has_nonempty_string(payload, "translation"),
+    )
+    if isinstance(result, dict):
+        return TranslationResponse(
+            source_text=str(result["source_text"]).strip(),
+            text=str(result["translation"]).strip(),
+            provider=f"ollama:{TRANSLATION_MODEL}@{LLM_DEVICE}",
+        )
     raise HTTPException(status_code=503, detail="local Ollama translation is unavailable")
 
 
@@ -251,6 +320,8 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
 async def explain(request: ExplanationRequest) -> ExplanationResponse:
     """The model writes bounded teaching content while trusted code attaches evidence IDs."""
 
+    await _unload_ollama_model(VISION_MODEL)
+    await _unload_ollama_model(SUMMARY_MODEL)
     segment_ids = [segment.id for segment in request.segments]
     page_ids = [page.id for page in request.asset_pages]
     system = (
@@ -285,10 +356,11 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
         },
         ensure_ascii=False,
     )
-    result = await _ollama_json(
-        system,
-        user,
-        {
+    try:
+        result = await _ollama_json(
+            system,
+            user,
+            {
             "type": "object",
             "properties": {
                 "summary": {"type": "string", "maxLength": 300},
@@ -331,11 +403,16 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
                 "confidence",
             ],
             "additionalProperties": False,
-        },
-        max_tokens=512,
-        accept=lambda payload: _has_explanation_shape(payload)
-        and _uses_requested_explanation_language(payload, request.target_language),
-    )
+            },
+            max_tokens=512,
+            model=EXPLANATION_MODEL,
+            timeout_seconds=75.0,
+            attempts=2,
+            accept=lambda payload: _has_explanation_shape(payload)
+            and _uses_requested_explanation_language(payload, request.target_language),
+        )
+    finally:
+        await _restore_realtime_translation_model(EXPLANATION_MODEL)
     if isinstance(result, dict):
         compact = {
             **result,
@@ -359,9 +436,125 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
         }
         normalized = _normalize_explanation(compact, segment_ids, page_ids)
         if normalized is not None:
-            normalized.provider = f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}"
+            normalized.provider = f"ollama:{EXPLANATION_MODEL}@{LLM_DEVICE}"
             return normalized
     raise HTTPException(status_code=503, detail="local Ollama explanation is unavailable")
+
+
+@app.post("/v1/summarize", response_model=SummaryResponse)
+async def summarize(request: SummaryRequest) -> SummaryResponse:
+    """The larger local model produces one evidence-bounded summary after recording stops."""
+
+    await _unload_ollama_model(VISION_MODEL)
+    await _unload_ollama_model(EXPLANATION_MODEL)
+    if SUMMARY_MODEL != TRANSLATION_MODEL:
+        # Remove the resident realtime model before loading 14B.  Relying on
+        # Ollama's eviction heuristics made the one-shot path sensitive to the
+        # exact lecture history and left too little headroom for CUDA ASR.
+        await _unload_ollama_model(TRANSLATION_MODEL)
+    # Whisper keeps a CUDA model resident during a recording.  Release it before
+    # loading the one-shot summary model so the 16 GB card does not spend the
+    # entire timeout evicting ASR allocations while Ollama is still cold-starting.
+    await asyncio.to_thread(_release_asr_model_sync)
+    segment_ids = [segment.id for segment in request.segments]
+    page_ids = [page.id for page in request.asset_pages]
+    system = (
+        "You summarize a completed lecture using only supplied evidence. Return compact JSON. "
+        "Do not invent facts, citations, or identifiers. Prefer the rolling summaries for the "
+        "overall structure and use the sampled segments to verify details. Keep the overview "
+        "under 300 characters, and return at most five key points, five terms, and three open "
+        "questions."
+    )
+    if request.target_language.lower().startswith("zh"):
+        system += " Write every natural-language field in Simplified Chinese."
+    user = json.dumps(
+        {
+            "segments": [{"id": item.id, "text": item.text} for item in request.segments],
+            "asset_pages": [
+                {"id": item.id, "title": item.title, "text": item.text}
+                for item in request.asset_pages
+            ],
+            "rolling_summaries": request.rolling_summaries,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        result = await _ollama_json(
+            system,
+            user,
+            {
+            "type": "object",
+            "properties": {
+                "overview": {"type": "string", "maxLength": 300},
+                "key_points": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "items": {"type": "string", "maxLength": 180},
+                },
+                "terminology": {
+                    "type": "array",
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "term": {"type": "string", "maxLength": 80},
+                            "one_line": {"type": "string", "maxLength": 180},
+                        },
+                        "required": ["term", "one_line"],
+                        "additionalProperties": False,
+                    },
+                },
+                "open_questions": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {"type": "string", "maxLength": 180},
+                },
+            },
+            "required": ["overview", "key_points", "terminology", "open_questions"],
+            "additionalProperties": False,
+            },
+            max_tokens=SUMMARY_MAX_TOKENS,
+            model=SUMMARY_MODEL,
+            unload_after=True,
+            timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
+            num_ctx=SUMMARY_CONTEXT_TOKENS,
+            attempts=1,
+            accept=lambda payload: _has_nonempty_string(payload, "overview")
+            and _has_nonempty_list(payload, "key_points"),
+        )
+    finally:
+        await _restore_realtime_translation_model(SUMMARY_MODEL)
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=503, detail="local Ollama summary is unavailable")
+    terminology: list[RareTerm] = []
+    seen_terms: set[str] = set()
+    for item in result.get("terminology", []):
+        if not isinstance(item, dict):
+            continue
+        term = str(item.get("term", "")).strip()
+        one_line = str(item.get("one_line", "")).strip()
+        term_key = " ".join(term.split()).casefold()
+        if not term or not one_line or term_key in seen_terms:
+            continue
+        seen_terms.add(term_key)
+        terminology.append(
+            RareTerm(
+                term=term,
+                one_line=one_line,
+                evidence_segment_ids=segment_ids,
+                asset_page_ids=page_ids,
+            )
+        )
+    return SummaryResponse(
+        overview=str(result.get("overview", "")),
+        key_points=_dedupe_text_items(result.get("key_points", [])),
+        terminology=terminology,
+        open_questions=_dedupe_text_items(result.get("open_questions", [])),
+        evidence_segment_ids=segment_ids,
+        asset_page_ids=page_ids,
+        provider=f"ollama:{SUMMARY_MODEL}@{LLM_DEVICE}",
+    )
 
 
 @app.post("/v1/assets/parse", response_model=AssetParseResponse)
@@ -373,6 +566,8 @@ async def parse_asset(file: Annotated[UploadFile, File()]) -> AssetParseResponse
         raise HTTPException(status_code=413, detail="asset exceeds 50 MiB bootstrap limit")
     suffix = Path(file.filename or "asset.bin").suffix.lower()
     try:
+        if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+            return await _parse_image_with_vlm(data)
         return await asyncio.to_thread(_parse_asset_sync, suffix, data)
     except (OSError, ValueError, KeyError) as error:
         raise HTTPException(status_code=422, detail="asset parser rejected the file") from error
@@ -444,13 +639,13 @@ async def _ollama_available() -> bool:
         return False
 
 
-def _ollama_model_uses_gpu(payload: object) -> bool:
+def _ollama_model_uses_gpu(payload: object, model: str = OLLAMA_MODEL) -> bool:
     """Accept the configured model only when at least 90 percent is resident in VRAM."""
 
     if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
         return False
     for item in payload["models"]:
-        if not isinstance(item, dict) or item.get("name") != OLLAMA_MODEL:
+        if not isinstance(item, dict) or item.get("name") != model:
             continue
         size = item.get("size")
         size_vram = item.get("size_vram")
@@ -465,14 +660,14 @@ def _ollama_model_uses_gpu(payload: object) -> bool:
     return False
 
 
-async def _ollama_gpu_resident() -> bool:
+async def _ollama_gpu_resident(model: str = OLLAMA_MODEL) -> bool:
     """Read Ollama's process inventory instead of trusting a configured provider suffix."""
 
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(f"{OLLAMA_URL}/api/ps")
             response.raise_for_status()
-            return _ollama_model_uses_gpu(response.json())
+            return _ollama_model_uses_gpu(response.json(), model)
     except (httpx.HTTPError, TypeError, ValueError):
         return False
 
@@ -484,51 +679,119 @@ async def _ollama_json(
     *,
     max_tokens: int = 768,
     accept: Callable[[dict[str, Any]], bool] | None = None,
+    model: str = OLLAMA_MODEL,
+    unload_after: bool = False,
+    timeout_seconds: float = 90.0,
+    attempts: int = 2,
+    num_ctx: int | None = None,
 ) -> dict[str, Any] | None:
     """Ollama receives only text already allowed by the local session policy."""
 
-    for attempt in range(3):
+    for attempt in range(max(1, min(attempts, 3))):
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
                 repair = (
                     "\nThe prior response was invalid. Return exactly the requested JSON shape "
                     "with every required field populated."
                     if attempt
                     else ""
                 )
+                options: dict[str, Any] = {
+                    "temperature": 0 if attempt == 0 else 0.1,
+                    "seed": attempt,
+                    "num_predict": max_tokens,
+                }
+                if num_ctx is not None:
+                    options["num_ctx"] = num_ctx
                 response = await client.post(
                     f"{OLLAMA_URL}/api/chat",
                     json={
-                        "model": OLLAMA_MODEL,
+                        "model": model,
                         "stream": False,
                         "format": schema or "json",
                         "messages": [
                             {"role": "system", "content": system},
                             {"role": "user", "content": f"{user}{repair}"},
                         ],
-                        "options": {
-                            "temperature": 0 if attempt == 0 else 0.1,
-                            "seed": attempt,
-                            "num_predict": max_tokens,
-                        },
+                        "options": options,
                     },
                 )
                 response.raise_for_status()
                 content = response.json()["message"]["content"]
                 parsed = _parse_model_json(content)
                 if isinstance(parsed, dict) and (accept is None or accept(parsed)):
+                    if unload_after:
+                        await _unload_ollama_model(model)
                     return parsed
         except (httpx.HTTPError, KeyError, TypeError):
             await asyncio.sleep(1)
+    if unload_after:
+        await _unload_ollama_model(model)
     return None
 
 
-async def _ollama_text(system: str, user: str, *, max_tokens: int) -> str | None:
+async def _unload_ollama_model(model: str) -> None:
+    """Release large one-shot models after proof-backed inference so ASR keeps VRAM headroom."""
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": model, "keep_alive": 0, "stream": False},
+            )
+            response.raise_for_status()
+    except httpx.HTTPError:
+        return
+
+
+async def _restore_realtime_translation_model(background_model: str) -> None:
+    """Restore the low-latency model before a background lane releases its lock."""
+
+    if background_model == TRANSLATION_MODEL:
+        return
+    await _unload_ollama_model(background_model)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model": TRANSLATION_MODEL,
+                    "prompt": "",
+                    "keep_alive": -1,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+        if not await _ollama_gpu_resident(TRANSLATION_MODEL):
+            raise RuntimeError("translation model did not return to the GPU")
+    except (httpx.HTTPError, RuntimeError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="local translation model could not be restored after background inference",
+        ) from error
+
+
+def _release_asr_model_sync() -> None:
+    """One-shot large models reclaim ASR VRAM only after the serialized queue is idle."""
+
+    global _asr_model
+    with _asr_lock:
+        _asr_model = None
+    gc.collect()
+
+
+async def _ollama_text(
+    system: str,
+    user: str,
+    *,
+    max_tokens: int,
+    model: str = OLLAMA_MODEL,
+) -> str | None:
     """A plain local model response avoids fragile JSON quoting for translated prose."""
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=45.0) as client:
                 repair = (
                     "\nThe prior response was empty. Return only the translated text."
                     if attempt
@@ -537,7 +800,7 @@ async def _ollama_text(system: str, user: str, *, max_tokens: int) -> str | None
                 response = await client.post(
                     f"{OLLAMA_URL}/api/chat",
                     json={
-                        "model": OLLAMA_MODEL,
+                        "model": model,
                         "stream": False,
                         "messages": [
                             {"role": "system", "content": system},
@@ -559,6 +822,100 @@ async def _ollama_text(system: str, user: str, *, max_tokens: int) -> str | None
     return None
 
 
+async def _parse_image_with_vlm(data: bytes) -> AssetParseResponse:
+    """Local VLM performs OCR and visual explanation only when the image stays on this host."""
+
+    with Image.open(io.BytesIO(data)) as image:
+        image.verify()
+    await _unload_ollama_model(EXPLANATION_MODEL)
+    await _unload_ollama_model(SUMMARY_MODEL)
+    if VISION_MODEL != TRANSLATION_MODEL:
+        await _unload_ollama_model(TRANSLATION_MODEL)
+    await asyncio.to_thread(_release_asr_model_sync)
+    schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "maxLength": 120},
+            "ocr_text": {"type": "string", "maxLength": 8000},
+            "visual_summary": {"type": "string", "maxLength": 1200},
+            "key_terms": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {"type": "string", "maxLength": 100},
+            },
+        },
+        "required": ["title", "ocr_text", "visual_summary", "key_terms"],
+        "additionalProperties": False,
+    }
+    try:
+        try:
+            async with httpx.AsyncClient(timeout=240.0) as client:
+                response = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": VISION_MODEL,
+                        "stream": False,
+                        "format": schema,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Extract all readable text and explain this lecture image in "
+                                    "concise Simplified Chinese. Distinguish visible text from "
+                                    "interpretation."
+                                ),
+                                "images": [base64.b64encode(data).decode("ascii")],
+                            }
+                        ],
+                        "options": {"temperature": 0, "num_predict": 1200},
+                    },
+                )
+                response.raise_for_status()
+                result = _parse_model_json(str(response.json()["message"]["content"]))
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="local Ollama vision model is unavailable",
+            ) from error
+        if not isinstance(result, dict) or not _has_nonempty_string(result, "visual_summary"):
+            raise HTTPException(status_code=503, detail="local Ollama vision result is invalid")
+        gpu_resident = await _ollama_gpu_resident(VISION_MODEL)
+        if not gpu_resident:
+            raise HTTPException(
+                status_code=503,
+                detail="local Ollama vision model did not prove GPU residency",
+            )
+        title = str(result.get("title") or "课程图片")
+        ocr_text = str(result.get("ocr_text") or "").strip()
+        summary = str(result.get("visual_summary") or "").strip()
+        terms = [
+            str(item).strip()
+            for item in result.get("key_terms", [])
+            if isinstance(item, str) and item.strip()
+        ]
+        sections = [
+            f"可见文字\n{ocr_text}" if ocr_text else "",
+            f"图片解释\n{summary}",
+            f"关键词\n{'、'.join(terms)}" if terms else "",
+        ]
+        return AssetParseResponse(
+            parser=f"ollama:{VISION_MODEL}@{LLM_DEVICE}",
+            pages=[
+                ParsedPage(
+                    page_number=1,
+                    title=title,
+                    text="\n\n".join(section for section in sections if section),
+                )
+            ],
+        )
+    finally:
+        # Release VLM weights and restore the resident realtime model even when
+        # inference, JSON validation, or the GPU residency proof fails.
+        if VISION_MODEL != TRANSLATION_MODEL:
+            await _unload_ollama_model(VISION_MODEL)
+            await _restore_realtime_translation_model(VISION_MODEL)
+
+
 def _parse_model_json(content: str) -> dict[str, Any] | None:
     """Accept unescaped control characters while retaining the JSON object boundary."""
 
@@ -578,6 +935,32 @@ def _has_nonempty_string(payload: dict[str, Any], field: str) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _has_nonempty_list(payload: dict[str, Any], field: str) -> bool:
+    """Required summary sections cannot silently collapse to empty arrays."""
+
+    value = payload.get(field)
+    return isinstance(value, list) and bool(value)
+
+
+def _dedupe_text_items(value: Any) -> list[str]:
+    """Keep model-generated summary sections readable when a provider repeats a point."""
+
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        key = " ".join(text.split()).casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
 def _has_explanation_shape(payload: dict[str, Any]) -> bool:
     """Require a real summary while allowing trusted normalization of omitted optional sections."""
 
@@ -591,7 +974,7 @@ def _has_explanation_shape(payload: dict[str, Any]) -> bool:
     ):
         if field in payload and not isinstance(payload[field], list):
             return False
-    return "confidence" not in payload or isinstance(payload["confidence"], (int, float))
+    return "confidence" not in payload or isinstance(payload["confidence"], int | float)
 
 
 def _uses_requested_explanation_language(

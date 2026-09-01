@@ -25,31 +25,20 @@
         android:textStyle="bold" />
 
     <EditText
-        android:id="@+id/serverUrl"
+        android:id="@+id/pairingCode"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="28dp"
-        android:hint="ws://电脑局域网地址:8787"
-        android:inputType="textUri"
+        android:hint="网页显示的配对码"
+        android:inputType="textCapCharacters"
         android:singleLine="true" />
 
-    <EditText
-        android:id="@+id/projectId"
+    <Button
+        android:id="@+id/pairButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:hint="项目 ID"
-        android:inputType="text"
-        android:singleLine="true" />
-
-    <EditText
-        android:id="@+id/sessionId"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:hint="桌面端会话 ID"
-        android:inputType="text"
-        android:singleLine="true" />
+        android:text="连接当前课程" />
 
     <CheckBox
         android:id="@+id/consentCheck"

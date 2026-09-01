@@ -42,6 +42,9 @@ server {
     }
 
     location / {
+        # Never forward a client-provided identity header to the notes service
+        proxy_set_header X-Aialra-Auth-Proxy "";
+        proxy_set_header X-authentik-uid "";
         include ${AIALRA_NGINX_SNIPPET_DIR}/aialra-auth-identity-headers.conf;
         proxy_pass http://${READWEAVE_PRIVATE_UPSTREAM};
         proxy_http_version 1.1;

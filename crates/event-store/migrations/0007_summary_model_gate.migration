@@ -1,0 +1,6 @@
+-- The 14B structured summary exceeded the 30-second RTX 4080 gate
+-- Existing untouched policies move to the measured 7B default without affecting cloud consent
+UPDATE project_ai_policies
+SET local_summary_model = 'qwen2.5:7b-instruct',
+    updated_at = CURRENT_TIMESTAMP
+WHERE local_summary_model = 'qwen2.5:14b-instruct';

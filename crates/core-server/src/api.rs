@@ -3,15 +3,18 @@
 use crate::app::{ApiError, AppState};
 use crate::explanation::enqueue_explanation;
 use crate::identity::CurrentUser;
+use crate::projects::hash_token;
 use aialra_event_store::{AssetRecord, NewModelJob, SessionRecord};
 use axum::body::Body;
 use axum::extract::{Extension, Multipart, Path, State};
-use axum::http::{HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{Json, response::IntoResponse};
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::time::Duration;
 use uuid::Uuid;
@@ -20,15 +23,29 @@ const MAX_ASSET_BYTES: usize = 50 * 1024 * 1024;
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let queue = state.store.model_queue_counts(None).ok();
-    let worker = state.store.latest_worker().ok().flatten().map(|record| {
-        let online = (Utc::now() - record.last_seen_at).num_seconds() <= 30;
+    let workers = state.store.list_workers().unwrap_or_default();
+    let online_workers = workers
+        .iter()
+        .filter(|record| (Utc::now() - record.last_seen_at).num_seconds() <= 30)
+        .collect::<Vec<_>>();
+    let worker = online_workers.first().map(|latest| {
+        let capabilities = online_workers
+            .iter()
+            .flat_map(|record| record.capabilities.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let active_job_ids = online_workers
+            .iter()
+            .filter_map(|record| record.active_job_id.clone())
+            .collect::<Vec<_>>();
         json!({
-            "id": record.id,
-            "online": online,
-            "capabilities": record.capabilities,
-            "model_metadata": record.model_metadata,
-            "active_job_id": record.active_job_id,
-            "last_seen_at": record.last_seen_at
+            "id": latest.id,
+            "online": true,
+            "capabilities": capabilities,
+            "model_metadata": latest.model_metadata,
+            "active_job_id": active_job_ids.first(),
+            "active_job_ids": active_job_ids,
+            "lane_count": online_workers.len(),
+            "last_seen_at": latest.last_seen_at
         })
     });
     Json(json!({
@@ -111,12 +128,11 @@ pub async fn dingtalk_capabilities(
 
 pub async fn start_dingtalk_recording(
     State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
     Path(session_id): Path<String>,
+    Json(request): Json<DingtalkLeaseRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let session = state
-        .store
-        .get_session(&session_id)?
-        .ok_or_else(|| ApiError::not_found("session not found"))?;
+    let session = authorize_dingtalk_lease(&state, &user.0, &session_id, &request)?;
     if !session.consent_confirmed {
         return Err(ApiError::bad_request(
             "recording consent is required before starting DingTalk A1",
@@ -150,12 +166,11 @@ pub async fn start_dingtalk_recording(
 
 pub async fn stop_dingtalk_recording(
     State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
     Path(session_id): Path<String>,
+    Json(request): Json<DingtalkLeaseRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    state
-        .store
-        .get_session(&session_id)?
-        .ok_or_else(|| ApiError::not_found("session not found"))?;
+    authorize_dingtalk_lease(&state, &user.0, &session_id, &request)?;
     if !state.dingtalk.configured() {
         return Err(ApiError::unavailable(
             "DingTalk credentials and operator identifiers are not configured",
@@ -178,12 +193,59 @@ pub async fn stop_dingtalk_recording(
     Ok(Json(json!({"event": event})))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DingtalkLeaseRequest {
+    project_id: String,
+    device_id: String,
+    lease_token: String,
+}
+
+fn authorize_dingtalk_lease(
+    state: &AppState,
+    subject: &str,
+    session_id: &str,
+    request: &DingtalkLeaseRequest,
+) -> Result<SessionRecord, ApiError> {
+    let project = state
+        .store
+        .project_for_session(session_id)?
+        .filter(|project| project.id == request.project_id && project.owner_subject == subject)
+        .ok_or_else(|| ApiError::not_found("session not found"))?;
+    let session = state
+        .store
+        .get_session(session_id)?
+        .ok_or_else(|| ApiError::not_found("session not found"))?;
+    if !matches!(
+        session.state,
+        aialra_core_domain::SessionState::Recording | aialra_core_domain::SessionState::Degraded
+    ) {
+        return Err(ApiError::conflict("session is not recording"));
+    }
+    let _lease = state
+        .store
+        .validate_recording_lease(session_id, &hash_token(&request.lease_token))?
+        .filter(|lease| {
+            lease.project_id == project.id && lease.holder_device_id == request.device_id
+        })
+        .ok_or_else(|| ApiError::conflict("recording lease expired or changed"))?;
+    Ok(session)
+}
+
 pub async fn stream_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let history = state.store.list_events(&session_id)?;
     let mut receiver = state.events.subscribe();
+    let full_history = state.store.list_events(&session_id)?;
+    // The subscription is opened before the snapshot.  A provider completion can
+    // therefore be present in both the snapshot and the broadcast queue; the
+    // watermark suppresses that one duplicate without retaining every event ID
+    // for the lifetime of a long course.
+    let watermark = full_history
+        .last()
+        .map(|event| (event.ingested_at, event.event_id));
+    let history = replay_after_last_event_id(full_history, headers.get("last-event-id"));
     let stream = async_stream::stream! {
         // Replay precedes live events so a refreshed UI reconstructs the same timeline.
         for envelope in history {
@@ -192,7 +254,7 @@ pub async fn stream_events(
         }
         loop {
             match receiver.recv().await {
-                Ok(envelope) if envelope.session_id == session_id => {
+                Ok(envelope) if envelope.session_id == session_id && event_after_watermark(&envelope, watermark) => {
                     let data = serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
                     yield Ok(Event::default().id(envelope.event_id.to_string()).data(data));
                 }
@@ -210,6 +272,34 @@ pub async fn stream_events(
             .interval(Duration::from_secs(10))
             .text("heartbeat"),
     ))
+}
+
+fn replay_after_last_event_id(
+    history: Vec<aialra_event_protocol::EventEnvelope>,
+    last_event_id: Option<&HeaderValue>,
+) -> Vec<aialra_event_protocol::EventEnvelope> {
+    let Some(last_event_id) = last_event_id.and_then(|value| value.to_str().ok()) else {
+        return history;
+    };
+    let Some(index) = history
+        .iter()
+        .position(|event| event.event_id.to_string() == last_event_id)
+    else {
+        // An unknown cursor can come from a pruned browser cache or a version
+        // change, so replaying the durable history is safer than dropping facts
+        // that the observer has not confirmed.
+        return history;
+    };
+    history.into_iter().skip(index + 1).collect()
+}
+
+fn event_after_watermark(
+    event: &aialra_event_protocol::EventEnvelope,
+    watermark: Option<(chrono::DateTime<Utc>, Uuid)>,
+) -> bool {
+    watermark.is_none_or(|(captured_at, event_id)| {
+        (event.ingested_at, event.event_id) > (captured_at, event_id)
+    })
 }
 
 pub async fn upload_asset(

@@ -22,22 +22,38 @@ parser = argparse.ArgumentParser()
 parser.add_argument("database")
 parser.add_argument("owner_subject")
 parser.add_argument("--enforce-long-run", action="store_true")
+parser.add_argument(
+    "--session-id",
+    help="validate this exact session instead of the newest owned session",
+)
 args = parser.parse_args()
 
 connection = sqlite3.connect(f"file:{args.database}?mode=ro", uri=True)
 connection.row_factory = sqlite3.Row
-session = connection.execute(
-    """
-    SELECT s.id, s.state
-    FROM projects p
-    JOIN project_sessions ps ON ps.project_id = p.id
-    JOIN sessions s ON s.id = ps.session_id
-    WHERE p.owner_subject = ?
-    ORDER BY s.created_at DESC
-    LIMIT 1
-    """,
-    (args.owner_subject,),
-).fetchone()
+if args.session_id:
+    session = connection.execute(
+        """
+        SELECT s.id, s.state
+        FROM projects p
+        JOIN project_sessions ps ON ps.project_id = p.id
+        JOIN sessions s ON s.id = ps.session_id
+        WHERE p.owner_subject = ? AND s.id = ?
+        """,
+        (args.owner_subject, args.session_id),
+    ).fetchone()
+else:
+    session = connection.execute(
+        """
+        SELECT s.id, s.state
+        FROM projects p
+        JOIN project_sessions ps ON ps.project_id = p.id
+        JOIN sessions s ON s.id = ps.session_id
+        WHERE p.owner_subject = ?
+        ORDER BY s.created_at DESC
+        LIMIT 1
+        """,
+        (args.owner_subject,),
+    ).fetchone()
 if session is None:
     raise SystemExit("no session found for validation owner")
 

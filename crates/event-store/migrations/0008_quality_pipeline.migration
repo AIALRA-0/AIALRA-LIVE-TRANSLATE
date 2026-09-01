@@ -1,0 +1,8 @@
+UPDATE project_ai_policies
+SET local_translation_model = 'qwen2.5:7b-instruct',
+    local_explanation_model = 'qwen2.5:7b-instruct',
+    local_summary_model = 'qwen2.5:14b-instruct',
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE local_translation_model = 'qwen2.5:3b-instruct'
+  AND local_explanation_model IN ('qwen2.5:3b-instruct', 'qwen2.5:7b-instruct')
+  AND local_summary_model = 'qwen2.5:7b-instruct';
