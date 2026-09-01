@@ -3,7 +3,7 @@
 ## feedback-03／feedback-04 2026-09-01 ReadWeave 持久化修复与生产读回（已完成）
 
 - PR #5 修复 ReadWeave 在 `PUT` 后清理 HTML 注释造成的管理标记丢失：新投影使用非可见 `data-*` 标记，旧注释标记仍可读；只有生成正文未被改动时才自动恢复，人工修改继续安全冲突
-- 运行代码已 squash 合并到 `2c43fb82cf672538b5104bbf9211d4a67480eede` 并部署；随后 PR #6 只追加脱敏状态文档，当前 `main` 为文档提交 `5b3bf1af5d36430efa20eb7ce99871db65e8a0ce`，远端短期分支已删除；本机未运行 Docker／Docker Desktop／WSL
+- 运行代码已 squash 合并到 `2c43fb82cf672538b5104bbf9211d4a67480eede` 并部署；随后 PR #6／#7 只追加脱敏状态文档，远端短期分支已删除；本机未运行 Docker／Docker Desktop／WSL
 - 远端部署版本为 `quality-v25-20260901-2c43fb8`；发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 一致，Core／ReadWeave healthy，Core restart count 为 0
 - 重启唯一 GPU stack 后，Worker 健康检查确认 ASR 和 Ollama 可用；生产合成冒烟通过：21／21 durable ACK 含 `commit_id`、第二设备 `409`、字幕／译文／材料／讲解生成、安全停止、会话完成和 ReadWeave 读回均通过
 - 冒烟结束后活动租约与活动模型任务为 0；新投影的 7 个 ReadWeave 映射均保留管理和匿名对象标记。上一轮失败冒烟的 7 条冲突记录仅作为历史证据保留

@@ -6,7 +6,7 @@
 
 | 检查 | 结果 | 判定 |
 |---|---|---|
-| 运行代码与发布追溯 | 运行代码提交、`BUILD_ID`、Core `build_id`、OCI revision 均为 `2c43fb82cf672538b5104bbf9211d4a67480eede`；之后 `main` 仅追加文档提交 `5b3bf1af5d36430efa20eb7ce99871db65e8a0ce` | 通过 |
+| 运行代码与发布追溯 | 运行代码提交、`BUILD_ID`、Core `build_id`、OCI revision 均为 `2c43fb82cf672538b5104bbf9211d4a67480eede`；之后 `main` 仅追加脱敏文档 | 通过 |
 | 远端服务 | Core／ReadWeave healthy；Core restart count `0`；公网根路径 `302`；公网 `/internal/` `404` | 通过 |
 | GPU Worker | Worker 在线；ASR 与 Ollama 可用，Provider 为 CUDA；部署后已重启唯一 GPU stack | 通过 |
 | 生产链路冒烟 | 21／21 durable ACK 含 `commit_id`；第二设备 `409`；字幕、译文、材料页、讲解卡、安全停止和会话完成 | 通过 |

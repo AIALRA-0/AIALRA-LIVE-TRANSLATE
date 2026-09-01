@@ -12,7 +12,7 @@
 
 ### 0.0.1 2026-09-01 ReadWeave 持久化修复与生产读回（最新）
 
-- 运行代码已在 PR #5 squash 合并为 `2c43fb82cf672538b5104bbf9211d4a67480eede` 并部署；随后 PR #6 只追加脱敏状态文档，当前 GitHub `main` 为文档提交 `5b3bf1af5d36430efa20eb7ce99871db65e8a0ce`，远端仍仅保留 `main`
+- 运行代码已在 PR #5 squash 合并为 `2c43fb82cf672538b5104bbf9211d4a67480eede` 并部署；随后 PR #6／#7 只追加脱敏状态文档，远端仍仅保留长期 `main`
 - ReadWeave 管理边界改用可持久化的 HTML `data-*` 标记，同时兼容旧注释标记；ReadWeave 清理旧注释后，仅当正文仍与 AIALRA 生成内容一致时恢复标记，人工修改继续进入冲突保护
 - 远端已部署 `quality-v25-20260901-2c43fb8`；发布目录 `BUILD_ID`、Core 健康响应 `build_id`、OCI revision 三者一致，Core 与 ReadWeave healthy，Core restart count 为 0
 - 重启后的唯一 GPU stack 已恢复，Worker 健康检查为 ASR／Ollama 可用；线上 Provider 为 `faster-whisper:small@cuda` 和 `ollama:qwen2.5:7b-instruct@cuda`
