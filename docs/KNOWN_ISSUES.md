@@ -11,9 +11,9 @@
 - 浏览器优先录音和可见阶段反馈已部署到 `quality-v24-20260831`，现有浏览器标签已验证工作区文案、录音阶段提示、权限超时和 Android 备用入口
 - Android 已完成前台与锁屏收音、ACK 清理和页面安全停止，真实设备证据仍缺通知栏停止、来电、蓝牙、Wi-Fi 切换和耗电矩阵
 - VPS 根分区可用空间约 20 GB，长测期间需要继续监控磁盘增长，不能把磁盘满测试和生产运行混用
-- 脱敏公开候选已消除迁移后缀、局部参数名和锁文件序列化造成的保守扫描误报；GitHub PR #2 已创建，但重新认证、完整 PR 自审、合并和远端回读完成前仍不得视为已发布
+- 脱敏公开候选已消除迁移后缀、局部参数名和锁文件序列化造成的保守扫描误报；GitHub PR #2 已创建，但最终树签名认证、完整 PR 自审、合并和远端回读完成前仍不得视为主干收敛完成
 - Android 构建每次运行需要系统提供 PowerShell（Windows）或 Base64 与 SHA-256 工具（macOS/Linux）来复核已固定摘要的 Wrapper；缓存不匹配会从已审计文本恢复，缺少基础工具会明确失败，不会执行未验证缓存或下载替代品
-- 上一精确候选 `8ec1094` 的 Rust、Python、Web 与 Android 快速门已通过；本轮 Wrapper 与门禁修订已重新通过 Rust、Python、Web、Clippy、Windows／POSIX 缓存破坏恢复和若干合成运行门，但 Android 全量重跑被本机 Gradle loopback 故障阻断，且隔离重新认证、合并后 main 回读和 VPS 版本追溯尚未完成，因此不能标记为 GitHub 收敛完成
+- 本轮 Wrapper 与门禁修订已重新通过 Rust、Python、Web、Clippy、Windows／POSIX 缓存破坏恢复、Android 单元测试与 debug assemble，以及浏览器 durable ACK、租约、工作区和 IDOR 等合成运行门；最终树签名认证、合并后 main 回读和 VPS 版本追溯尚未完成，因此不能标记为 GitHub 收敛完成
 
 ## 1 长时与真实课堂证据
 
@@ -30,7 +30,7 @@
 - 移动浏览器锁屏和后台录音受操作系统限制，长时移动收音仍优先 Android 前台服务或 DingTalk A1 并行录制
 - Android 前台收音、锁屏收音、ACK 清理、真实 CUDA 结果和页面安全停止已有本轮设备证据；通知栏停止、来电、蓝牙、Wi-Fi 切换和耗电仍待验证
 - Android 配对路径已修复为公网一次性代码交换, 当前设备已经成功取得课程连接信息; 前台录音仍需设备停留在 AIALRA 页面并完成真实声学采集
-- 当前主机执行 `apps/android/gradlew.bat test --no-daemon` 时被 Java `Unable to establish loopback connection` 阻断，属于本机 Gradle 环境问题，不能据此判定 Android 业务代码失败
+- 当前主机默认临时目录曾使 Gradle 在项目任务开始前报 Java `Unable to establish loopback connection`；使用独立短路径临时目录和现有 Android Studio JBR 后，`testDebugUnitTest` 与 `assembleDebug` 41 个实际任务已通过。若再次出现，应先隔离 Java 临时套接字路径，不能据此判定 Android 业务代码失败
 - 浏览器未确认块已进入 IndexedDB，但标签页被系统永久清理、浏览器数据被用户删除或磁盘不可写时仍可能丢失尚未 ACK 的音频
 - 标签页或系统共享音频依赖浏览器与操作系统提供的轨道，部分受 DRM 或系统策略保护的声音不能采集
 - 通知栏停止复用统一停止动作，仍需直接点击通知栏完成界面级真机复测

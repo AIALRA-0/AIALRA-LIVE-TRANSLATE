@@ -15,9 +15,9 @@
 - 早期四个纯文本 SQLite 迁移与后续迁移统一使用 `.migration` 后缀，`include_str!` 引用同步更新；迁移内容和执行顺序不变
 - ReadWeave 概览渲染的局部参数改用不与凭据规则冲突的名称；Python 与 pnpm 锁文件只调整等价序列化，依赖版本和制品摘要不变
 - Android Gradle Wrapper 以可扫描的 Base64 文本保存；启动脚本每次执行都会复核缓存 JAR 的固定 SHA-256，摘要不一致时从已审计文本原子恢复，并原子刷新同版本 properties；不下载或替换 Wrapper
-- 上一精确候选 `8ec1094` 已通过 Rust workspace 45 项、Python 29 项、Web 21 项、Android 单元测试与 debug assemble；2026-09-01 自审修订已重新通过 Rust 45 项、Python 29 项、Web 21 项、Ruff／mypy、类型检查／ESLint／生产构建、Clippy 零警告及 Windows／POSIX Wrapper 缓存破坏恢复测试，但 Android 全量重跑被主机 Gradle `Unable to establish loopback connection` 阻断，必须在重新认证前补齐
+- 上一精确候选 `8ec1094` 已通过 Rust workspace 45 项、Python 29 项、Web 21 项、Android 单元测试与 debug assemble；2026-09-01 自审修订已重新通过 Rust 45 项、Python 29 项、Web 21 项、Ruff／mypy、类型检查／ESLint／生产构建、Clippy 零警告、Windows／POSIX Wrapper 缓存破坏恢复，以及 Android `testDebugUnitTest` 与 `assembleDebug` 41 个实际任务
 - 2026-09-01 的本地合成运行复核已通过浏览器 durable ACK 与安全停止、对象租约授权、工作区树、单录音租约第二设备 `409`、租约接管、旧租约拒绝和 SSE 游标重放；IDOR WebSocket 用例已改为攻击者身份加未签发租约，避免把已签发高熵租约错误建模为公开对象 ID
-- GitHub PR #2 已建立但尚未合并；这些调整仅用于让脱敏公开候选可被精确审计，不改变当前 VPS `quality-v24-20260831`，通过重新认证和 PR 自审前不部署
+- GitHub PR #2 已建立但尚未合并；最终文件树仍须完成签名认证、PR 自审和合并后主干回读。这些调整不改变当前 VPS `quality-v24-20260831`，不执行无差异部署
 
 ### 1.0 本轮浏览器优先录音修正（已部署）
 
