@@ -6,9 +6,19 @@
 
 当前版本：`0.5.2` v25 快速上线版本
 
-当前判断：`quality-v25-20260901-43a61ad` 已上线；分阶段失败诊断、`build_id`／`BUILD_ID`／OCI revision 追溯、部署前检查与失败回滚已经生效，生产合成音频链路冒烟通过
+当前判断：`quality-v25-20260901-2c43fb8` 已上线；分阶段失败诊断、`build_id`／`BUILD_ID`／OCI revision 追溯、部署前检查与失败回滚已经生效，ReadWeave 标记持久化修复后的生产合成音频链路冒烟通过
 
 当前发布门：`V25 ONLINE / TECHNICAL SMOKE PASSED`
+
+### 0.0.1 2026-09-01 ReadWeave 持久化修复与生产读回（最新）
+
+- GitHub `main`、本地工作树和 VPS 发布源均已收敛到 `2c43fb82cf672538b5104bbf9211d4a67480eede`；PR #5 已完成自审、squash 合并，短期分支已删除，远端仅保留 `main`
+- ReadWeave 管理边界改用可持久化的 HTML `data-*` 标记，同时兼容旧注释标记；ReadWeave 清理旧注释后，仅当正文仍与 AIALRA 生成内容一致时恢复标记，人工修改继续进入冲突保护
+- 远端已部署 `quality-v25-20260901-2c43fb8`；发布目录 `BUILD_ID`、Core 健康响应 `build_id`、OCI revision 三者一致，Core 与 ReadWeave healthy，Core restart count 为 0
+- 重启后的唯一 GPU stack 已恢复，Worker 健康检查为 ASR／Ollama 可用；线上 Provider 为 `faster-whisper:small@cuda` 和 `ollama:qwen2.5:7b-instruct@cuda`
+- 第二次真实生产合成冒烟通过（约 79 秒）：21／21 音频块收到带 `commit_id` 的 durable ACK，第二设备返回 `409`，产生稳定字幕、译文、材料页和讲解卡，安全停止并完成会话，ReadWeave 读回 2 条结果；结束时活动租约和活动模型任务均为 0
+- 新冒烟项目的 7 个 ReadWeave 映射全部保留管理边界和匿名对象标记；上一轮注释被清理导致的 7 条 `managed_region_conflict` 记录作为历史证据保留，没有删除或伪装成成功
+- 本轮没有使用本地 Docker／Docker Desktop／WSL；仅在 VPS 按部署脚本进行远端候选构建。6 小时、24 小时、Android／MacBook 真机矩阵和 Windows 崩溃调查仍按用户范围未执行
 
 ### 0.0 v25 快速上线（已部署）
 

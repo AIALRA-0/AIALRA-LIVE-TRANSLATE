@@ -2,7 +2,17 @@
 
 状态日期：2026-09-01
 
-## feedback-01 候选待验证项
+## 当前线上状态（2026-09-01，最新）
+
+- `quality-v25-20260901-2c43fb8` 已部署；`main`、发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 一致，Core／ReadWeave healthy，Core restart count 为 0
+- 浏览器录音认证修正和租约—公网 WSS—ACK—停止路径已在真实 VPS 合成冒烟中通过；浏览器 Authentik 登录后的真实物理麦克风路径没有由 Agent 自动附着验证，下一步以用户实际体验为准
+- ReadWeave 标记持久化修复已合并并部署；新冒烟的 7 个映射均保留管理边界和匿名对象标记，上一轮 7 条 `managed_region_conflict` 只保留为历史记录，当前无排队连接器任务
+- 第二次生产合成冒烟通过：第二设备 `409`、21／21 durable ACK 带 `commit_id`、字幕／译文／材料／讲解、幂等停止、会话完成和 ReadWeave 读回均通过；结束时活动租约和活动模型任务为 0
+- 当前批次只在 VPS 使用远端 Docker 构建；没有运行本地 Docker／Docker Desktop／WSL。6 小时、24 小时、Android／MacBook 真机矩阵和 Windows 崩溃调查按用户范围未执行
+
+## feedback-01 候选待验证项（历史记录）
+
+以下项目符号记录的是 feedback-01 合并前的候选状态；上面的线上状态已覆盖其中的部署待验证描述。
 
 - 浏览器录音认证路径已按 Authentik／Android 控制路径拆分修正；必须在合并后的 VPS 上重新验证登录后租约、录音、续租和停止，当前本地代码不能证明公网结果。
 - ReadWeave 远端删除能力和已有节点的所有权标记仍采用失败关闭策略：无法验证映射、共享节点或实例能力时保留回收站内容，不报告为已删除。
