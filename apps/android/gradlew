@@ -149,10 +149,22 @@ WRAPPER_EXPECTED_SHA256=7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64
 WRAPPER_SOURCE=$APP_HOME/gradle/wrapper/gradle-wrapper.jar.b64
 WRAPPER_CACHE_ROOT=${GRADLE_USER_HOME:-${HOME:-/tmp}/.gradle}/caches/aialra-wrapper
 WRAPPER_JAR=$WRAPPER_CACHE_ROOT/gradle-wrapper-$WRAPPER_EXPECTED_SHA256.jar
+WRAPPER_PROPERTIES_SOURCE=$APP_HOME/gradle/wrapper/gradle-wrapper.properties
 WRAPPER_PROPERTIES=$WRAPPER_CACHE_ROOT/gradle-wrapper-$WRAPPER_EXPECTED_SHA256.properties
-if [ ! -f "$WRAPPER_JAR" ]; then
-    mkdir -p "$WRAPPER_CACHE_ROOT" || die "Unable to create the Gradle wrapper cache."
+
+wrapper_sha256 () {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+restore_wrapper () {
     WRAPPER_TEMP=$WRAPPER_JAR.$$.tmp
+    rm -f "$WRAPPER_TEMP"
     if command -v base64 >/dev/null 2>&1; then
         base64 --decode "$WRAPPER_SOURCE" > "$WRAPPER_TEMP" 2>/dev/null ||
             base64 -D "$WRAPPER_SOURCE" > "$WRAPPER_TEMP" 2>/dev/null ||
@@ -163,24 +175,36 @@ if [ ! -f "$WRAPPER_JAR" ]; then
     else
         die "A Base64 decoder is required to restore the Gradle wrapper artifact."
     fi
-    if command -v sha256sum >/dev/null 2>&1; then
-        WRAPPER_ACTUAL_SHA256=$(sha256sum "$WRAPPER_TEMP" | awk '{print $1}')
-    elif command -v shasum >/dev/null 2>&1; then
-        WRAPPER_ACTUAL_SHA256=$(shasum -a 256 "$WRAPPER_TEMP" | awk '{print $1}')
-    else
+    WRAPPER_ACTUAL_SHA256=$(wrapper_sha256 "$WRAPPER_TEMP") || {
         rm -f "$WRAPPER_TEMP"
         die "A SHA-256 verifier is required to restore the Gradle wrapper artifact."
-    fi
+    }
     if [ "$WRAPPER_ACTUAL_SHA256" != "$WRAPPER_EXPECTED_SHA256" ]; then
         rm -f "$WRAPPER_TEMP"
         die "The decoded Gradle wrapper artifact failed SHA-256 verification."
     fi
     mv -f "$WRAPPER_TEMP" "$WRAPPER_JAR" || die "Unable to activate the verified Gradle wrapper artifact."
+}
+
+mkdir -p "$WRAPPER_CACHE_ROOT" || die "Unable to create the Gradle wrapper cache."
+if [ -f "$WRAPPER_JAR" ]; then
+    WRAPPER_ACTUAL_SHA256=$(wrapper_sha256 "$WRAPPER_JAR") ||
+        die "A SHA-256 verifier is required to check the Gradle wrapper artifact."
+else
+    WRAPPER_ACTUAL_SHA256=
 fi
-if [ ! -f "$WRAPPER_PROPERTIES" ]; then
-    cp "$APP_HOME/gradle/wrapper/gradle-wrapper.properties" "$WRAPPER_PROPERTIES" ||
-        die "Unable to activate the Gradle wrapper properties."
+if [ "$WRAPPER_ACTUAL_SHA256" != "$WRAPPER_EXPECTED_SHA256" ]; then
+    restore_wrapper
 fi
+WRAPPER_ACTUAL_SHA256=$(wrapper_sha256 "$WRAPPER_JAR") ||
+    die "A SHA-256 verifier is required to check the Gradle wrapper artifact."
+[ "$WRAPPER_ACTUAL_SHA256" = "$WRAPPER_EXPECTED_SHA256" ] ||
+    die "The cached Gradle wrapper artifact failed SHA-256 verification."
+WRAPPER_PROPERTIES_TEMP=$WRAPPER_PROPERTIES.$$.tmp
+cp "$WRAPPER_PROPERTIES_SOURCE" "$WRAPPER_PROPERTIES_TEMP" ||
+    die "Unable to stage the Gradle wrapper properties."
+mv -f "$WRAPPER_PROPERTIES_TEMP" "$WRAPPER_PROPERTIES" ||
+    die "Unable to activate the Gradle wrapper properties."
 
 # Increase the maximum file descriptors if we can.
 if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then

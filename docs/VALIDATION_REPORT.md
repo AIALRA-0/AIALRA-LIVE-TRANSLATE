@@ -1,6 +1,6 @@
 # AIALRA-LIVE-TRANSLATE 验证报告
 
-状态日期：2026-08-31
+状态日期：2026-09-01
 
 ## 1 结论
 
@@ -9,9 +9,11 @@ P0 数据与安全修正已大部分通过自动检查和真实短测；P1 长�
 ### 0.1 公开候选兼容性验证
 
 - 纯文本迁移统一后缀、ReadWeave 局部命名和锁文件等价序列化已进入候选；迁移内容、依赖版本和公开接口保持不变
-- Gradle Wrapper 文本化方案要求解码后 SHA-256 与原始标准 Wrapper 完全一致，并必须通过 Android 单元测试与 debug assemble
-- Wrapper 解码字节与原始制品一致；Rust workspace 45 项、Python 29 项、Web 21 项、Android 单元测试与 debug assemble 均通过，Ruff、mypy、类型检查、ESLint、生产构建和 `git diff --check` 通过
-- 以上只证明本地精确候选快速门；PR、合并后 main 回读和 VPS release SHA 尚未完成，不提前宣称发布或最终 sign-off
+- Gradle Wrapper 文本化方案要求解码后 SHA-256 与原始标准 Wrapper 完全一致；启动脚本每次执行都复核缓存摘要，摘要不符时从已审计文本原子恢复，并原子刷新对应 properties
+- Wrapper 解码字节与原始制品一致；上一精确候选 `8ec1094` 的 Rust workspace 45 项、Python 29 项、Web 21 项、Android 单元测试与 debug assemble 均通过
+- 2026-09-01 自审修订已重新通过 Rust 45 项、Python 29 项、Web 21 项、Ruff、mypy、类型检查、ESLint、生产构建、Clippy 零警告、`git diff --check` 以及 Windows／POSIX Wrapper 缓存破坏恢复；Android 全量重跑两次均在进入项目任务前被主机 Gradle `Unable to establish loopback connection` 阻断，尚不能转移旧 Android 结果
+- 2026-09-01 本地合成运行复核通过：浏览器 durable ACK 与安全停止、对象租约授权、工作区树、第二设备 `409`、租约接管、旧租约拒绝和 SSE 游标重放；IDOR 音频用例使用攻击者身份加未签发租约，和公网 Nginx 清空身份头的真实边界一致
+- GitHub PR #2 已创建但尚未合并；本批 Wrapper 与门禁修订后必须重新执行 Android、快速测试和隔离签名认证，合并后 main 回读与 VPS release SHA 尚未完成，不提前宣称发布或最终 sign-off
 
 ### 1.0 本轮线上执行读回（2026-08-31，优先于下方历史记录）
 

@@ -55,13 +55,13 @@ const wsBase = API.replace(/^http/, "ws").replace(/\/api\/v1$/, "");
 await new Promise((resolve, reject) => {
   const socket = new WebSocket(
     `${wsBase}/api/v1/sessions/${session.id}/sources/security/audio`,
-    ["aialra.audio.v1", `lease.${lease.lease_token}`],
+    ["aialra.audio.v1", "lease.not-a-server-issued-lease"],
     { headers: { "X-authentik-uid": ATTACKER, ...(PROXY_MARKER ? { "X-aialra-Auth-Proxy": "1" } : {}) } },
   );
-  const timer = setTimeout(() => reject(new Error("cross-user WebSocket remained open")), 10_000);
+  const timer = setTimeout(() => reject(new Error("unauthorized WebSocket remained open")), 10_000);
   socket.onopen = () => {
     socket.close();
-    reject(new Error("cross-user WebSocket accepted an owner lease"));
+    reject(new Error("cross-user WebSocket accepted an invalid lease"));
   };
   socket.onerror = () => { clearTimeout(timer); resolve(); };
   socket.onclose = () => { clearTimeout(timer); resolve(); };
