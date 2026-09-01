@@ -4,7 +4,7 @@
 
 ## 当前线上状态（2026-09-01，最新）
 
-- `quality-v25-20260901-2c43fb8` 已部署；运行代码提交 `2c43fb82cf672538b5104bbf9211d4a67480eede` 与发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 一致。随后 `main` 追加了只含脱敏文档的提交 `5b3bf1af5d36430efa20eb7ce99871db65e8a0ce`，Core／ReadWeave healthy，Core restart count 为 0
+- `quality-v25-20260901-2c43fb8` 已部署；运行代码提交 `2c43fb82cf672538b5104bbf9211d4a67480eede` 与发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 一致。随后 `main` 仅追加脱敏文档，Core／ReadWeave healthy，Core restart count 为 0
 - 浏览器录音认证修正和租约—公网 WSS—ACK—停止路径已在真实 VPS 合成冒烟中通过；浏览器 Authentik 登录后的真实物理麦克风路径没有由 Agent 自动附着验证，下一步以用户实际体验为准
 - ReadWeave 标记持久化修复已合并并部署；新冒烟的 7 个映射均保留管理边界和匿名对象标记，上一轮 7 条 `managed_region_conflict` 只保留为历史记录，当前无排队连接器任务
 - 第二次生产合成冒烟通过：第二设备 `409`、21／21 durable ACK 带 `commit_id`、字幕／译文／材料／讲解、幂等停止、会话完成和 ReadWeave 读回均通过；结束时活动租约和活动模型任务为 0
