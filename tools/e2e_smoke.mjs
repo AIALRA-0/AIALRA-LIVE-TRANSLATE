@@ -3,13 +3,22 @@ import { readFile } from "node:fs/promises";
 import WebSocket from "ws";
 
 const API = process.env.AIALRA_API_URL || "http://127.0.0.1:8787/api/v1";
+const WS_BASE = process.env.AIALRA_WS_BASE || API.replace(/^http/, "ws").replace(/\/api\/v1$/, "");
 const FIXTURE = process.argv[2] || "data/test-fixtures/pipeline-lecture.pcm";
 const TEST_SUBJECT = process.env.AIALRA_TEST_SUBJECT || "";
+const PROXY_MARKER = process.env.AIALRA_TEST_PROXY_MARKER === "true";
 const nativeFetch = globalThis.fetch;
 globalThis.fetch = (input, init = {}) => {
   const url = String(input);
   if (!TEST_SUBJECT || !url.startsWith(API)) return nativeFetch(input, init);
-  return nativeFetch(input, { ...init, headers: { ...(init.headers || {}), "X-authentik-uid": TEST_SUBJECT } });
+  return nativeFetch(input, {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      "X-authentik-uid": TEST_SUBJECT,
+      ...(PROXY_MARKER ? { "X-aialra-auth-proxy": "1" } : {}),
+    },
+  });
 };
 
 // JSON helpers surface the service error body and preserve one readable failure boundary.
@@ -34,7 +43,6 @@ async function waitForEvents(sessionId, predicate, timeoutMs = 300_000) {
 
 // The WebSocket sender uses one-second frames and waits until every sequence has an ACK.
 async function sendPcm(sessionId, leaseToken, pcm) {
-  const wsBase = API.replace(/^http/, "ws").replace(/\/api\/v1$/, "");
   const chunks = [];
   for (let offset = 0, sequence = 1; offset < pcm.length; offset += 32_000, sequence += 1) {
     const payload = pcm.subarray(offset, Math.min(offset + 32_000, pcm.length));
@@ -46,11 +54,12 @@ async function sendPcm(sessionId, leaseToken, pcm) {
   }
   return await new Promise((resolve, reject) => {
     const socket = new WebSocket(
-      `${wsBase}/api/v1/sessions/${sessionId}/sources/smoke/audio`,
+      `${WS_BASE}/api/v1/sessions/${sessionId}/sources/smoke/audio`,
       ["aialra.audio.v1", `lease.${leaseToken}`],
       TEST_SUBJECT ? { headers: { "X-authentik-uid": TEST_SUBJECT } } : undefined,
     );
     const acknowledgements = new Set();
+    const acknowledgementCommitIds = new Set();
     const timer = setTimeout(() => reject(new Error("audio ACK timeout")), 60_000);
     socket.onopen = () => chunks.forEach(({ frame }) => socket.send(frame));
     socket.onerror = () => reject(new Error("audio WebSocket failed"));
@@ -59,18 +68,46 @@ async function sendPcm(sessionId, leaseToken, pcm) {
       if (response.type === "audio.error") reject(new Error(response.message));
       if (response.type !== "audio.ack") return;
       acknowledgements.add(response.sequence);
+      if (typeof response.commit_id === "string" && response.commit_id.length > 0) {
+        acknowledgementCommitIds.add(response.sequence);
+      }
       if (acknowledgements.size === chunks.length) {
         clearTimeout(timer);
         socket.close();
-        resolve(acknowledgements.size);
+        resolve({
+          count: acknowledgements.size,
+          commitIdsValid: acknowledgementCommitIds.size === chunks.length,
+        });
       }
     };
   });
 }
 
+async function waitForReadWeave(projectId, sessionId, timeoutMs = 120_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const status = await checked(fetch(`${API}/projects/${projectId}/readweave`));
+    const preview = await checked(fetch(`${API}/projects/${projectId}/readweave/preview`));
+    const readable = preview.sessions?.find((item) => item.session_id === sessionId);
+    if (
+      status.configured &&
+      status.queued === 0 &&
+      status.syncing === 0 &&
+      status.conflicts === 0 &&
+      readable?.latest_entries?.some((entry) => entry.original && entry.translation)
+    ) {
+      return { status, preview: readable };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error(`ReadWeave did not become readable within ${timeoutMs} ms`);
+}
+
 // One real session covers consent, audio durability, ASR, translation, asset parsing, explanation, and stop.
 const startedAt = Date.now();
-const project = await checked(
+let project;
+try {
+project = await checked(
   fetch(`${API}/projects`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -85,9 +122,16 @@ const session = await checked(fetch(`${API}/projects/${project.id}/sessions`, {
 const lease = await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }),
 }));
+const contention = await fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ device_id: "smoke-observer-0002" }),
+});
+if (contention.status !== 409) throw new Error(`second recorder was not rejected: ${contention.status}`);
 const capabilities = await checked(fetch(`${API}/sessions/${session.id}/dingtalk/capabilities`));
 const pcm = await readFile(FIXTURE);
 const acknowledgements = await sendPcm(session.id, lease.lease_token, pcm);
+if (!acknowledgements.commitIdsValid) throw new Error("one or more durable ACKs lacked commit_id");
 let events = await waitForEvents(
   session.id,
   (items) =>
@@ -118,6 +162,14 @@ events = await waitForEvents(
     items.some((item) => item.event_type === "translation.finalized") &&
     items.some((item) => item.event_type === "explanation.card.created"),
 );
+if (events.some((item) => item.event_type === "model.job.failed")) {
+  throw new Error("session contains a final model.job.failed event");
+}
+const readWeave = await waitForReadWeave(project.id, session.id);
+const health = await checked(fetch(`${API}/health`));
+if (health.model_queue?.queued !== 0 || health.model_queue?.leased !== 0) {
+  throw new Error("model queue did not drain after smoke session completion");
+}
 
 // Machine-readable output is stored by the caller and can be compared across model changes.
 const count = (eventType) => events.filter((item) => item.event_type === eventType).length;
@@ -127,12 +179,17 @@ process.stdout.write(
       status: "PASS",
       session_id: session.id,
       elapsed_ms: Date.now() - startedAt,
-      audio_acknowledgements: acknowledgements,
+      audio_acknowledgements: acknowledgements.count,
+      acknowledgement_commit_ids_valid: acknowledgements.commitIdsValid,
       audio_chunks: count("audio.chunk.received"),
       stable_segments: count("segment.finalized"),
       stable_translations: count("translation.finalized"),
       extracted_pages: count("asset.page.extracted"),
       explanation_cards: count("explanation.card.created"),
+      second_device_status: contention.status,
+      readweave_configured: readWeave.status.configured,
+      readweave_readable_entries: readWeave.preview.latest_entries.length,
+      build_id: health.build_id,
       dingtalk_configured: capabilities.configured,
       dingtalk_live_pcm_verified: capabilities.incremental_pcm_verified,
     },
@@ -140,3 +197,12 @@ process.stdout.write(
     2,
   )}\n`,
 );
+} finally {
+  if (project?.id) {
+    await checked(fetch(`${API}/projects/${project.id}/placement`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ folder_id: null, sort_order: 9999, archived: true }),
+    })).catch(() => undefined);
+  }
+}

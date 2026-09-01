@@ -74,6 +74,8 @@ pub struct FailRequest {
     error_kind: String,
     retryable: bool,
     retry_after_seconds: i64,
+    error_stage: Option<String>,
+    diagnostic_id: Option<String>,
 }
 
 pub async fn worker_heartbeat(
@@ -249,6 +251,9 @@ pub async fn fail_job(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&headers)?;
     validate_worker_id(&request.worker_id)?;
+    let error_stage = validate_error_stage(request.error_stage.as_deref())?;
+    let diagnostic_id = validate_diagnostic_id(request.diagnostic_id.as_deref())?;
+    let error_kind = sanitize_error_kind(&request.error_kind);
     let job = state
         .store
         .get_model_job(&job_id)?
@@ -258,7 +263,7 @@ pub async fn fail_job(
         .retry_or_fail_model_job(
             &job_id,
             &request.worker_id,
-            &sanitize_error_kind(&request.error_kind),
+            &error_kind,
             request.retryable,
             request.retry_after_seconds,
         )?
@@ -268,6 +273,17 @@ pub async fn fail_job(
     } else {
         "model.job.failed"
     };
+    let mut event_payload = json!({
+        "job_id": job_id,
+        "job_type": job.job_type,
+        "error_kind": error_kind,
+    });
+    if let Some(value) = error_stage {
+        event_payload["error_stage"] = json!(value);
+    }
+    if let Some(value) = diagnostic_id {
+        event_payload["diagnostic_id"] = json!(value);
+    }
     let _ = state.emit_idempotent(
         &format!("{job_id}:{event_type}:{}", job.attempts),
         &job.session_id,
@@ -276,7 +292,7 @@ pub async fn fail_job(
         0,
         &job_id,
         None,
-        json!({"job_id": job_id, "job_type": job.job_type, "error_kind": sanitize_error_kind(&request.error_kind)}),
+        event_payload,
     );
     if status == "failed" && job.job_type == "summarize" {
         // A final summary is a retryable background projection. Keep the
@@ -292,7 +308,7 @@ pub async fn fail_job(
             None,
             json!({
                 "job_id": job_id,
-                "error_kind": sanitize_error_kind(&request.error_kind),
+                "error_kind": error_kind,
                 "manual_retry_available": true,
             }),
         )?;
@@ -1117,6 +1133,33 @@ fn sanitize_error_kind(value: &str) -> String {
         .collect()
 }
 
+fn validate_error_stage(value: Option<&str>) -> Result<Option<&str>, ApiError> {
+    match value {
+        None => Ok(None),
+        Some(
+            value @ ("gateway_response" | "job_payload" | "model_http" | "model_json"
+            | "execution_device"),
+        ) => Ok(Some(value)),
+        Some(_) => Err(ApiError::bad_request("error_stage is invalid")),
+    }
+}
+
+fn validate_diagnostic_id(value: Option<&str>) -> Result<Option<&str>, ApiError> {
+    match value {
+        None => Ok(None),
+        Some(value)
+            if value.len() == 21
+                && value.starts_with("diag_")
+                && value.as_bytes()[5..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) =>
+        {
+            Ok(Some(value))
+        }
+        Some(_) => Err(ApiError::bad_request("diagnostic_id is invalid")),
+    }
+}
+
 use axum::response::IntoResponse;
 
 #[cfg(test)]
@@ -1124,6 +1167,7 @@ mod tests {
     use super::{
         PARAGRAPH_HARD_SEGMENTS, enqueue_summary, evenly_sample, join_caption_fragments,
         maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, require_provider,
+        validate_diagnostic_id, validate_error_stage,
     };
     use crate::app::AppState;
     use aialra_event_store::NewSession;
@@ -1141,6 +1185,32 @@ mod tests {
         );
         assert!(require_provider("ollama:qwen2.5:3b-instruct@cuda", "ollama:", &["@cuda"]).is_ok());
         assert!(require_provider("ollama:qwen2.5:3b-instruct@cpu", "ollama:", &["@cuda"]).is_err());
+    }
+
+    #[test]
+    fn optional_failure_diagnostics_accept_old_clients_and_fixed_values() {
+        assert_eq!(validate_error_stage(None).unwrap(), None);
+        assert_eq!(validate_diagnostic_id(None).unwrap(), None);
+        for stage in [
+            "gateway_response",
+            "job_payload",
+            "model_http",
+            "model_json",
+            "execution_device",
+        ] {
+            assert_eq!(validate_error_stage(Some(stage)).unwrap(), Some(stage));
+        }
+        assert_eq!(
+            validate_diagnostic_id(Some("diag_0123456789abcdef")).unwrap(),
+            Some("diag_0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn optional_failure_diagnostics_reject_unbounded_values() {
+        assert!(validate_error_stage(Some("provider_response_invalid")).is_err());
+        assert!(validate_diagnostic_id(Some("diag_0123456789ABCDEf")).is_err());
+        assert!(validate_diagnostic_id(Some("diag_0123")).is_err());
     }
 
     #[test]

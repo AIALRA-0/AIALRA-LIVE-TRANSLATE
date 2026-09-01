@@ -5,11 +5,14 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.core
+      args:
+        AIALRA_BUILD_ID: ${AIALRA_BUILD_ID:?full main SHA is required}
     restart: unless-stopped
     environment:
       AIALRA_BIND: 0.0.0.0:8787
       AIALRA_DATA_DIR: /data
       AIALRA_DEPLOYMENT_MODE: server
+      AIALRA_BUILD_ID: ${AIALRA_BUILD_ID:?full main SHA is required}
       AIALRA_REQUIRE_AUTH_PROXY_MARKER: "true"
       AIALRA_ALLOWED_ORIGINS: ${AIALRA_ALLOWED_ORIGINS:-https://live.aialra.online}
       AIALRA_PROCESSING_LOCATION: 本机 RTX 4080 经私有通道处理

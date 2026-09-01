@@ -4,7 +4,14 @@
 
 ## 1 结论
 
-P0 数据与安全修正已大部分通过自动检查和真实短测；P1 长测、冷启动稳定性和真实设备矩阵仍未完成，因此当前发布判定为 `PARTIAL / NOT RELEASE SIGN-OFF`
+线上继续运行 `quality-v24-20260831`；v25 快速上线候选已经通过相关本地检查和 VPS 只读预检，尚未合并、部署或完成生产冒烟，因此当前判定为 `V25 QUICK RELEASE CANDIDATE / NOT YET DEPLOYED`
+
+### 0.0 v25 快速候选验证
+
+- Rust workspace 48 项与 Clippy 零警告通过；新增测试覆盖可选字段兼容、五种失败阶段、诊断标识格式、同一失败报告重试复用标识和生产 `build_id` 格式
+- Python 33 项、Ruff 和 mypy 通过；Web 21 项、类型检查、ESLint 与生产构建通过；`tools/e2e_smoke.mjs` Node 语法和 `git diff --check` 通过
+- 修改后的部署脚本已在 VPS 真实 Bash 环境通过 `bash -n`；VPS 只读预检确认 v24 Core healthy、无活动录音租约、queued／leased 模型任务均为 0、根分区剩余 33 GiB
+- 本节只证明候选和上线前置条件；GitHub 精确候选、v25 SHA 四方一致和生产冒烟结果仍待完成
 
 ### 0.1 公开候选兼容性验证
 

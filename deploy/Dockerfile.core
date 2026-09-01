@@ -16,6 +16,8 @@ COPY crates crates
 RUN cargo build --locked --release -p aialra-core-server
 
 FROM debian:bookworm-slim AS runtime
+ARG AIALRA_BUILD_ID
+LABEL org.opencontainers.image.revision=$AIALRA_BUILD_ID
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \

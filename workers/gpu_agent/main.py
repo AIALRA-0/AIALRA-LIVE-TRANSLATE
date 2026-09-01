@@ -6,9 +6,11 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import platform
 import random
+import secrets
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
@@ -30,6 +32,10 @@ BACKOFF_SECONDS = (1, 2, 4, 8, 16, 30)
 MAX_ASR_BURST_BEFORE_TRANSLATION = 8
 SUMMARY_HTTP_TIMEOUT_SECONDS = max(
     60.0, min(float(os.getenv("AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS", "150")), 180.0)
+)
+LOGGER = logging.getLogger("aialra.gpu_agent")
+ERROR_STAGES = frozenset(
+    {"gateway_response", "job_payload", "model_http", "model_json", "execution_device"}
 )
 
 
@@ -57,6 +63,77 @@ LANES = (
 
 class RetryableJobError(RuntimeError):
     """A local provider or private-network interruption should return the job to the queue."""
+
+
+@dataclass(frozen=True)
+class FailureReport:
+    """Bounded failure metadata excludes job contents and private identifiers."""
+
+    error_stage: str
+    error_kind: str
+    retryable: bool = True
+    http_status: int | None = None
+    response_bytes: int | None = None
+    response_sha256: str | None = None
+
+
+class JobExecutionError(RuntimeError):
+    """Carry a privacy-safe classification without copying provider response text."""
+
+    def __init__(self, report: FailureReport) -> None:
+        super().__init__(report.error_kind)
+        self.report = report
+
+
+def new_diagnostic_id() -> str:
+    return f"diag_{secrets.token_hex(8)}"
+
+
+def failure_request_payload(
+    lane: Lane, report: FailureReport, diagnostic_id: str
+) -> dict[str, Any]:
+    return {
+        "worker_id": lane.worker_id,
+        "error_kind": report.error_kind,
+        "retryable": report.retryable,
+        "retry_after_seconds": 4 if report.retryable else 0,
+        "error_stage": report.error_stage,
+        "diagnostic_id": diagnostic_id,
+    }
+
+
+def privacy_safe_failure_fields(
+    job_type: str, report: FailureReport, diagnostic_id: str
+) -> dict[str, Any]:
+    return {
+        "diagnostic_id": diagnostic_id,
+        "job_type": job_type,
+        "error_stage": report.error_stage,
+        "error_kind": report.error_kind,
+        "http_status": report.http_status,
+        "response_bytes": report.response_bytes,
+        "response_sha256": report.response_sha256,
+    }
+
+
+def response_failure(
+    error_stage: str,
+    error_kind: str,
+    response: httpx.Response,
+    *,
+    include_digest: bool = True,
+) -> JobExecutionError:
+    return JobExecutionError(
+        FailureReport(
+            error_stage=error_stage,
+            error_kind=error_kind,
+            http_status=response.status_code,
+            response_bytes=len(response.content),
+            response_sha256=(
+                hashlib.sha256(response.content).hexdigest() if include_digest else None
+            ),
+        )
+    )
 
 
 class GpuScheduler:
@@ -356,51 +433,93 @@ async def execute_job(
     scheduler: GpuScheduler,
     worker_id: str,
 ) -> dict[str, Any]:
-    job_type = str(job["job_type"])
-    model_input = dict(job["input"])
+    job_id = job.get("id")
+    job_type = job.get("job_type")
+    model_input_value = job.get("input")
+    idempotency_key = job.get("idempotency_key")
+    if (
+        not isinstance(job_id, str)
+        or not job_id
+        or job_type not in {"asr", "translate", "explain", "summarize", "asset_parse"}
+        or not isinstance(model_input_value, dict)
+        or not isinstance(idempotency_key, str)
+        or not idempotency_key
+    ):
+        raise JobExecutionError(FailureReport("job_payload", "job_payload_invalid"))
+    model_input = dict(model_input_value)
     if job_type == "asr":
-        binary = await gateway.get(
-            f"{GATEWAY_URL}/internal/v1/jobs/{job['id']}/input",
-            headers={"X-Aialra-Worker-ID": worker_id},
-            timeout=30,
-        )
-        binary.raise_for_status()
+        try:
+            binary = await gateway.get(
+                f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/input",
+                headers={"X-Aialra-Worker-ID": worker_id},
+                timeout=30,
+            )
+        except httpx.HTTPError as error:
+            raise JobExecutionError(
+                FailureReport("gateway_response", "gateway_request_failed")
+            ) from error
+        if binary.status_code >= 400:
+            raise response_failure(
+                "gateway_response", "gateway_response_invalid", binary, include_digest=False
+            )
         expected = binary.headers.get("x-aialra-content-sha256", "")
         if expected and hashlib.sha256(binary.content).hexdigest() != expected:
-            raise RetryableJobError("input integrity check failed")
+            raise response_failure(
+                "gateway_response", "input_digest_mismatch", binary, include_digest=False
+            )
         model_input["pcm_s16le_base64"] = base64.b64encode(binary.content).decode("ascii")
-        response = await scheduler.run_asr(
-            lambda: model.post(
-                f"{MODEL_WORKER_URL}/v1/asr/transcribe", json=model_input, timeout=180
+        try:
+            response = await scheduler.run_asr(
+                lambda: model.post(
+                    f"{MODEL_WORKER_URL}/v1/asr/transcribe", json=model_input, timeout=180
+                )
             )
-        )
+        except httpx.HTTPError as error:
+            raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "translate":
-        response = await scheduler.run_translation(
-            lambda: model.post(
-                f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=120
+        try:
+            response = await scheduler.run_translation(
+                lambda: model.post(
+                    f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=120
+                )
             )
-        )
+        except httpx.HTTPError as error:
+            raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "explain":
-        response = await scheduler.run_llm(
-            lambda: model.post(
-                f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=180
+        try:
+            response = await scheduler.run_llm(
+                lambda: model.post(
+                    f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=180
+                )
             )
-        )
+        except httpx.HTTPError as error:
+            raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "summarize":
-        response = await scheduler.run_exclusive(
-            lambda: model.post(
-                f"{MODEL_WORKER_URL}/v1/summarize",
-                json=model_input,
-                timeout=SUMMARY_HTTP_TIMEOUT_SECONDS,
+        try:
+            response = await scheduler.run_exclusive(
+                lambda: model.post(
+                    f"{MODEL_WORKER_URL}/v1/summarize",
+                    json=model_input,
+                    timeout=SUMMARY_HTTP_TIMEOUT_SECONDS,
+                )
             )
-        )
+        except httpx.HTTPError as error:
+            raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "asset_parse":
-        binary = await gateway.get(
-            f"{GATEWAY_URL}/internal/v1/jobs/{job['id']}/input",
-            headers={"X-Aialra-Worker-ID": worker_id},
-            timeout=60,
-        )
-        binary.raise_for_status()
+        try:
+            binary = await gateway.get(
+                f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/input",
+                headers={"X-Aialra-Worker-ID": worker_id},
+                timeout=60,
+            )
+        except httpx.HTTPError as error:
+            raise JobExecutionError(
+                FailureReport("gateway_response", "gateway_request_failed")
+            ) from error
+        if binary.status_code >= 400:
+            raise response_failure(
+                "gateway_response", "gateway_response_invalid", binary, include_digest=False
+            )
 
         async def request_asset_parse() -> httpx.Response:
             return await model.post(
@@ -415,16 +534,22 @@ async def execute_job(
                 timeout=300,
             )
 
-        if str(model_input.get("media_type", "")).startswith("image/"):
-            response = await scheduler.run_exclusive(request_asset_parse)
-        else:
-            response = await request_asset_parse()
-    else:
-        raise RuntimeError("unsupported model job type")
-    if response.status_code >= 500:
-        raise RetryableJobError(f"provider unavailable for {job_type}")
-    response.raise_for_status()
-    result = cast(dict[str, Any], response.json())
+        try:
+            if str(model_input.get("media_type", "")).startswith("image/"):
+                response = await scheduler.run_exclusive(request_asset_parse)
+            else:
+                response = await request_asset_parse()
+        except httpx.HTTPError as error:
+            raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
+    if response.status_code >= 400:
+        raise response_failure("model_http", "model_http_error", response)
+    try:
+        result_value = response.json()
+    except (json.JSONDecodeError, ValueError) as error:
+        raise response_failure("model_json", "model_json_invalid", response) from error
+    if not isinstance(result_value, dict):
+        raise response_failure("model_json", "model_json_invalid", response)
+    result = cast(dict[str, Any], result_value)
     provider = str(result.get("provider") or result.get("parser") or "")
     is_image_parse = job_type == "asset_parse" and str(
         model_input.get("media_type", "")
@@ -432,9 +557,9 @@ async def execute_job(
     if is_image_parse and not (
         provider.startswith("ollama:") and provider.endswith("@cuda")
     ):
-        raise RetryableJobError("image parser did not prove local CUDA execution")
+        raise response_failure("execution_device", "execution_device_unproven", response)
     if not provider_proves_local_execution(job_type, provider):
-        raise RetryableJobError("model result did not prove allowed local execution")
+        raise response_failure("execution_device", "execution_device_unproven", response)
     return result
 
 
@@ -478,21 +603,32 @@ async def fail_job(
     gateway: httpx.AsyncClient,
     lane: Lane,
     job_id: str,
-    error_kind: str,
-    retryable: bool,
+    job_type: str,
+    report: FailureReport,
+    diagnostic_id: str,
 ) -> None:
-    response = await gateway.post(
-        f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/fail",
-        json={
-            "worker_id": lane.worker_id,
-            "error_kind": error_kind,
-            "retryable": retryable,
-            "retry_after_seconds": 4 if retryable else 0,
-        },
-        timeout=30,
+    LOGGER.info(
+        json.dumps(
+            privacy_safe_failure_fields(job_type, report, diagnostic_id),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     )
-    if response.status_code not in {200, 409}:
-        response.raise_for_status()
+    payload = failure_request_payload(lane, report, diagnostic_id)
+    for attempt in range(3):
+        try:
+            response = await gateway.post(
+                f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/fail",
+                json=payload,
+                timeout=30,
+            )
+            if response.status_code not in {200, 409}:
+                response.raise_for_status()
+            return
+        except httpx.HTTPError:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(BACKOFF_SECONDS[attempt])
 
 
 async def lane_loop(
@@ -529,16 +665,30 @@ async def lane_loop(
                     result,
                     int((time.monotonic() - started) * 1_000),
                 )
+            except JobExecutionError as error:
+                await fail_job(
+                    gateway,
+                    lane,
+                    job_id,
+                    str(job.get("job_type") or "unknown"),
+                    error.report,
+                    new_diagnostic_id(),
+                )
             except RetryableJobError:
-                await fail_job(gateway, lane, job_id, "provider_unavailable", True)
-            except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError):
-                await fail_job(gateway, lane, job_id, "provider_response_invalid", True)
+                await fail_job(
+                    gateway,
+                    lane,
+                    job_id,
+                    str(job.get("job_type") or "unknown"),
+                    FailureReport("model_http", "provider_unavailable"),
+                    new_diagnostic_id(),
+                )
             finally:
                 renew.cancel()
                 await asyncio.gather(renew, return_exceptions=True)
                 active[lane.suffix] = None
             failures = 0
-        except (httpx.HTTPError, RuntimeError):
+        except (httpx.HTTPError, RuntimeError, KeyError, ValueError, json.JSONDecodeError):
             delay = BACKOFF_SECONDS[min(failures, len(BACKOFF_SECONDS) - 1)]
             failures += 1
             await asyncio.sleep(delay + random.random() * 0.25)
@@ -547,6 +697,7 @@ async def lane_loop(
 async def run() -> None:
     if not WORKER_TOKEN:
         raise RuntimeError("AIALRA_WORKER_TOKEN is required")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     headers = authorization_headers()
     async with httpx.AsyncClient(headers=headers) as gateway, httpx.AsyncClient() as model:
         health = await verify_model_worker(model)

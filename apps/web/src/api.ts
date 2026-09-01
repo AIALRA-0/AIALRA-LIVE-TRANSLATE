@@ -13,6 +13,7 @@ export interface RuntimeHealth {
   status: string;
   service: string;
   version: string;
+  build_id: string;
   deployment_mode: "local" | "server";
   processing_location: string;
   worker: {

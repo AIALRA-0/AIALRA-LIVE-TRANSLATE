@@ -34,6 +34,9 @@ backup_dir="$backup_root/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 auth_service="${AIALRA_AUTH_SERVICE:-example-auth-gateway.service}"
 certbot_credentials="${AIALRA_CERTBOT_CREDENTIALS:-/etc/letsencrypt/cloudflare.ini}"
 previous_release=''
+previous_image_id=''
+previous_image_ref=''
+build_id_file="$release_dir/BUILD_ID"
 
 if [[ ! "$site_host" =~ ^[a-z0-9.-]+$ ]] || [[ ! "$service_port" =~ ^[0-9]{2,5}$ ]] || [[ ! "$worker_gateway_port" =~ ^[0-9]{2,5}$ ]]; then
   printf 'deployment hostname or port is invalid\n' >&2
@@ -45,10 +48,24 @@ for required in \
   "$release_dir/deploy/nginx/site.conf.template" \
   "$release_dir/deploy/nginx/site.http.conf.template" \
   "$release_dir/deploy/nginx/worker-gateway.conf.template" \
+  "$build_id_file" \
   "$apps_file" \
   "$reconcile_auth"; do
   [[ -s "$required" ]]
 done
+
+build_id="$(tr -d '\r\n' < "$build_id_file")"
+if [[ ! "$build_id" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'BUILD_ID must contain one full lowercase main SHA\n' >&2
+  exit 65
+fi
+
+available_kib="$(df -Pk "$platform_root" | awk 'NR==2 {print $4}')"
+available_percent="$(df -Pk "$platform_root" | awk 'NR==2 {gsub(/%/, "", $5); print 100-$5}')"
+if (( available_kib < 20 * 1024 * 1024 && available_percent < 5 )); then
+  printf 'deployment requires at least 20 GiB or 5%% free space\n' >&2
+  exit 75
+fi
 
 install -d -o root -g root -m 0700 "$backup_dir" "$app_root"
 install -d -o 10001 -g 10001 -m 0700 "$data_path"
@@ -58,6 +75,14 @@ cp -a "$apps_file" "$backup_dir/apps.json.before"
 [[ ! -e "$env_file" ]] || cp -a "$env_file" "$backup_dir/env.before"
 if [[ -L "$current_link" ]]; then
   previous_release="$(readlink -f "$current_link")"
+  printf '%s\n' "$previous_release" > "$backup_dir/previous-release.txt"
+  previous_container="$(docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" ps -q core 2>/dev/null || true)"
+  if [[ -n "$previous_container" ]]; then
+    previous_image_id="$(docker inspect --format '{{.Image}}' "$previous_container")"
+    previous_image_ref="$(docker inspect --format '{{.Config.Image}}' "$previous_container")"
+    printf '%s\n' "$previous_image_id" > "$backup_dir/previous-image-id.txt"
+    printf '%s\n' "$previous_image_ref" > "$backup_dir/previous-image-ref.txt"
+  fi
 fi
 
 rollback() {
@@ -65,6 +90,9 @@ rollback() {
   trap - ERR INT TERM HUP
   set +e
   cp -a "$backup_dir/apps.json.before" "$apps_file"
+  if [[ -s "$backup_dir/env.before" ]]; then
+    cp -a "$backup_dir/env.before" "$env_file"
+  fi
   "$reconcile_auth" >/dev/null 2>&1 || true
   if [[ -s "$backup_dir/nginx.conf.before" ]]; then
     cp -a "$backup_dir/nginx.conf.before" "$nginx_target"
@@ -77,6 +105,10 @@ rollback() {
     rm -f -- "$worker_gateway_target" "$worker_gateway_link" "$worker_gateway_system_link"
   fi
   if [[ -n "$previous_release" && -d "$previous_release" ]]; then
+    docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" down >/dev/null 2>&1 || true
+    if [[ -n "$previous_image_id" && -n "$previous_image_ref" ]]; then
+      docker image tag "$previous_image_id" "$previous_image_ref" >/dev/null 2>&1 || true
+    fi
     ln -sfn "$previous_release" "$current_link"
     docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" up -d >/dev/null 2>&1 || true
   else
@@ -103,8 +135,53 @@ grep -Eq '^AIALRA_WORKER_TOKEN_SHA256=[0-9a-f]{64}$' "$env_file"
 tailscale_ip="$(tailscale ip -4 | head -n 1)"
 [[ "$tailscale_ip" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]
 
-ln -sfn "$release_dir" "$current_link"
+export AIALRA_BUILD_ID="$build_id"
 docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" build
+
+deployment_counts() {
+  python3 - "$data_path/aialra.sqlite" <<'PY'
+import sqlite3
+import sys
+
+database = sys.argv[1]
+connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+active_leases = connection.execute(
+    "SELECT COUNT(*) FROM recording_leases WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+).fetchone()[0]
+active_jobs = connection.execute(
+    "SELECT COUNT(*) FROM model_jobs WHERE status IN ('queued', 'leased')"
+).fetchone()[0]
+print(f"{active_leases} {active_jobs}")
+PY
+}
+
+preflight_counts="$(deployment_counts)"
+read -r active_leases active_jobs <<< "$preflight_counts"
+if (( active_leases != 0 || active_jobs != 0 )); then
+  printf 'deployment blocked: active_leases=%s active_model_jobs=%s\n' "$active_leases" "$active_jobs" >&2
+  exit 69
+fi
+
+env_stage="$(mktemp "$backup_dir/.env.XXXXXX")"
+grep -v '^AIALRA_BUILD_ID=' "$env_file" > "$env_stage"
+printf 'AIALRA_BUILD_ID=%s\n' "$build_id" >> "$env_stage"
+install -o root -g root -m 0600 "$env_stage" "$env_file"
+rm -f -- "$env_stage"
+
+if [[ -n "$previous_release" && -d "$previous_release" ]]; then
+  docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" stop core
+fi
+post_stop_counts="$(deployment_counts)"
+read -r post_stop_leases post_stop_jobs <<< "$post_stop_counts"
+if (( post_stop_leases != 0 || post_stop_jobs != 0 )); then
+  printf 'deployment race detected: active_leases=%s active_model_jobs=%s\n' "$post_stop_leases" "$post_stop_jobs" >&2
+  false
+fi
+for database_file in aialra.sqlite aialra.sqlite-wal aialra.sqlite-shm; do
+  [[ ! -e "$data_path/$database_file" ]] || cp -a "$data_path/$database_file" "$backup_dir/$database_file.before"
+done
+
+ln -sfn "$release_dir" "$current_link"
 docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" up -d --remove-orphans
 
 # ReadWeave remains independently deployable while ETAPI stays on the private application network
@@ -119,7 +196,11 @@ for _ in {1..60}; do
   fi
   sleep 2
 done
-curl -fsS --max-time 5 -H 'X-aialra-auth-proxy: 1' -H 'X-authentik-uid: deployment-health' "http://127.0.0.1:$service_port/api/v1/health" >/dev/null
+health_json="$(curl -fsS --max-time 5 -H 'X-aialra-auth-proxy: 1' -H 'X-authentik-uid: deployment-health' "http://127.0.0.1:$service_port/api/v1/health")"
+jq -e --arg build_id "$build_id" '.status == "ok" and .build_id == $build_id' <<< "$health_json" >/dev/null
+core_container="$(docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" ps -q core)"
+image_revision="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$core_container")"
+[[ "$image_revision" == "$build_id" ]]
 
 apps_stage="$(mktemp "$backup_dir/.apps.XXXXXX")"
 jq \

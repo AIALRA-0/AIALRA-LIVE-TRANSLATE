@@ -52,12 +52,24 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "status": "ok",
         "service": "aialra-core",
         "version": env!("CARGO_PKG_VERSION"),
+        "build_id": runtime_build_id(std::env::var("AIALRA_BUILD_ID").ok().as_deref()),
         "worker": worker,
         "model_queue": queue,
         "local_only_default": true,
         "deployment_mode": std::env::var("AIALRA_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".to_owned()),
         "processing_location": std::env::var("AIALRA_PROCESSING_LOCATION").unwrap_or_else(|_| "本机处理".to_owned())
     }))
+}
+
+fn runtime_build_id(value: Option<&str>) -> &str {
+    value
+        .filter(|candidate| {
+            candidate.len() == 40
+                && candidate
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+        .unwrap_or("development")
 }
 
 pub async fn create_session(
@@ -404,4 +416,19 @@ fn sanitize_file_name(value: &str) -> String {
         .filter(|character| !character.is_control() && !matches!(character, '/' | '\\' | ':'))
         .take(180)
         .collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_build_id;
+
+    #[test]
+    fn build_id_defaults_to_development_and_accepts_a_full_sha() {
+        assert_eq!(runtime_build_id(None), "development");
+        assert_eq!(runtime_build_id(Some("short")), "development");
+        assert_eq!(
+            runtime_build_id(Some("0123456789abcdef0123456789abcdef01234567")),
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+    }
 }
