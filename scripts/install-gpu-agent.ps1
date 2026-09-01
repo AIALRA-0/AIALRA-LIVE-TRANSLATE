@@ -2,7 +2,10 @@ param(
     [string]$WorkerToken,
     [string]$GatewayUrl = "http://worker-gateway.example.invalid",
     [string]$OllamaUrl = "http://127.0.0.1:11434",
-    [string]$OllamaModel = "qwen2.5:3b-instruct"
+    [string]$OllamaModel = "qwen2.5:7b-instruct",
+    [string]$ExplanationModel = "qwen2.5:7b-instruct",
+    [string]$SummaryModel = "qwen2.5:14b-instruct",
+    [string]$VisionModel = "qwen3-vl:8b-instruct"
 )
 
 $ErrorActionPreference = "Stop" # Installation must not leave a task with an incomplete secret.
@@ -17,7 +20,9 @@ if (![string]::IsNullOrWhiteSpace($WorkerToken)) {
 if (!(Test-Path -LiteralPath $secretFile -PathType Leaf)) { throw "请先运行 initialize-gpu-agent-secret.ps1" } # Never install a task that cannot authenticate.
 $ollamaTags = Invoke-RestMethod -Uri "$($OllamaUrl.TrimEnd('/'))/api/tags" -TimeoutSec 10 # Fail installation before creating an unusable login task.
 $availableModels = @($ollamaTags.models | ForEach-Object name)
-if ($OllamaModel -notin $availableModels) { throw "Ollama 缺少模型 $OllamaModel，请先安装真实模型" }
+$requiredModels = @($OllamaModel, $ExplanationModel, $SummaryModel, $VisionModel) | Select-Object -Unique
+$missingModels = @($requiredModels | Where-Object { $_ -notin $availableModels })
+if ($missingModels.Count -gt 0) { throw "Ollama 缺少真实模型: $($missingModels -join ', ')" }
 
 $taskName = "AIALRA RTX GPU Agent" # Use one stable name so reinstall updates instead of duplicating tasks.
 $launcher = Join-Path $PSScriptRoot "run-gpu-stack.ps1" # The scheduled action owns both loopback inference and the private queue agent.
@@ -27,6 +32,16 @@ $settings = New-ScheduledTaskSettingsSet -RestartCount 6 -RestartInterval (New-T
 [Environment]::SetEnvironmentVariable("AIALRA_GPU_GATEWAY_URL", $GatewayUrl, "User") # Store only the private endpoint, never the token.
 [Environment]::SetEnvironmentVariable("AIALRA_OLLAMA_URL", $OllamaUrl, "User") # Persist the verified loopback provider for future logins.
 [Environment]::SetEnvironmentVariable("AIALRA_OLLAMA_MODEL", $OllamaModel, "User") # Keep startup and the validated model on the same provider.
+[Environment]::SetEnvironmentVariable("AIALRA_EXPLANATION_MODEL", $ExplanationModel, "User") # Keep rolling explanations on the measured real-time tier.
+[Environment]::SetEnvironmentVariable("AIALRA_SUMMARY_MODEL", $SummaryModel, "User") # Preserve the measured final summary tier.
+[Environment]::SetEnvironmentVariable("AIALRA_VISION_MODEL", $VisionModel, "User") # Preserve the local image understanding tier.
+$env:AIALRA_GPU_GATEWAY_URL = $GatewayUrl # The immediate launch must use the same values written for the next login.
+$env:AIALRA_OLLAMA_URL = $OllamaUrl
+$env:AIALRA_OLLAMA_MODEL = $OllamaModel
+$env:AIALRA_TRANSLATION_MODEL = $OllamaModel
+$env:AIALRA_EXPLANATION_MODEL = $ExplanationModel
+$env:AIALRA_SUMMARY_MODEL = $SummaryModel
+$env:AIALRA_VISION_MODEL = $VisionModel
 $currentUser = (& whoami.exe).Trim() # Resolve the exact interactive identity used by DPAPI.
 try {
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User $currentUser -RunLevel Limited -Description "AIALRA local RTX model agent" -Force -ErrorAction Stop | Out-Null # Prefer Task Scheduler when the account can register tasks.

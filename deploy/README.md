@@ -16,8 +16,10 @@ flowchart TD
   Core --> Notes[ReadWeave 私有 ETAPI]
   Agent[Windows RTX GPU Agent] -->|私有出站领取| Gateway[私有 Worker Gateway]
   Gateway --> Queue
-  Agent --> ASR[faster-whisper CPU 优先通道]
-  Agent --> LLM[Ollama 3B CUDA]
+  Agent --> ASR[faster-whisper small CUDA float16]
+  Agent --> LLM[Ollama 7B 段落翻译与滚动讲解]
+  Agent --> Summary[Ollama 14B 最终总结]
+  Agent --> VLM[Qwen3-VL 8B 课件理解]
 ```
 
 ## 2 服务器准备
@@ -36,14 +38,17 @@ flowchart TD
 
 ## 3 Windows GPU Agent
 
-默认 ASR 为 `faster-whisper small + CPU int8`，使用 12 个线程和高于普通桌面程序的调度优先级，RTX 4080 专门运行 3B 翻译与讲解模型：
+默认 ASR 为 `faster-whisper small + CUDA float16`，7B 模型处理连贯段落翻译和滚动讲解，14B 模型处理停止后的最终总结，Qwen3-VL 8B 在实时队列排空后处理图片：
 
 ```powershell
-ollama pull qwen2.5:3b-instruct
-setx OLLAMA_NUM_PARALLEL 2
+ollama pull qwen2.5:7b-instruct # Coherent paragraph translation and rolling explanations
+ollama pull qwen2.5:14b-instruct # Final course summaries only
+ollama pull qwen3-vl:8b-instruct
 ```
 
-设置后先重新启动 Ollama，再启动模型 Worker 和 GPU Agent
+本机守护脚本会验证模型、主动启动 Ollama、完成 ASR 与 7B 预热，再让 GPU Agent 领取生产任务
+
+ASR 拥有最高优先级，7B 翻译和滚动讲解只接收服务端整理后的连贯段落，14B 最终总结和视觉模型保持低优先级单并发并按需卸载，避免多个大模型无约束常驻 16 GB 显存
 
 先初始化一个随机令牌，服务器只保存它的 SHA-256 摘要：
 

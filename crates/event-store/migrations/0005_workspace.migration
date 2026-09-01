@@ -1,0 +1,95 @@
+-- User folders organize projects without changing stable project identifiers.
+CREATE TABLE workspace_folders (
+    id TEXT PRIMARY KEY,
+    owner_subject TEXT NOT NULL,
+    parent_id TEXT REFERENCES workspace_folders(id),
+    title TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1,
+    archived_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_workspace_folders_owner_parent
+    ON workspace_folders(owner_subject, parent_id, archived_at, sort_order, title);
+
+-- Placement metadata remains separate so legacy project rows keep their original shape.
+CREATE TABLE workspace_project_placements (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id),
+    folder_id TEXT REFERENCES workspace_folders(id),
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    archived_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+-- Session metadata adds workspace behavior without duplicating session facts.
+CREATE TABLE workspace_session_metadata (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+    pinned INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    archived_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+-- Navigation state is device-scoped so one observer cannot move another device.
+CREATE TABLE workspace_device_preferences (
+    owner_subject TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    active_project_id TEXT REFERENCES projects(id),
+    active_session_id TEXT REFERENCES sessions(id),
+    language_view TEXT NOT NULL DEFAULT 'bilingual'
+        CHECK (language_view IN ('bilingual', 'source', 'translation')),
+    sidebar_collapsed INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(owner_subject, device_id)
+);
+
+-- Owner-scoped cursors synchronize folder and placement changes across devices.
+CREATE TABLE workspace_updates (
+    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_subject TEXT NOT NULL,
+    update_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_workspace_updates_owner_cursor
+    ON workspace_updates(owner_subject, cursor);
+
+-- Cloud use stays disabled until a project records an explicit per-item authorization.
+CREATE TABLE project_ai_policies (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id),
+    cloud_enabled INTEGER NOT NULL DEFAULT 0,
+    allowed_modalities_json TEXT NOT NULL DEFAULT '[]',
+    local_translation_model TEXT NOT NULL DEFAULT 'qwen2.5:7b-instruct',
+    local_explanation_model TEXT NOT NULL DEFAULT 'qwen2.5:7b-instruct',
+    local_summary_model TEXT NOT NULL DEFAULT 'qwen2.5:14b-instruct',
+    local_vision_model TEXT NOT NULL DEFAULT 'qwen3-vl:8b-instruct',
+    updated_at TEXT NOT NULL
+);
+
+-- Branch metadata supports moving a ReadWeave note without replacing its note ID.
+CREATE TABLE remote_object_details (
+    connector TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    local_id TEXT NOT NULL,
+    remote_branch_id TEXT,
+    node_type TEXT,
+    last_synced_version INTEGER,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(connector, object_type, local_id),
+    FOREIGN KEY(connector, object_type, local_id)
+        REFERENCES remote_object_maps(connector, object_type, local_id)
+        ON DELETE CASCADE
+);
+
+-- Existing projects and sessions enter the root workspace without duplication.
+INSERT OR IGNORE INTO workspace_project_placements(project_id, updated_at)
+SELECT id, updated_at FROM projects;
+
+INSERT OR IGNORE INTO workspace_session_metadata(session_id, updated_at)
+SELECT id, updated_at FROM sessions;
+
+INSERT OR IGNORE INTO project_ai_policies(project_id, updated_at)
+SELECT id, updated_at FROM projects;

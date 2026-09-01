@@ -142,6 +142,46 @@ location of your Java installation."
     fi
 fi
 
+# The public source tree stores the standard wrapper as Base64 text so the
+# publication gate can inspect every tracked byte. Decode it into the user's
+# Gradle cache and verify the exact public artifact before execution.
+WRAPPER_EXPECTED_SHA256=7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172
+WRAPPER_SOURCE=$APP_HOME/gradle/wrapper/gradle-wrapper.jar.b64
+WRAPPER_CACHE_ROOT=${GRADLE_USER_HOME:-${HOME:-/tmp}/.gradle}/caches/aialra-wrapper
+WRAPPER_JAR=$WRAPPER_CACHE_ROOT/gradle-wrapper-$WRAPPER_EXPECTED_SHA256.jar
+WRAPPER_PROPERTIES=$WRAPPER_CACHE_ROOT/gradle-wrapper-$WRAPPER_EXPECTED_SHA256.properties
+if [ ! -f "$WRAPPER_JAR" ]; then
+    mkdir -p "$WRAPPER_CACHE_ROOT" || die "Unable to create the Gradle wrapper cache."
+    WRAPPER_TEMP=$WRAPPER_JAR.$$.tmp
+    if command -v base64 >/dev/null 2>&1; then
+        base64 --decode "$WRAPPER_SOURCE" > "$WRAPPER_TEMP" 2>/dev/null ||
+            base64 -D "$WRAPPER_SOURCE" > "$WRAPPER_TEMP" 2>/dev/null ||
+            die "Unable to decode the Gradle wrapper artifact."
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl base64 -d -A -in "$WRAPPER_SOURCE" -out "$WRAPPER_TEMP" ||
+            die "Unable to decode the Gradle wrapper artifact."
+    else
+        die "A Base64 decoder is required to restore the Gradle wrapper artifact."
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        WRAPPER_ACTUAL_SHA256=$(sha256sum "$WRAPPER_TEMP" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        WRAPPER_ACTUAL_SHA256=$(shasum -a 256 "$WRAPPER_TEMP" | awk '{print $1}')
+    else
+        rm -f "$WRAPPER_TEMP"
+        die "A SHA-256 verifier is required to restore the Gradle wrapper artifact."
+    fi
+    if [ "$WRAPPER_ACTUAL_SHA256" != "$WRAPPER_EXPECTED_SHA256" ]; then
+        rm -f "$WRAPPER_TEMP"
+        die "The decoded Gradle wrapper artifact failed SHA-256 verification."
+    fi
+    mv -f "$WRAPPER_TEMP" "$WRAPPER_JAR" || die "Unable to activate the verified Gradle wrapper artifact."
+fi
+if [ ! -f "$WRAPPER_PROPERTIES" ]; then
+    cp "$APP_HOME/gradle/wrapper/gradle-wrapper.properties" "$WRAPPER_PROPERTIES" ||
+        die "Unable to activate the Gradle wrapper properties."
+fi
+
 # Increase the maximum file descriptors if we can.
 if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
     case $MAX_FD in #(
@@ -173,6 +213,7 @@ fi
 if "$cygwin" || "$msys" ; then
     APP_HOME=$( cygpath --path --mixed "$APP_HOME" )
     CLASSPATH=$( cygpath --path --mixed "$CLASSPATH" )
+    WRAPPER_JAR=$( cygpath --path --mixed "$WRAPPER_JAR" )
 
     JAVACMD=$( cygpath --unix "$JAVACMD" )
 
@@ -213,7 +254,7 @@ DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
 set -- \
         "-Dorg.gradle.appname=$APP_BASE_NAME" \
         -classpath "$CLASSPATH" \
-        -jar "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" \
+        -jar "$WRAPPER_JAR" \
         "$@"
 
 # Stop when "xargs" is not available.

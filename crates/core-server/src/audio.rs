@@ -13,14 +13,15 @@ use axum::response::Response;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use uuid::Uuid;
 
 const HEADER_BYTES: usize = 16;
 const SAMPLE_RATE: u32 = 16_000;
 const CHANNELS: u16 = 1;
 const PCM_BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * 2;
-const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 2;
-const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 8;
-const SILENCE_LOOKBACK_BYTES: usize = PCM_BYTES_PER_SECOND;
+const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 3 / 2;
+const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 5;
+const SILENCE_LOOKBACK_BYTES: usize = PCM_BYTES_PER_SECOND * 450 / 1_000;
 const SILENCE_MEAN_ABSOLUTE_PCM: i64 = 550;
 const MAX_FRAME_BYTES: usize = PCM_BYTES_PER_SECOND * 3 + HEADER_BYTES;
 const FIRST_AUDIO_SEQUENCE: u64 = 1;
@@ -77,10 +78,11 @@ async fn handle_socket(
                 }
                 let result = persist_frame(&state, &session_id, &source_id, &frame).await;
                 let response = match result {
-                    Ok((sequence, duplicate)) => json!({
+                    Ok((sequence, duplicate, commit_id)) => json!({
                         "type": "audio.ack",
                         "sequence": sequence,
-                        "duplicate": duplicate
+                        "duplicate": duplicate,
+                        "commit_id": commit_id
                     }),
                     Err(error) => json!({
                         "type": "audio.error",
@@ -110,11 +112,14 @@ async fn persist_frame(
     session_id: &str,
     source_id: &str,
     frame: &[u8],
-) -> anyhow::Result<(u64, bool)> {
+) -> anyhow::Result<(u64, bool, String)> {
     if frame.len() <= HEADER_BYTES || frame.len() > MAX_FRAME_BYTES {
         anyhow::bail!("audio frame has an invalid size");
     }
     let sequence = u64::from_be_bytes(frame[..8].try_into()?);
+    if sequence == 0 {
+        anyhow::bail!("audio sequence must start at one");
+    }
     let captured_at_ms = u64::from_be_bytes(frame[8..16].try_into()?);
     let pcm = &frame[HEADER_BYTES..];
     if !pcm.len().is_multiple_of(2) {
@@ -122,7 +127,7 @@ async fn persist_frame(
     }
     let duration_ms = ((pcm.len() as u64 * 1_000) / (SAMPLE_RATE as u64 * 2)) as u32;
     let stored = state.objects.put(pcm)?;
-    let inserted = state.store.insert_audio_chunk(&AudioChunkRecord {
+    let chunk = AudioChunkRecord {
         session_id: session_id.to_owned(),
         source_id: source_id.to_owned(),
         sequence,
@@ -134,38 +139,54 @@ async fn persist_frame(
         object_hash: stored.hash.clone(),
         size_bytes: stored.size_bytes,
         acknowledged_at: Utc::now(),
-    })?;
+    };
+
+    // The manifest and durable ingest fact share one SQLite transaction.  The
+    // sequence lock also keeps the event cursor stable while concurrent browser
+    // frames arrive on the same source.
+    let _guard = state
+        .sequence_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("sequence lock poisoned"))?;
+    let event_sequence = state.store.next_sequence(session_id, source_id)?;
+    let stable_key = format!("audio:{session_id}:{source_id}:{sequence}");
+    let commit_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, stable_key.as_bytes()).to_string();
+    let mut event = aialra_event_protocol::EventEnvelope::new(
+        session_id,
+        source_id,
+        event_sequence,
+        "audio.chunk.received",
+        captured_at_ms.saturating_mul(1_000_000),
+        &stable_key,
+        None,
+        json!({
+            "sequence": sequence,
+            "object_hash": stored.hash,
+            "size_bytes": stored.size_bytes,
+            "duration_ms": duration_ms,
+            "sample_rate": SAMPLE_RATE,
+            "channels": CHANNELS,
+            "encoding": "pcm_s16le",
+            "durable": true,
+            "commit_id": commit_id
+        }),
+    )?;
+    event.event_id = Uuid::parse_str(&commit_id)?;
+    let inserted = state.store.insert_audio_chunk_and_event(&chunk, &event)?;
+    drop(_guard);
     if inserted {
-        let event = aialra_event_protocol::EventEnvelope::new(
-            session_id,
-            source_id,
-            sequence,
-            "audio.chunk.received",
-            captured_at_ms.saturating_mul(1_000_000),
-            format!("audio_{source_id}_{sequence}"),
-            None,
-            json!({
-                "object_hash": stored.hash,
-                "size_bytes": stored.size_bytes,
-                "duration_ms": duration_ms,
-                "sample_rate": SAMPLE_RATE,
-                "channels": CHANNELS,
-                "encoding": "pcm_s16le"
-            }),
-        )?;
-        if state.store.insert_event(&event)? {
-            let _ = state.events.send(event);
-        }
+        let _ = state.events.send(event.clone());
+        state.record_session_event_update(&event)?;
 
         let _ = state
             .audio_pending
             .send((session_id.to_owned(), source_id.to_owned()));
     }
-    Ok((sequence, !inserted))
+    Ok((sequence, !inserted, commit_id))
 }
 
 fn trailing_audio_is_silent(pcm: &[u8]) -> bool {
-    // One second of low-amplitude PCM closes a phrase without sending its trailing silence onward.
+    // A 450 ms quiet tail closes a phrase after the 1.5 second minimum window.
     let lookback_start = pcm.len().saturating_sub(SILENCE_LOOKBACK_BYTES);
     let trailing = &pcm[lookback_start..];
     let mut total = 0_i64;

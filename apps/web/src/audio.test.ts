@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeFrame, nextFramesToSend, recoverNextSequence, resample } from "./audio";
+import { encodeFrame, isDurableAudioAck, nextFramesToSend, recoverNextSequence, resample } from "./audio";
 
 describe("audio transport", () => {
   it("encodes sequence and capture time as big-endian unsigned integers", () => {
@@ -41,5 +41,13 @@ describe("bounded audio recovery", () => {
 
   it("fills only the remaining acknowledgement window", () => {
     expect(nextFramesToSend([1, 2, 3, 4, 5], [1, 2, 3], 4)).toEqual([4]);
+  });
+});
+
+describe("durable acknowledgement contract", () => {
+  it("accepts only an ACK carrying a non-empty commit id", () => {
+    expect(isDurableAudioAck({ type: "audio.ack", sequence: 3, commit_id: "commit-3" })).toBe(true);
+    expect(isDurableAudioAck({ type: "audio.ack", sequence: 3 })).toBe(false);
+    expect(isDurableAudioAck({ type: "audio.ack", sequence: 0, commit_id: "commit-0" })).toBe(false);
   });
 });

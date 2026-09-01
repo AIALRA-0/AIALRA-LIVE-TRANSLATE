@@ -13,6 +13,7 @@ pub struct AsrResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct TranslationResponse {
+    pub source_text: Option<String>,
     pub text: String,
     pub provider: String,
 }
@@ -42,6 +43,17 @@ pub struct RareTerm {
     pub one_line: String,
     pub evidence_segment_ids: Vec<String>,
     pub asset_page_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SummaryResponse {
+    pub overview: String,
+    pub key_points: Vec<String>,
+    pub terminology: Vec<RareTerm>,
+    pub open_questions: Vec<String>,
+    pub evidence_segment_ids: Vec<String>,
+    pub asset_page_ids: Vec<String>,
+    pub provider: String,
 }
 
 #[derive(Debug, Deserialize)]

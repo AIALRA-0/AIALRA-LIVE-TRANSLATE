@@ -2,6 +2,8 @@ package online.aialra.capture
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -18,5 +20,12 @@ class AudioFrameTest {
         val pcm = ByteArray(4)
         view.get(pcm)
         assertArrayEquals(byteArrayOf(1, 2, 3, 4), pcm)
+    }
+
+    @Test
+    fun onlyDurableAckWithCommitProofDeletesFrame() {
+        assertTrue(isDurableAudioAck("audio.ack", 3L, "commit-3"))
+        assertFalse(isDurableAudioAck("audio.ack", 3L, null))
+        assertFalse(isDurableAudioAck("audio.ack", 0L, "commit-0"))
     }
 }

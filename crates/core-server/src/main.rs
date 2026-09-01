@@ -7,9 +7,11 @@ mod dingtalk;
 mod explanation;
 mod identity;
 mod jobs;
+mod pairing;
 mod projects;
 mod readweave;
 mod worker;
+mod workspace;
 
 use anyhow::{Context, Result};
 use app::AppState;
@@ -51,6 +53,22 @@ async fn main() -> Result<()> {
     // Versioned routes keep device and UI clients compatible across incremental releases.
     let api = Router::new()
         .route("/health", get(api::health))
+        .route("/runtime/status", get(api::health))
+        .route("/workspace", get(workspace::workspace_snapshot))
+        .route("/workspace/stream", get(workspace::stream_workspace))
+        .route("/workspace/folders", post(workspace::create_folder))
+        .route(
+            "/workspace/folders/{folder_id}",
+            axum::routing::patch(workspace::update_folder),
+        )
+        .route(
+            "/workspace/folders/{folder_id}/archive",
+            post(workspace::archive_folder),
+        )
+        .route(
+            "/workspace/preferences/{device_id}",
+            axum::routing::patch(workspace::update_preference),
+        )
         .route(
             "/projects",
             get(projects::list_projects).post(projects::create_project),
@@ -58,6 +76,14 @@ async fn main() -> Result<()> {
         .route(
             "/projects/{project_id}",
             get(projects::get_project).patch(projects::update_project),
+        )
+        .route(
+            "/projects/{project_id}/placement",
+            axum::routing::patch(workspace::update_project_placement),
+        )
+        .route(
+            "/projects/{project_id}/ai-policy",
+            get(workspace::get_ai_policy).patch(workspace::update_ai_policy),
         )
         .route(
             "/projects/{project_id}/stream",
@@ -68,8 +94,24 @@ async fn main() -> Result<()> {
             get(projects::list_project_sessions).post(projects::create_project_session),
         )
         .route(
+            "/projects/{project_id}/sessions/{session_id}",
+            axum::routing::patch(workspace::update_session_metadata),
+        )
+        .route(
+            "/projects/{project_id}/sessions/{session_id}/summary",
+            post(projects::summarize_session),
+        )
+        .route(
+            "/projects/{project_id}/sessions/{session_id}/device-pairing",
+            post(pairing::create_pairing_code),
+        )
+        .route(
             "/projects/{project_id}/readweave",
             get(projects::readweave_status),
+        )
+        .route(
+            "/projects/{project_id}/readweave/targets",
+            get(projects::readweave_targets),
         )
         .route(
             "/projects/{project_id}/readweave/preview",
@@ -131,6 +173,11 @@ async fn main() -> Result<()> {
     tokio::spawn(audio::run_audio_assembler(state.clone()));
 
     // Worker endpoints are blocked at the public proxy and require a second application token.
+    let public_api = Router::new().route(
+        "/device-pairing/exchange",
+        post(pairing::exchange_pairing_code),
+    );
+
     let internal = Router::new()
         .route("/workers/heartbeat", post(jobs::worker_heartbeat))
         .route("/jobs/lease", post(jobs::lease_job))
@@ -142,9 +189,9 @@ async fn main() -> Result<()> {
     // The Rust server serves the compiled React app in packaged mode and returns index.html for client routing.
     let web_dist = PathBuf::from("apps/web/dist");
     let static_files =
-        ServeDir::new(&web_dist).not_found_service(ServeFile::new(web_dist.join("index.html")));
+        ServeDir::new(&web_dist).fallback(ServeFile::new(web_dist.join("index.html")));
     let app = Router::new()
-        .nest("/api/v1", api)
+        .nest("/api/v1", api.merge(public_api))
         .nest("/internal/v1", internal)
         .fallback_service(static_files)
         .layer(TraceLayer::new_for_http())

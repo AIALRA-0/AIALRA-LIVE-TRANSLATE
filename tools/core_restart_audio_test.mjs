@@ -93,7 +93,25 @@ while (Date.now() < completion) {
 const chunks = events.filter((event) => event.event_type === "audio.chunk.received");
 const segments = events.filter((event) => event.event_type === "segment.finalized");
 const ids = segments.map((event) => event.payload.segment_id);
-if (chunks.length !== 2 || segments.length === 0 || ids.length !== new Set(ids).size) {
-  throw new Error(`restart recovery gate failed: chunks=${chunks.length}, segments=${segments.length}`);
+const paragraphs = events.filter((event) => event.event_type === "paragraph.finalized");
+const translations = events.filter((event) => event.event_type === "translation.finalized");
+const summaries = events.filter((event) => event.event_type === "session.summary.created");
+const paragraphIds = paragraphs.map((event) => event.payload.paragraph_id);
+const providersOk = translations.every((event) => event.payload.provider === "ollama:qwen2.5:7b-instruct@cuda")
+  && summaries.every((event) => event.payload.result?.provider === "ollama:qwen2.5:14b-instruct@cuda");
+if (chunks.length !== 2 || segments.length === 0 || ids.length !== new Set(ids).size
+  || paragraphs.length === 0 || paragraphIds.length !== new Set(paragraphIds).size
+  || translations.length !== paragraphs.length || summaries.length !== 1 || !providersOk) {
+  throw new Error(`restart recovery gate failed: chunks=${chunks.length}, segments=${segments.length}, paragraphs=${paragraphs.length}, translations=${translations.length}, summaries=${summaries.length}`);
 }
-process.stdout.write(`${JSON.stringify({ status: "PASS", acknowledged_chunks: chunks.length, stable_segments: segments.length, duplicate_segments: 0, core_restart_observed: true }, null, 2)}\n`);
+process.stdout.write(`${JSON.stringify({
+  status: "PASS",
+  acknowledged_chunks: chunks.length,
+  acoustic_fragments: segments.length,
+  coherent_paragraphs: paragraphs.length,
+  paragraph_translations: translations.length,
+  final_summaries: summaries.length,
+  duplicate_segments: 0,
+  duplicate_paragraphs: 0,
+  core_restart_observed: true,
+}, null, 2)}\n`);

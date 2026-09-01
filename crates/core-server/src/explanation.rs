@@ -16,19 +16,28 @@ pub fn enqueue_explanation(
         .get_session(session_id)?
         .context("session not found")?;
     let events = state.store.list_events(session_id)?;
+    let has_paragraphs = events
+        .iter()
+        .any(|event| event.event_type == "paragraph.finalized");
     let mut segments = events
         .iter()
         .rev()
         .filter_map(|event| {
-            if event.event_type != "segment.finalized" {
+            if event.event_type
+                != if has_paragraphs {
+                    "paragraph.finalized"
+                } else {
+                    "segment.finalized"
+                }
+            {
                 return None;
             }
             Some(json!({
-                "id": event.payload.get("segment_id")?.as_str()?,
+                "id": event.payload.get(if has_paragraphs { "paragraph_id" } else { "segment_id" })?.as_str()?,
                 "text": event.payload.get("text")?.as_str()?
             }))
         })
-        .take(8)
+        .take(6)
         .collect::<Vec<_>>();
     segments.reverse();
     let mut pages = events

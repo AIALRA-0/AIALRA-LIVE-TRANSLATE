@@ -4,6 +4,42 @@ $shellPath = (Get-Process -Id $PID).Path # Child scripts use the same PowerShell
 $workerScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-worker.ps1") # Quote paths because the workspace may contain spaces.
 $agentScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-gpu-agent.ps1")
 $restartDelaySeconds = 1
+$ollamaUrl = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_URL)) { "http://127.0.0.1:11434" } else { $env:AIALRA_OLLAMA_URL.TrimEnd("/") }
+$ollamaModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_MODEL)) { "qwen2.5:7b-instruct" } else { $env:AIALRA_OLLAMA_MODEL }
+$explanationModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_EXPLANATION_MODEL)) { "qwen2.5:7b-instruct" } else { $env:AIALRA_EXPLANATION_MODEL }
+$summaryModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MODEL)) { "qwen2.5:14b-instruct" } else { $env:AIALRA_SUMMARY_MODEL }
+$visionModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_VISION_MODEL)) { "qwen3-vl:8b-instruct" } else { $env:AIALRA_VISION_MODEL }
+# Keep a cold 14B load inside the asynchronous summary lane.  These defaults are
+# intentionally longer than realtime lanes and never create a fallback result.
+if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_TIMEOUT_SECONDS)) { $env:AIALRA_SUMMARY_TIMEOUT_SECONDS = "120" }
+if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS)) { $env:AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS = "150" }
+if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MAX_TOKENS)) { $env:AIALRA_SUMMARY_MAX_TOKENS = "320" }
+$requiredModels = @($ollamaModel, $explanationModel, $summaryModel, $visionModel) | Select-Object -Unique
+
+function Test-OllamaReady {
+    try {
+        $tags = Invoke-RestMethod -Uri "$ollamaUrl/api/tags" -TimeoutSec 5
+        $availableModels = @($tags.models | ForEach-Object name)
+        return @($requiredModels | Where-Object { $_ -notin $availableModels }).Count -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Start-OwnedOllama {
+    if (Test-OllamaReady) { return $null }
+    $command = Get-Command "ollama.exe" -ErrorAction Stop
+    $process = Start-Process -FilePath $command.Source -ArgumentList @("serve") -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
+    $deadline = (Get-Date).AddSeconds(60)
+    do {
+        if ($process.HasExited) { throw "Ollama exited before its local API became ready" }
+        if (Test-OllamaReady) { return $process }
+        Start-Sleep -Seconds 1
+        $process.Refresh()
+    } while ((Get-Date) -lt $deadline)
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    throw "Ollama did not become ready within 60 seconds"
+}
 
 function Initialize-LocalProviders {
     # Load ASR before the agent can lease production audio, then load the GPU LLM,
@@ -17,8 +53,6 @@ function Initialize-LocalProviders {
     } | ConvertTo-Json -Compress
     [void](Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/asr/transcribe" -Method Post -ContentType "application/json" -Body $asrBody -TimeoutSec 120)
 
-    $ollamaUrl = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_URL)) { "http://127.0.0.1:11434" } else { $env:AIALRA_OLLAMA_URL.TrimEnd("/") }
-    $ollamaModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_MODEL)) { "qwen2.5:3b-instruct" } else { $env:AIALRA_OLLAMA_MODEL }
     $ollamaBody = @{
         model = $ollamaModel
         prompt = "Reply OK"
@@ -28,6 +62,14 @@ function Initialize-LocalProviders {
     } | ConvertTo-Json -Depth 4 -Compress
     [void](Invoke-RestMethod -Uri "$ollamaUrl/api/generate" -Method Post -ContentType "application/json" -Body $ollamaBody -TimeoutSec 120)
     [void](Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/asr/transcribe" -Method Post -ContentType "application/json" -Body $asrBody -TimeoutSec 120)
+}
+
+function Stop-OwnedOllama([Diagnostics.Process]$Process) {
+    if ($null -eq $Process) { return }
+    $record = Get-CimInstance Win32_Process -Filter "ProcessId = $($Process.Id)" -ErrorAction SilentlyContinue
+    if ($null -ne $record -and $record.Name -ieq "ollama.exe" -and $record.CommandLine -like "*serve*") {
+        & taskkill.exe /PID $Process.Id /T /F | Out-Null
+    }
 }
 
 function Set-ModelWorkerPriority([Diagnostics.Process]$WorkerWrapper) {
@@ -72,7 +114,9 @@ function Stop-OwnedProcessTree([Diagnostics.Process]$Process, [string]$ExpectedS
 while ($true) {
     $worker = $null
     $agent = $null
+    $ownedOllama = $null
     try {
+        $ownedOllama = Start-OwnedOllama
         $worker = Start-Process -FilePath $shellPath -ArgumentList @("-NoProfile", "-File", $workerScript) -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
         $deadline = (Get-Date).AddSeconds(120)
         $ready = $false
@@ -91,10 +135,21 @@ while ($true) {
 
         $agent = Start-Process -FilePath $shellPath -ArgumentList @("-NoProfile", "-File", $agentScript) -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
         $restartDelaySeconds = 1
+        $ollamaFailures = 0
         while (!$worker.HasExited -and !$agent.HasExited) {
             Start-Sleep -Seconds 2
             $worker.Refresh()
             $agent.Refresh()
+            if ($ownedOllama) {
+                $ownedOllama.Refresh()
+                if ($ownedOllama.HasExited) { throw "Owned Ollama process exited" }
+            }
+            if (Test-OllamaReady) {
+                $ollamaFailures = 0
+            } else {
+                $ollamaFailures += 1
+                if ($ollamaFailures -ge 3) { throw "Ollama local API remained unavailable" }
+            }
         }
         if ($worker.HasExited) { throw "本机模型 Worker 意外退出" }
         throw "本机 GPU Agent 意外退出"
@@ -103,6 +158,7 @@ while ($true) {
     } finally {
         Stop-OwnedProcessTree $agent "run-gpu-agent.ps1" "workers.gpu_agent.main"
         Stop-OwnedProcessTree $worker "run-worker.ps1" "workers.model_worker.main:app"
+        Stop-OwnedOllama $ownedOllama
     }
     Start-Sleep -Seconds $restartDelaySeconds
     $restartDelaySeconds = [Math]::Min(30, $restartDelaySeconds * 2)

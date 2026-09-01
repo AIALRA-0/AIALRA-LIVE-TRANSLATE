@@ -1,16 +1,40 @@
 // This runner downloads a controlled PCM fixture over HTTPS and drives the real GPU pipeline in wall-clock time.
 import WebSocket from "ws";
+import { writeFile } from "node:fs/promises";
 const API = process.env.AIALRA_API_URL || "http://127.0.0.1:8787/api/v1";
 const FIXTURE_URL = process.env.AIALRA_AUDIO_FIXTURE_URL;
 const FIXTURE_PASSWORD = process.env.AIALRA_AUDIO_FIXTURE_PASSWORD;
 const FIXTURE_USERNAME = process.env.AIALRA_AUDIO_FIXTURE_USERNAME || "soak";
 const DURATION_MINUTES = Number(process.env.AIALRA_SOAK_MINUTES || "30");
+const EXTENDED_SOAK_ALLOWED = process.env.AIALRA_ALLOW_EXTENDED_SOAK === "true";
+const MAX_DURATION_MINUTES = EXTENDED_SOAK_ALLOWED ? 1_440 : 120;
 const TEST_SUBJECT = process.env.AIALRA_TEST_SUBJECT || "";
+const PROXY_MARKER = process.env.AIALRA_TEST_PROXY_MARKER === "true";
+const SUMMARY_SYNC_MAX_MS = Number(process.env.AIALRA_SUMMARY_SYNC_MAX_MS || "30000");
+const SUMMARY_ASYNC_MAX_MS = Number(process.env.AIALRA_SUMMARY_ASYNC_MAX_MS || "120000");
+const REQUEST_TIMEOUT_MS = Number(process.env.AIALRA_SOAK_REQUEST_TIMEOUT_MS || "15000");
+const RESULT_PATH = process.env.AIALRA_SOAK_RESULT_PATH;
+let outageUntil = 0;
 const nativeFetch = globalThis.fetch;
+function fetchWithTimeout(input, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return nativeFetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
 globalThis.fetch = (input, init = {}) => {
   const url = String(input);
-  if (!TEST_SUBJECT || !url.startsWith(API)) return nativeFetch(input, init);
-  return nativeFetch(input, { ...init, headers: { ...(init.headers || {}), "X-authentik-uid": TEST_SUBJECT } });
+  if (url.startsWith(API) && Date.now() < outageUntil) {
+    return Promise.reject(new TypeError("injected client network outage"));
+  }
+  if (!TEST_SUBJECT || !url.startsWith(API)) return fetchWithTimeout(input, init);
+  return fetchWithTimeout(input, {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      "X-authentik-uid": TEST_SUBJECT,
+      ...(PROXY_MARKER ? { "X-aialra-Auth-Proxy": "1" } : {}),
+    },
+  });
 };
 const OUTAGES = (process.env.AIALRA_SOAK_OUTAGES || "120:5,600:15,1200:60")
   .split(",")
@@ -22,8 +46,14 @@ if (!FIXTURE_URL?.startsWith("https://")) {
 }
 if (!FIXTURE_PASSWORD) throw new Error("AIALRA_AUDIO_FIXTURE_PASSWORD is required");
 if (!/^[a-z0-9_-]{1,32}$/i.test(FIXTURE_USERNAME)) throw new Error("invalid controlled fixture username");
-if (!Number.isFinite(DURATION_MINUTES) || DURATION_MINUTES <= 0 || DURATION_MINUTES > 120) {
-  throw new Error("AIALRA_SOAK_MINUTES must be between 0 and 120");
+if (!Number.isFinite(DURATION_MINUTES) || DURATION_MINUTES <= 0 || DURATION_MINUTES > MAX_DURATION_MINUTES) {
+  throw new Error(`AIALRA_SOAK_MINUTES must be between 0 and ${MAX_DURATION_MINUTES}`);
+}
+if (!Number.isFinite(SUMMARY_SYNC_MAX_MS) || SUMMARY_SYNC_MAX_MS <= 0 || !Number.isFinite(SUMMARY_ASYNC_MAX_MS) || SUMMARY_ASYNC_MAX_MS < SUMMARY_SYNC_MAX_MS) {
+  throw new Error("summary latency budgets are invalid");
+}
+if (!Number.isFinite(REQUEST_TIMEOUT_MS) || REQUEST_TIMEOUT_MS < 1_000 || REQUEST_TIMEOUT_MS > 120_000) {
+  throw new Error("soak request timeout is invalid");
 }
 
 async function checked(responsePromise) {
@@ -67,7 +97,10 @@ const fixtureResponse = await fetch(FIXTURE_URL, {
   headers: { Authorization: `Basic ${Buffer.from(`${FIXTURE_USERNAME}:${FIXTURE_PASSWORD}`).toString("base64")}` },
 });
 if (!fixtureResponse.ok) throw new Error(`fixture download failed: ${fixtureResponse.status}`);
-const fixture = pcmFromWave(Buffer.from(await fixtureResponse.arrayBuffer()));
+const fixtureBytes = Buffer.from(await fixtureResponse.arrayBuffer());
+const fixtureContentSha256 = await crypto.subtle.digest("SHA-256", fixtureBytes)
+  .then((value) => Buffer.from(value).toString("hex"));
+const fixture = pcmFromWave(fixtureBytes);
 if (fixture.length < 32_000) throw new Error("network fixture must contain at least one second of PCM16 audio");
 
 const project = await checked(fetch(`${API}/projects`, {
@@ -93,42 +126,110 @@ const wsBase = API.replace(/^http/, "ws").replace(/\/api\/v1$/, "");
 const pending = new Map();
 const sentAt = new Map();
 const acknowledged = new Set();
+const acknowledgementCommitIds = new Map();
 const acknowledgementLatencyMs = [];
+const normalAcknowledgementLatencyMs = [];
+const outageAffectedSequences = new Set();
+const outageAcknowledgementLatencyMs = [];
 let socket;
 let reconnectAllowed = true;
 let reconnectTimer;
-let outageUntil = 0;
 let socketFailure;
 let renewFailure;
+let renewalInFlight = false;
+let renewalTransportFailures = 0;
+
+async function renewLease() {
+  if (renewalInFlight) return false;
+  renewalInFlight = true;
+  try {
+    const response = await fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/renew`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
+    });
+    if (!response.ok) {
+      renewFailure = new Error(`${response.status} ${await response.text()}`);
+      return false;
+    }
+    await response.json();
+    renewFailure = undefined;
+    return true;
+  } catch {
+    // A transport failure is expected while an outage is being injected. The next tick retries
+    // the same lease, while a real lease rejection remains fatal through the non-2xx branch.
+    renewalTransportFailures += 1;
+    return false;
+  } finally {
+    renewalInFlight = false;
+  }
+}
+
+async function reconnectWithRenewedLease() {
+  if (!reconnectAllowed || socket?.readyState === WebSocket.OPEN) return;
+  if (Date.now() < outageUntil) {
+    reconnectTimer = setTimeout(() => { void reconnectWithRenewedLease(); }, Math.max(1_000, outageUntil - Date.now()));
+    return;
+  }
+  if (await renewLease()) {
+    connect();
+  } else if (!renewFailure) {
+    reconnectTimer = setTimeout(() => { void reconnectWithRenewedLease(); }, 1_000);
+  }
+}
 
 function connect() {
   if (!reconnectAllowed || Date.now() < outageUntil) return;
-  socket = new WebSocket(`${wsBase}/api/v1/sessions/${session.id}/sources/network-soak/audio`, ["aialra.audio.v1", `lease.${lease.lease_token}`], TEST_SUBJECT ? { headers: { "X-authentik-uid": TEST_SUBJECT } } : undefined);
+  socket = new WebSocket(
+    `${wsBase}/api/v1/sessions/${session.id}/sources/network-soak/audio`,
+    ["aialra.audio.v1", `lease.${lease.lease_token}`],
+    TEST_SUBJECT
+      ? {
+          headers: {
+            "X-authentik-uid": TEST_SUBJECT,
+            ...(PROXY_MARKER ? { "X-aialra-Auth-Proxy": "1" } : {}),
+          },
+        }
+      : undefined,
+  );
   socket.onopen = () => pending.forEach((value) => socket.send(value));
   socket.onmessage = (message) => {
     const value = JSON.parse(String(message.data));
     if (value.type === "audio.error") socketFailure = new Error(value.message);
     if (value.type === "audio.ack") {
-      acknowledged.add(value.sequence);
-      const started = sentAt.get(value.sequence);
-      if (started) acknowledgementLatencyMs.push(Date.now() - started);
-      pending.delete(value.sequence);
-      sentAt.delete(value.sequence);
+      const sequenceNumber = Number(value.sequence);
+      if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber <= 0 || typeof value.commit_id !== "string" || value.commit_id.length === 0) {
+        socketFailure = new Error("durable ACK is missing a valid sequence or commit_id");
+        return;
+      }
+      const previousCommitId = acknowledgementCommitIds.get(sequenceNumber);
+      if (previousCommitId && previousCommitId !== value.commit_id) {
+        socketFailure = new Error(`durable ACK commit changed for sequence ${sequenceNumber}`);
+        return;
+      }
+      acknowledgementCommitIds.set(sequenceNumber, value.commit_id);
+      acknowledged.add(sequenceNumber);
+      const started = sentAt.get(sequenceNumber);
+      if (started) {
+        const latencyMs = Date.now() - started;
+        acknowledgementLatencyMs.push(latencyMs);
+        if (outageAffectedSequences.has(sequenceNumber)) {
+          outageAcknowledgementLatencyMs.push(latencyMs);
+        } else {
+          normalAcknowledgementLatencyMs.push(latencyMs);
+        }
+      }
+      pending.delete(sequenceNumber);
+      sentAt.delete(sequenceNumber);
     }
   };
   socket.onclose = () => {
     if (!reconnectAllowed) return;
-    reconnectTimer = setTimeout(connect, Math.max(1_000, outageUntil - Date.now()));
+    reconnectTimer = setTimeout(() => { void reconnectWithRenewedLease(); }, Math.max(1_000, outageUntil - Date.now()));
   };
 }
 
 connect();
-const renewTimer = setInterval(async () => {
-  await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/renew`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
-  })).catch((error) => { renewFailure = error; });
-}, 10_000);
+const renewTimer = setInterval(() => { void renewLease(); }, 2_000);
 
 const startedAt = Date.now();
 const deadline = startedAt + DURATION_MINUTES * 60_000;
@@ -143,15 +244,17 @@ while (Date.now() < deadline) {
     if (elapsedSeconds >= at && !firedOutages.has(at)) {
       firedOutages.add(at);
       outageUntil = Date.now() + duration * 1_000;
+      pending.forEach((_, pendingSequence) => outageAffectedSequences.add(pendingSequence));
       socket?.close(1012, "injected network outage");
     }
   }
-  if (Date.now() >= outageUntil && (!socket || socket.readyState === WebSocket.CLOSED)) connect();
+  if (Date.now() >= outageUntil && (!socket || socket.readyState === WebSocket.CLOSED)) await reconnectWithRenewedLease();
   if (fixtureOffset + 32_000 > fixture.length) fixtureOffset = 0;
   const value = frame(sequence, fixture.subarray(fixtureOffset, fixtureOffset + 32_000));
   fixtureOffset += 32_000;
   pending.set(sequence, value);
   sentAt.set(sequence, Date.now());
+  if (Date.now() < outageUntil) outageAffectedSequences.add(sequence);
   if (socket?.readyState === WebSocket.OPEN) socket.send(value);
   sequence += 1;
   await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -159,7 +262,7 @@ while (Date.now() < deadline) {
 
 const ackDeadline = Date.now() + 180_000;
 while (pending.size > 0 && Date.now() < ackDeadline) {
-  if (!socket || socket.readyState === WebSocket.CLOSED) connect();
+  if (!socket || socket.readyState === WebSocket.CLOSED) await reconnectWithRenewedLease();
   if (socket?.readyState === WebSocket.OPEN) pending.forEach((value) => socket.send(value));
   await new Promise((resolve) => setTimeout(resolve, 1_000));
 }
@@ -185,11 +288,21 @@ while (Date.now() < completionDeadline) {
 const segments = events.filter((event) => event.event_type === "segment.finalized");
 const segmentIds = segments.map((event) => event.payload.segment_id);
 const duplicateSegments = segmentIds.length - new Set(segmentIds).size;
+const paragraphs = events.filter((event) => event.event_type === "paragraph.finalized");
+const paragraphIds = paragraphs.map((event) => event.payload.paragraph_id);
+const duplicateParagraphs = paragraphIds.length - new Set(paragraphIds).size;
 const failedJobs = events.filter((event) => event.event_type === "model.job.failed");
 const oomEvents = failedJobs.filter((event) => String(event.payload.error_kind || "").toLowerCase().includes("oom"));
 const finalState = events.findLast((event) => ["session.completed", "session.failed"].includes(event.event_type))?.event_type || "timeout";
 const translations = events.filter((event) => event.event_type === "translation.finalized");
+const normalizedSources = translations.filter((event) => typeof event.payload.source_text === "string" && event.payload.source_text.trim().length > 0);
 const explanations = events.filter((event) => event.event_type === "explanation.card.created");
+const summaries = events.filter((event) => event.event_type === "session.summary.created");
+const coherentTextChars = paragraphs.reduce((total, event) => total + String(event.payload.text || "").length, 0);
+const explanationExpected = paragraphs.length >= 4 && coherentTextChars >= 900;
+const translationProviders = [...new Set(translations.map((event) => event.payload.provider).filter(Boolean))];
+const explanationProviders = [...new Set(explanations.map((event) => event.payload.result?.provider).filter(Boolean))];
+const summaryProviders = [...new Set(summaries.map((event) => event.payload.result?.provider).filter(Boolean))];
 const percentile = (values, quantile) => {
   if (!values.length) return null;
   const sorted = [...values].sort((left, right) => left - right);
@@ -200,28 +313,64 @@ const stageLatency = (eventType) => events.filter((event) => event.event_type ==
 const asrP95 = percentile(stageLatency("segment.finalized"), 0.95);
 const translationP95 = percentile(stageLatency("translation.finalized"), 0.95);
 const explanationP95 = percentile(stageLatency("explanation.card.created"), 0.95);
-if (duplicateSegments !== 0 || oomEvents.length !== 0 || finalState !== "session.completed") throw new Error(`long-run result gate failed: final=${finalState}, duplicates=${duplicateSegments}, oom=${oomEvents.length}`);
-if (segments.length === 0 || translations.length === 0 || explanations.length === 0) throw new Error("real model pipeline produced an empty final stage");
-if ((asrP95 ?? Infinity) > 3_000 || (translationP95 ?? Infinity) > 8_000 || (explanationP95 ?? Infinity) > 20_000) {
-  throw new Error(`latency gate failed: asr=${asrP95}, translation=${translationP95}, explanation=${explanationP95}`);
-}
-
-process.stdout.write(`${JSON.stringify({
-  status: "PASS",
+const summaryP95 = percentile(stageLatency("session.summary.created"), 0.95);
+const normalAudioAckP95 = percentile(normalAcknowledgementLatencyMs, 0.95);
+const gateFailures = [];
+if (duplicateSegments !== 0 || duplicateParagraphs !== 0 || oomEvents.length !== 0 || finalState !== "session.completed") gateFailures.push("integrity");
+if (segments.length === 0 || paragraphs.length === 0 || translations.length === 0 || summaries.length !== 1 || (explanationExpected && explanations.length === 0)) gateFailures.push("empty_real_stage");
+if (translations.length !== paragraphs.length || paragraphs.length >= segments.length) gateFailures.push("paragraph_assembly");
+if (normalizedSources.length !== translations.length) gateFailures.push("source_normalization");
+if (explanations.length > Math.ceil(paragraphs.length / 4)) gateFailures.push("explanation_burst");
+if (!translationProviders.every((provider) => provider === "ollama:qwen2.5:7b-instruct@cuda")) gateFailures.push("translation_provider");
+if (!explanationProviders.every((provider) => provider === "ollama:qwen2.5:7b-instruct@cuda")) gateFailures.push("explanation_provider");
+if (!summaryProviders.every((provider) => provider === "ollama:qwen2.5:14b-instruct@cuda")) gateFailures.push("summary_provider");
+const summaryLatencyMode = summaryP95 == null
+  ? "missing"
+  : summaryP95 <= SUMMARY_SYNC_MAX_MS
+    ? "synchronous"
+    : summaryP95 <= SUMMARY_ASYNC_MAX_MS
+      ? "asynchronous"
+      : "over_budget";
+if ((normalAudioAckP95 ?? Infinity) > 500 || (asrP95 ?? Infinity) > 3_000 || (translationP95 ?? Infinity) > 8_000 || (explanationExpected && (explanationP95 ?? Infinity) > 20_000) || (summaryP95 ?? Infinity) > SUMMARY_ASYNC_MAX_MS) gateFailures.push("latency");
+const result = {
+  status: gateFailures.length === 0 ? "PASS" : "FAIL",
+  gate_failures: gateFailures,
   duration_minutes: DURATION_MINUTES,
-  fixture_url_sha256: await crypto.subtle.digest("SHA-256", new TextEncoder().encode(FIXTURE_URL)).then((value) => Buffer.from(value).toString("hex")),
+  fixture_content_sha256: fixtureContentSha256,
   sent_chunks: sequence - 1,
   acknowledged_chunks: acknowledged.size,
   pending_chunks: pending.size,
-  audio_ack_p95_ms: percentile(acknowledgementLatencyMs, 0.95),
+  audio_ack_p95_ms: normalAudioAckP95,
+  audio_ack_all_p95_ms: percentile(acknowledgementLatencyMs, 0.95),
+  audio_ack_outage_affected_p95_ms: percentile(outageAcknowledgementLatencyMs, 0.95),
   injected_outages: [...firedOutages],
-  stable_segments: segments.length,
-  stable_translations: translations.length,
-  explanation_cards: explanations.length,
+  renewal_transport_failures: renewalTransportFailures,
+  acoustic_fragments: segments.length,
+  coherent_paragraphs: paragraphs.length,
+  coherent_text_chars: coherentTextChars,
+  explanation_expected: explanationExpected,
+  paragraph_translations: translations.length,
+  normalized_sources: normalizedSources.length,
+  teaching_blocks: explanations.length,
+  final_summaries: summaries.length,
   asr_p95_ms: asrP95,
   translation_p95_ms: translationP95,
   explanation_p95_ms: explanationP95,
+  summary_p95_ms: summaryP95,
+  summary_latency_mode: summaryLatencyMode,
+  summary_sync_budget_ms: SUMMARY_SYNC_MAX_MS,
+  summary_async_budget_ms: SUMMARY_ASYNC_MAX_MS,
   duplicate_segments: duplicateSegments,
+  duplicate_paragraphs: duplicateParagraphs,
   gpu_oom_events: oomEvents.length,
+  translation_providers: translationProviders,
+  explanation_providers: explanationProviders,
+  summary_providers: summaryProviders,
   final_state: finalState,
-}, null, 2)}\n`);
+};
+const resultText = `${JSON.stringify(result, null, 2)}\n`;
+if (RESULT_PATH) await writeFile(RESULT_PATH, resultText, "utf8");
+process.stdout.write(resultText);
+if (gateFailures.length !== 0) {
+  throw new Error(`long-run gates failed: ${gateFailures.join(",")}`);
+}
