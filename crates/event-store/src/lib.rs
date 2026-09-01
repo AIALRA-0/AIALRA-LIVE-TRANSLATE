@@ -21,6 +21,8 @@ const SUMMARY_MODEL_GATE_MIGRATION: &str =
     include_str!("../migrations/0007_summary_model_gate.migration");
 const QUALITY_PIPELINE_MIGRATION: &str =
     include_str!("../migrations/0008_quality_pipeline.migration");
+const WORKSPACE_TRASH_MIGRATION: &str =
+    include_str!("../migrations/0009_workspace_trash.migration");
 
 // The duplicate-event check reads the immutable identity and lineage fields
 // together so a retransmission can be compared without silently widening its
@@ -145,6 +147,22 @@ impl EventStore {
                 .context("apply quality pipeline migration")?;
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (8, ?1)",
+                [Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
+        let workspace_trash_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 9)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !workspace_trash_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(WORKSPACE_TRASH_MIGRATION)
+                .context("apply workspace trash migration")?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (9, ?1)",
                 [Utc::now().to_rfc3339()],
             )?;
             transaction.commit()?;
@@ -547,6 +565,271 @@ impl EventStore {
             [session_id],
             map_workspace_session_metadata,
         ).context("query workspace session metadata")
+    }
+
+    pub fn list_workspace_trash(
+        &self,
+        owner_subject: &str,
+    ) -> Result<Vec<WorkspaceTrashItemRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT owner_subject, entity_type, entity_id, original_parent_id, original_project_id, original_sort_order, original_pinned, deleted_at FROM workspace_trash_items WHERE owner_subject = ?1 ORDER BY deleted_at DESC, entity_type, entity_id",
+        )?;
+        Ok(statement
+            .query_map([owner_subject], map_workspace_trash_item)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Move a complete workspace selection into the recoverable recycle bin atomically.
+    pub fn trash_workspace_items(&self, items: &[NewWorkspaceTrashItem]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        for item in items {
+            transaction.execute(
+                "INSERT OR IGNORE INTO workspace_trash_items(owner_subject, entity_type, entity_id, original_parent_id, original_project_id, original_sort_order, original_pinned, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    item.owner_subject,
+                    item.entity_type,
+                    item.entity_id,
+                    item.original_parent_id,
+                    item.original_project_id,
+                    item.original_sort_order,
+                    item.original_pinned,
+                    now,
+                ],
+            )?;
+            match item.entity_type.as_str() {
+                "folder" => {
+                    transaction.execute(
+                        "UPDATE workspace_folders SET archived_at = ?2, version = version + 1, updated_at = ?2 WHERE id = ?1 AND owner_subject = ?3",
+                        params![item.entity_id, now, item.owner_subject],
+                    )?;
+                }
+                "project" => {
+                    transaction.execute(
+                        "UPDATE workspace_project_placements SET archived_at = ?2, updated_at = ?2 WHERE project_id = ?1",
+                        params![item.entity_id, now],
+                    )?;
+                }
+                "session" => {
+                    transaction.execute(
+                        "UPDATE workspace_session_metadata SET archived_at = ?2, updated_at = ?2 WHERE session_id = ?1",
+                        params![item.entity_id, now],
+                    )?;
+                }
+                _ => bail!("unsupported workspace trash entity type"),
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Restore a selected subtree while preserving its original location when it still exists.
+    pub fn restore_workspace_items(
+        &self,
+        owner_subject: &str,
+        items: &[WorkspaceTrashItemRecord],
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let restored = items
+            .iter()
+            .map(|item| (item.entity_type.as_str(), item.entity_id.as_str()))
+            .collect::<std::collections::HashSet<_>>();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        for item in items.iter().filter(|item| item.entity_type == "folder") {
+            let parent = item.original_parent_id.as_deref().filter(|parent| {
+                restored.contains(&("folder", *parent))
+                    || transaction
+                        .query_row(
+                            "SELECT archived_at IS NULL FROM workspace_folders WHERE id = ?1 AND owner_subject = ?2",
+                            params![parent, owner_subject],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false)
+            });
+            transaction.execute(
+                "UPDATE workspace_folders SET parent_id = ?2, sort_order = ?3, archived_at = NULL, version = version + 1, updated_at = ?4 WHERE id = ?1 AND owner_subject = ?5",
+                params![item.entity_id, parent, item.original_sort_order, Utc::now().to_rfc3339(), owner_subject],
+            )?;
+        }
+        for item in items.iter().filter(|item| item.entity_type == "project") {
+            let folder = item.original_parent_id.as_deref().filter(|parent| {
+                restored.contains(&("folder", *parent))
+                    || transaction
+                        .query_row(
+                            "SELECT archived_at IS NULL FROM workspace_folders WHERE id = ?1 AND owner_subject = ?2",
+                            params![parent, owner_subject],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false)
+            });
+            transaction.execute(
+                "UPDATE workspace_project_placements SET folder_id = ?2, sort_order = ?3, archived_at = NULL, updated_at = ?4 WHERE project_id = ?1",
+                params![item.entity_id, folder, item.original_sort_order, Utc::now().to_rfc3339()],
+            )?;
+        }
+        for item in items.iter().filter(|item| item.entity_type == "session") {
+            transaction.execute(
+                "UPDATE workspace_session_metadata SET pinned = ?2, sort_order = ?3, archived_at = NULL, updated_at = ?4 WHERE session_id = ?1",
+                params![item.entity_id, item.original_pinned, item.original_sort_order, Utc::now().to_rfc3339()],
+            )?;
+        }
+        for item in items {
+            transaction.execute(
+                "DELETE FROM workspace_trash_items WHERE owner_subject = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![owner_subject, item.entity_type, item.entity_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Permanently remove one owner-scoped selection and return candidate object hashes.
+    pub fn purge_workspace_items(
+        &self,
+        owner_subject: &str,
+        folder_ids: &[String],
+        project_ids: &[String],
+        session_ids: &[String],
+    ) -> Result<Vec<String>> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let mut object_hashes = Vec::new();
+        for session_id in session_ids {
+            collect_session_object_hashes(&transaction, session_id, &mut object_hashes)?;
+        }
+        for session_id in session_ids {
+            transaction.execute(
+                "DELETE FROM project_updates WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM connector_jobs WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute("DELETE FROM model_jobs WHERE session_id = ?1", [session_id])?;
+            transaction.execute(
+                "DELETE FROM device_pairing_codes WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM device_credentials WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM recording_leases WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM audio_assembly_cursors WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM audio_windows WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM audio_chunks WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM asset_pages WHERE asset_id IN (SELECT id FROM assets WHERE session_id = ?1)",
+                [session_id],
+            )?;
+            transaction.execute("DELETE FROM assets WHERE session_id = ?1", [session_id])?;
+            transaction.execute("DELETE FROM events WHERE session_id = ?1", [session_id])?;
+            transaction.execute(
+                "DELETE FROM workspace_device_preferences WHERE active_session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM workspace_session_metadata WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM project_sessions WHERE session_id = ?1",
+                [session_id],
+            )?;
+            transaction.execute("DELETE FROM sessions WHERE id = ?1", [session_id])?;
+            transaction.execute(
+                "DELETE FROM remote_object_maps WHERE local_id = ?1 OR local_id LIKE (?1 || ':%')",
+                [session_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM workspace_trash_items WHERE owner_subject = ?1 AND entity_type = 'session' AND entity_id = ?2",
+                params![owner_subject, session_id],
+            )?;
+        }
+        for project_id in project_ids {
+            transaction.execute(
+                "DELETE FROM project_updates WHERE project_id = ?1",
+                [project_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM connector_jobs WHERE project_id = ?1",
+                [project_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM recording_leases WHERE project_id = ?1",
+                [project_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM workspace_device_preferences WHERE active_project_id = ?1",
+                [project_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM project_ai_policies WHERE project_id = ?1",
+                [project_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM workspace_project_placements WHERE project_id = ?1",
+                [project_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM remote_object_maps WHERE object_type = 'project' AND local_id = ?1",
+                [project_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM workspace_trash_items WHERE owner_subject = ?1 AND entity_type = 'project' AND entity_id = ?2",
+                params![owner_subject, project_id],
+            )?;
+            transaction.execute("DELETE FROM projects WHERE id = ?1", [project_id])?;
+        }
+        // workspace_folders is self-referential without ON DELETE CASCADE;
+        // delete descendants before their restored parent to keep the purge
+        // transaction valid for nested recycle-bin selections.
+        for folder_id in folder_ids.iter().rev() {
+            transaction.execute("DELETE FROM remote_object_maps WHERE object_type = 'workspace_folder' AND local_id = ?1", [folder_id])?;
+            transaction.execute(
+                "DELETE FROM workspace_trash_items WHERE owner_subject = ?1 AND entity_type = 'folder' AND entity_id = ?2",
+                params![owner_subject, folder_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM workspace_folders WHERE id = ?1 AND owner_subject = ?2",
+                params![folder_id, owner_subject],
+            )?;
+        }
+        transaction.commit()?;
+        object_hashes.sort();
+        object_hashes.dedup();
+        Ok(object_hashes)
+    }
+
+    pub fn object_hash_is_referenced(&self, object_hash: &str) -> Result<bool> {
+        let connection = self.lock()?;
+        let count: u64 = connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM audio_chunks WHERE object_hash = ?1) + (SELECT COUNT(*) FROM audio_windows WHERE object_hash = ?1) + (SELECT COUNT(*) FROM assets WHERE object_hash = ?1) + (SELECT COUNT(*) FROM asset_pages WHERE object_hash = ?1) + (SELECT COUNT(*) FROM model_jobs WHERE input_object_hash = ?1)",
+            [object_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn get_workspace_preference(
@@ -1785,6 +2068,29 @@ pub struct WorkspaceSessionMetadataRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewWorkspaceTrashItem {
+    pub owner_subject: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub original_parent_id: Option<String>,
+    pub original_project_id: Option<String>,
+    pub original_sort_order: i64,
+    pub original_pinned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceTrashItemRecord {
+    pub owner_subject: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub original_parent_id: Option<String>,
+    pub original_project_id: Option<String>,
+    pub original_sort_order: i64,
+    pub original_pinned: bool,
+    pub deleted_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceDevicePreferenceRecord {
     pub owner_subject: String,
@@ -2030,6 +2336,27 @@ pub struct WorkerNodeRecord {
     pub last_seen_at: DateTime<Utc>,
 }
 
+fn collect_session_object_hashes(
+    transaction: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    hashes: &mut Vec<String>,
+) -> Result<()> {
+    for query in [
+        "SELECT object_hash FROM audio_chunks WHERE session_id = ?1",
+        "SELECT object_hash FROM audio_windows WHERE session_id = ?1",
+        "SELECT object_hash FROM assets WHERE session_id = ?1",
+        "SELECT ap.object_hash FROM asset_pages ap JOIN assets a ON a.id = ap.asset_id WHERE a.session_id = ?1 AND ap.object_hash IS NOT NULL",
+        "SELECT input_object_hash FROM model_jobs WHERE session_id = ?1 AND input_object_hash IS NOT NULL",
+    ] {
+        let mut statement = transaction.prepare(query)?;
+        let values = statement
+            .query_map([session_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        hashes.extend(values);
+    }
+    Ok(())
+}
+
 fn state_name(state: SessionState) -> &'static str {
     match state {
         SessionState::Created => "created",
@@ -2148,6 +2475,19 @@ fn map_workspace_session_metadata(
         sort_order: row.get(2)?,
         archived_at: archived.map(parse_time).transpose()?,
         updated_at: parse_time(row.get(4)?)?,
+    })
+}
+
+fn map_workspace_trash_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceTrashItemRecord> {
+    Ok(WorkspaceTrashItemRecord {
+        owner_subject: row.get(0)?,
+        entity_type: row.get(1)?,
+        entity_id: row.get(2)?,
+        original_parent_id: row.get(3)?,
+        original_project_id: row.get(4)?,
+        original_sort_order: row.get(5)?,
+        original_pinned: row.get(6)?,
+        deleted_at: parse_time(row.get(7)?)?,
     })
 }
 
@@ -2705,6 +3045,165 @@ mod tests {
         assert_eq!(alice.len(), 1);
         assert_eq!(alice[0].id, "project_alice");
         assert!(store.list_projects("unknown").unwrap().is_empty());
+    }
+
+    #[test]
+    fn workspace_trash_restores_and_purges_nested_content_in_dependency_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        store
+            .create_project(&NewProject {
+                id: "project_trash".to_owned(),
+                owner_subject: "owner".to_owned(),
+                title: "Trash course".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+            })
+            .unwrap();
+        store
+            .create_workspace_folder(&NewWorkspaceFolder {
+                id: "folder_root".to_owned(),
+                owner_subject: "owner".to_owned(),
+                parent_id: None,
+                title: "Root".to_owned(),
+                sort_order: 1,
+            })
+            .unwrap();
+        store
+            .create_workspace_folder(&NewWorkspaceFolder {
+                id: "folder_child".to_owned(),
+                owner_subject: "owner".to_owned(),
+                parent_id: Some("folder_root".to_owned()),
+                title: "Child".to_owned(),
+                sort_order: 2,
+            })
+            .unwrap();
+        store
+            .update_workspace_project_placement("project_trash", Some("folder_child"), 3, false)
+            .unwrap();
+        store
+            .create_session(&named_session("session_trash"))
+            .unwrap();
+        store
+            .attach_session_to_project("project_trash", "session_trash", "owner", "browser")
+            .unwrap();
+        store
+            .update_workspace_session_metadata("session_trash", true, 4, false)
+            .unwrap();
+
+        store
+            .insert_audio_chunk(&AudioChunkRecord {
+                session_id: "session_trash".to_owned(),
+                source_id: "browser-mic".to_owned(),
+                sequence: 1,
+                captured_at_ms: 1_000,
+                sample_rate: 16_000,
+                channels: 1,
+                encoding: "pcm_s16le".to_owned(),
+                duration_ms: 1_000,
+                object_hash: "sha256:shared-trash-object".to_owned(),
+                size_bytes: 4,
+                acknowledged_at: Utc::now(),
+            })
+            .unwrap();
+        store
+            .insert_asset(&AssetRecord {
+                id: "asset_trash".to_owned(),
+                session_id: "session_trash".to_owned(),
+                original_name: "fixture.txt".to_owned(),
+                media_type: "text/plain".to_owned(),
+                object_hash: "sha256:unique-trash-object".to_owned(),
+                size_bytes: 4,
+                status: "stored".to_owned(),
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        store
+            .enqueue_model_job(&NewModelJob {
+                id: "job_trash".to_owned(),
+                session_id: "session_trash".to_owned(),
+                job_type: "asr".to_owned(),
+                priority: 10,
+                input: json!({"sample_rate": 16_000}),
+                input_object_hash: Some("sha256:shared-trash-object".to_owned()),
+                idempotency_key: "asr:trash".to_owned(),
+            })
+            .unwrap();
+
+        let items = vec![
+            NewWorkspaceTrashItem {
+                owner_subject: "owner".to_owned(),
+                entity_type: "folder".to_owned(),
+                entity_id: "folder_root".to_owned(),
+                original_parent_id: None,
+                original_project_id: None,
+                original_sort_order: 1,
+                original_pinned: false,
+            },
+            NewWorkspaceTrashItem {
+                owner_subject: "owner".to_owned(),
+                entity_type: "folder".to_owned(),
+                entity_id: "folder_child".to_owned(),
+                original_parent_id: Some("folder_root".to_owned()),
+                original_project_id: None,
+                original_sort_order: 2,
+                original_pinned: false,
+            },
+            NewWorkspaceTrashItem {
+                owner_subject: "owner".to_owned(),
+                entity_type: "project".to_owned(),
+                entity_id: "project_trash".to_owned(),
+                original_parent_id: Some("folder_child".to_owned()),
+                original_project_id: None,
+                original_sort_order: 3,
+                original_pinned: false,
+            },
+            NewWorkspaceTrashItem {
+                owner_subject: "owner".to_owned(),
+                entity_type: "session".to_owned(),
+                entity_id: "session_trash".to_owned(),
+                original_parent_id: None,
+                original_project_id: Some("project_trash".to_owned()),
+                original_sort_order: 4,
+                original_pinned: true,
+            },
+        ];
+        store.trash_workspace_items(&items).unwrap();
+        let trashed = store.list_workspace_trash("owner").unwrap();
+        assert_eq!(trashed.len(), 4);
+
+        store.restore_workspace_items("owner", &trashed).unwrap();
+        assert_eq!(store.list_workspace_trash("owner").unwrap().len(), 0);
+        assert_eq!(
+            store
+                .get_workspace_folder("folder_child")
+                .unwrap()
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some("folder_root")
+        );
+
+        store.trash_workspace_items(&items).unwrap();
+        let hashes = store
+            .purge_workspace_items(
+                "owner",
+                &["folder_root".to_owned(), "folder_child".to_owned()],
+                &["project_trash".to_owned()],
+                &["session_trash".to_owned()],
+            )
+            .unwrap();
+        assert!(hashes.contains(&"sha256:shared-trash-object".to_owned()));
+        assert!(hashes.contains(&"sha256:unique-trash-object".to_owned()));
+        assert!(store.get_project("project_trash").unwrap().is_none());
+        assert!(store.get_session("session_trash").unwrap().is_none());
+        assert!(store.get_workspace_folder("folder_root").unwrap().is_none());
+        assert!(
+            !store
+                .object_hash_is_referenced("sha256:shared-trash-object")
+                .unwrap()
+        );
+        assert!(store.list_workspace_trash("owner").unwrap().is_empty());
     }
 
     #[test]

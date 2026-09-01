@@ -234,7 +234,7 @@ async def health() -> HealthResponse:
     ollama_available = await _ollama_available()
     ollama_gpu_resident = await _ollama_gpu_resident()
     return HealthResponse(
-        status="ok",
+        status="ok" if asr_available and ollama_available else "degraded",
         asr_available=asr_available,
         ollama_available=ollama_available,
         ollama_gpu_resident=ollama_gpu_resident,

@@ -228,11 +228,10 @@ pub async fn acquire_recording(
         LEASE_SECONDS,
     )? {
         LeaseAcquireOutcome::Acquired(record) => record,
-        LeaseAcquireOutcome::Conflict(record) => {
-            return Err(ApiError::conflict(format!(
-                "recording_lease_conflict:{}:{}",
-                record.session_id, record.expires_at
-            )));
+        LeaseAcquireOutcome::Conflict(_record) => {
+            return Err(ApiError::conflict(
+                "另一台设备正在录音，请在该设备停止后重试",
+            ));
         }
     };
     let session = state
@@ -243,7 +242,7 @@ pub async fn acquire_recording(
         state
             .store
             .transition_session(&session_id, SessionState::Recording)?;
-        state.emit(&session_id, "core", "session.recording.started", 0, &format!("lease_{}", lease.generation), None, json!({"visible_recording_required": true, "holder_device_id": request.device_id, "generation": lease.generation}))?;
+        let _ = state.emit(&session_id, "core", "session.recording.started", 0, &format!("lease_{}", lease.generation), None, json!({"visible_recording_required": true, "holder_device_id": request.device_id, "generation": lease.generation}));
     } else if !matches!(
         session.state,
         SessionState::Recording | SessionState::Degraded
@@ -253,12 +252,20 @@ pub async fn acquire_recording(
             .release_recording_lease(&project_id, &session_id, &hash);
         return Err(ApiError::conflict("session is not available for recording"));
     }
-    state.record_project_update(
-        &project_id,
-        Some(&session_id),
-        "recording.lease.acquired",
-        public_lease(&lease),
-    )?;
+    if state
+        .record_project_update(
+            &project_id,
+            Some(&session_id),
+            "recording.lease.acquired",
+            public_lease(&lease),
+        )
+        .is_err()
+    {
+        tracing::warn!(
+            error_kind = "recording_lease_notification_failed",
+            "recording lease committed without notification"
+        );
+    }
     Ok(Json(lease_response(lease, token)))
 }
 
@@ -286,12 +293,20 @@ pub async fn renew_recording(
             LEASE_SECONDS,
         )?
         .ok_or_else(|| ApiError::conflict("recording lease expired or changed"))?;
-    state.record_project_update(
-        &project_id,
-        Some(&session_id),
-        "recording.lease.renewed",
-        public_lease(&lease),
-    )?;
+    if state
+        .record_project_update(
+            &project_id,
+            Some(&session_id),
+            "recording.lease.renewed",
+            public_lease(&lease),
+        )
+        .is_err()
+    {
+        tracing::warn!(
+            error_kind = "recording_lease_notification_failed",
+            "recording lease renewal committed without notification"
+        );
+    }
     Ok(Json(public_lease(&lease)))
 }
 
@@ -303,6 +318,26 @@ pub async fn stop_recording(
 ) -> Result<Json<SessionRecord>, ApiError> {
     owned_project_session(&state, &user.0, &project_id, &session_id)?;
     let hash = hash_token(&request.lease_token);
+    let current = state
+        .store
+        .get_session(&session_id)?
+        .ok_or_else(|| ApiError::not_found("session not found"))?;
+    if matches!(
+        current.state,
+        SessionState::Completed | SessionState::Failed
+    ) {
+        return Ok(Json(current));
+    }
+    if current.state == SessionState::Processing {
+        // A lost HTTP response after the lease release must be safe to retry.
+        let _ = state
+            .store
+            .release_recording_lease(&project_id, &session_id, &hash);
+        finish_session_after_stop(&state, &session_id)?;
+        return Ok(Json(
+            state.store.get_session(&session_id)?.unwrap_or(current),
+        ));
+    }
     let lease = state
         .store
         .validate_recording_lease(&session_id, &hash)?
@@ -310,43 +345,59 @@ pub async fn stop_recording(
             lease.project_id == project_id && lease.holder_device_id == request.device_id
         })
         .ok_or_else(|| ApiError::conflict("recording lease expired or changed"))?;
-    state
-        .store
-        .transition_session(&session_id, SessionState::Stopping)?;
-    state.emit(
-        &session_id,
-        "core",
-        "session.stopping",
-        0,
-        &format!("stop_{session_id}"),
-        None,
-        json!({"generation": lease.generation}),
-    )?;
-    let sealed = flush_session_buffers(&state, &session_id)?;
-    let processing = state
-        .store
-        .transition_session(&session_id, SessionState::Processing)?;
-    state.emit(
-        &session_id,
-        "core",
-        "session.processing",
-        0,
-        &format!("stop_{session_id}"),
-        None,
-        json!({"sealed_tail_windows": sealed}),
-    )?;
-    if !state
-        .store
-        .release_recording_lease(&project_id, &session_id, &hash)?
-    {
-        return Err(ApiError::conflict("recording lease changed during stop"));
+    if matches!(
+        current.state,
+        SessionState::Recording | SessionState::Degraded
+    ) {
+        state
+            .store
+            .transition_session(&session_id, SessionState::Stopping)?;
+        let _ = state.emit(
+            &session_id,
+            "core",
+            "session.stopping",
+            0,
+            &format!("stop_{session_id}"),
+            None,
+            json!({"generation": lease.generation}),
+        );
+    } else if current.state != SessionState::Stopping {
+        return Err(ApiError::conflict("session is not recording"));
     }
-    state.record_project_update(
+    let sealed = flush_session_buffers(&state, &session_id)?;
+    let processing = if state
+        .store
+        .get_session(&session_id)?
+        .is_some_and(|session| session.state == SessionState::Processing)
+    {
+        state.store.get_session(&session_id)?.unwrap_or(current)
+    } else {
+        let processing = state
+            .store
+            .transition_session(&session_id, SessionState::Processing)?;
+        let _ = state.emit(
+            &session_id,
+            "core",
+            "session.processing",
+            0,
+            &format!("stop_{session_id}"),
+            None,
+            json!({"sealed_tail_windows": sealed}),
+        );
+        processing
+    };
+    // Once the session is in `processing`, a lost response or a concurrent
+    // release is already a successful stop from the user's perspective.  Do
+    // not turn that idempotent state into a retry loop or lease conflict.
+    let _ = state
+        .store
+        .release_recording_lease(&project_id, &session_id, &hash)?;
+    let _ = state.record_project_update(
         &project_id,
         Some(&session_id),
         "recording.lease.released",
         json!({"generation": lease.generation}),
-    )?;
+    );
     finish_session_after_stop(&state, &session_id)?;
     Ok(Json(
         state.store.get_session(&session_id)?.unwrap_or(processing),

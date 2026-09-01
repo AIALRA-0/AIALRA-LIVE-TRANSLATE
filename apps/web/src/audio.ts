@@ -414,7 +414,6 @@ export class BrowserCapture {
     if (name === "NotFoundError" || name === "DevicesNotFoundError") return "没有找到可用麦克风，请连接麦克风或选择其他输入设备";
     if (name === "NotReadableError" || name === "TrackStartError") return "麦克风正在被其他应用占用，请关闭占用它的应用后重试";
     if (name === "OverconstrainedError") return "所选输入设备当前不可用，请重新选择麦克风后重试";
-    if (error instanceof Error) return error.message;
     return "浏览器无法打开音频输入，请检查麦克风权限和设备状态";
   }
 

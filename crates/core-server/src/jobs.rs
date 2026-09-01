@@ -1126,11 +1126,16 @@ fn required_input_string(input: &Value, key: &str) -> Result<String, ApiError> {
 }
 
 fn sanitize_error_kind(value: &str) -> String {
-    value
+    let sanitized = value
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
         .take(64)
-        .collect()
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "unknown".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 fn validate_error_stage(value: Option<&str>) -> Result<Option<&str>, ApiError> {

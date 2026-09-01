@@ -21,11 +21,18 @@ globalThis.fetch = (input, init = {}) => {
   });
 };
 
-// JSON helpers surface the service error body and preserve one readable failure boundary.
+// JSON helpers keep failures readable without copying service error bodies into smoke logs.
 async function checked(responsePromise) {
   const response = await responsePromise;
   if (!response.ok) {
-    throw new Error(`${response.status} ${await response.text()}`);
+    let code = "";
+    try {
+      const body = await response.json();
+      code = typeof body?.code === "string" ? body.code : "";
+    } catch {
+      // A non-JSON response is still represented by its status only.
+    }
+    throw new Error(`HTTP ${response.status}${code ? ` (${code})` : ""}`);
   }
   return await response.json();
 }
@@ -65,7 +72,7 @@ async function sendPcm(sessionId, leaseToken, pcm) {
     socket.onerror = () => reject(new Error("audio WebSocket failed"));
     socket.onmessage = (message) => {
       const response = JSON.parse(String(message.data));
-      if (response.type === "audio.error") reject(new Error(response.message));
+      if (response.type === "audio.error") reject(new Error("audio endpoint rejected frame"));
       if (response.type !== "audio.ack") return;
       acknowledgements.add(response.sequence);
       if (typeof response.commit_id === "string" && response.commit_id.length > 0) {
@@ -177,7 +184,6 @@ process.stdout.write(
   `${JSON.stringify(
     {
       status: "PASS",
-      session_id: session.id,
       elapsed_ms: Date.now() - startedAt,
       audio_acknowledgements: acknowledgements.count,
       acknowledgement_commit_ids_valid: acknowledgements.commitIdsValid,

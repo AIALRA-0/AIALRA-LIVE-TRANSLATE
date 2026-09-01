@@ -237,7 +237,7 @@ class RecordingService : Service() {
             if (token != null) put("lease_token", token)
         }.toString().toRequestBody("application/json".toMediaType())
         val request = Request.Builder()
-            .url("$controlBaseUrl/api/v1/projects/$projectId/sessions/$sessionId/recording/$action")
+            .url("$controlBaseUrl/api/v1/device/projects/$projectId/sessions/$sessionId/recording/$action")
             .header("Authorization", "Bearer $deviceToken")
             .post(body)
             .build()
@@ -278,7 +278,7 @@ class RecordingService : Service() {
     private fun requestRemoteSessionStop(): Boolean {
         // The bounded stop request tells the core to drain accepted model work after phone capture ends.
         val request = Request.Builder()
-            .url("$controlBaseUrl/api/v1/projects/$projectId/sessions/$sessionId/recording/stop")
+            .url("$controlBaseUrl/api/v1/device/projects/$projectId/sessions/$sessionId/recording/stop")
             .header("Authorization", "Bearer $deviceToken")
             .post(JSONObject().put("device_id", deviceId).put("lease_token", leaseToken).toString().toRequestBody("application/json".toMediaType()))
             .build()

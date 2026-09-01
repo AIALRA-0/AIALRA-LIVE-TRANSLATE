@@ -409,7 +409,12 @@ async def heartbeat_loop(
                 timeout=10,
             )
         except httpx.HTTPError:
-            pass
+            LOGGER.warning(
+                json.dumps(
+                    {"error_kind": "gateway_heartbeat_failed", "worker_id": lane.worker_id},
+                    separators=(",", ":"),
+                )
+            )
         await asyncio.sleep(HEARTBEAT_SECONDS)
 
 
@@ -596,6 +601,10 @@ async def complete_job(
         },
         timeout=30,
     )
+    if response.status_code == 409:
+        # Core already finalized or requeued the job after this worker lost its
+        # lease.  Do not turn that expected race into a second failure event.
+        return
     response.raise_for_status()
 
 
@@ -654,17 +663,26 @@ async def lane_loop(
             job_id = str(job["id"])
             active[lane.suffix] = job_id
             started = time.monotonic()
+            diagnostic_id = new_diagnostic_id()
             renew = asyncio.create_task(renew_loop(gateway, lane, job_id))
             try:
                 result = await execute_job(gateway, model, job, scheduler, lane.worker_id)
-                await complete_job(
-                    gateway,
-                    lane,
-                    job,
-                    job_id,
-                    result,
-                    int((time.monotonic() - started) * 1_000),
-                )
+                try:
+                    await complete_job(
+                        gateway,
+                        lane,
+                        job,
+                        job_id,
+                        result,
+                        int((time.monotonic() - started) * 1_000),
+                    )
+                except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as error:
+                    # The result was produced locally, but the completion write
+                    # is a gateway operation and must not be mislabeled as a
+                    # model failure when its response or transport fails.
+                    raise JobExecutionError(
+                        FailureReport("gateway_response", "gateway_completion_failed")
+                    ) from error
             except JobExecutionError as error:
                 await fail_job(
                     gateway,
@@ -672,7 +690,7 @@ async def lane_loop(
                     job_id,
                     str(job.get("job_type") or "unknown"),
                     error.report,
-                    new_diagnostic_id(),
+                    diagnostic_id,
                 )
             except RetryableJobError:
                 await fail_job(
@@ -681,7 +699,18 @@ async def lane_loop(
                     job_id,
                     str(job.get("job_type") or "unknown"),
                     FailureReport("model_http", "provider_unavailable"),
-                    new_diagnostic_id(),
+                    diagnostic_id,
+                )
+            except (httpx.HTTPError, RuntimeError, KeyError, ValueError, json.JSONDecodeError):
+                # Once a job is leased, every execution/completion failure must
+                # release that lease through the same privacy-safe failure API.
+                await fail_job(
+                    gateway,
+                    lane,
+                    job_id,
+                    str(job.get("job_type") or "unknown"),
+                    FailureReport("model_http", "worker_execution_failed"),
+                    diagnostic_id,
                 )
             finally:
                 renew.cancel()

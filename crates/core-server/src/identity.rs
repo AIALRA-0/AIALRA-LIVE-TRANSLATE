@@ -86,8 +86,9 @@ pub async fn identity_and_session_scope(
                 .get("x-aialra-auth-proxy")
                 .and_then(|value| value.to_str().ok());
             if proxy_marker != Some("1") {
-                return Err(ApiError::unauthorized(
-                    "trusted authentication proxy is required",
+                return Err(ApiError::unauthorized_with_code(
+                    "登录状态未生效，请刷新页面后重试",
+                    "auth_session_required",
                 ));
             }
         }
@@ -97,7 +98,12 @@ pub async fn identity_and_session_scope(
             .and_then(|value| value.to_str().ok())
             .filter(|value| valid_identifier(value))
             .map(str::to_owned)
-            .ok_or_else(|| ApiError::unauthorized("trusted Authentik identity is required"))?
+            .ok_or_else(|| {
+                ApiError::unauthorized_with_code(
+                    "登录状态未生效，请刷新页面后重试",
+                    "auth_identity_required",
+                )
+            })?
     };
 
     if let Some(session_id) = session_id_from_path(request.uri().path()) {
@@ -116,8 +122,11 @@ pub async fn identity_and_session_scope(
 fn device_scope_allows(path: &str, project_id: &str, session_id: &str) -> bool {
     let project_recording_prefix =
         format!("/projects/{project_id}/sessions/{session_id}/recording/");
+    let device_recording_prefix =
+        format!("/device/projects/{project_id}/sessions/{session_id}/recording/");
     let session_audio_prefix = format!("/sessions/{session_id}/sources/");
     path.starts_with(&project_recording_prefix)
+        || path.starts_with(&device_recording_prefix)
         || (path.starts_with(&session_audio_prefix) && path.ends_with("/audio"))
 }
 

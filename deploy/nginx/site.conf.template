@@ -60,7 +60,7 @@ server {
     # Native devices use a narrowly scoped, Core-issued bearer token after pairing.
     # These routes must bypass the browser login redirect, while Core still checks
     # the token, project/session scope, lease generation, origin and request body.
-    location ~ ^/api/v1/projects/[^/]+/sessions/[^/]+/recording/(acquire|renew|stop)$ {
+    location ~ ^/api/v1/device/projects/[^/]+/sessions/[^/]+/recording/(acquire|renew|stop)$ {
         auth_request off;
         proxy_set_header X-Aialra-Auth-Proxy "";
         proxy_set_header X-authentik-uid "";

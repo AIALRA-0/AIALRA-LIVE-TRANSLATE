@@ -67,6 +67,22 @@ impl ObjectStore {
         Ok(bytes)
     }
 
+    /// Remove one canonical object after the database confirms that no record references it.
+    pub fn remove(&self, object_hash: &str) -> Result<bool> {
+        let hash = object_hash
+            .strip_prefix("sha256:")
+            .context("object hash must use sha256 prefix")?;
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("invalid object hash");
+        }
+        let path = self.root.join(&hash[..2]).join(hash);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context("remove stored object"),
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
