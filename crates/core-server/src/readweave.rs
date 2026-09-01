@@ -16,8 +16,14 @@ use uuid::Uuid;
 
 const CONNECTOR: &str = "readweave";
 const WORKER_ID: &str = "readweave-projector";
-const MANAGED_BEGIN: &str = "<!-- AIALRA:BEGIN -->";
-const MANAGED_END: &str = "<!-- AIALRA:END -->";
+#[cfg(test)]
+const MANAGED_BEGIN_TAG: &str = r#"<span data-aialra-managed="begin"></span>"#;
+const MANAGED_BEGIN_PREFIX: &str = r#"<span data-aialra-managed="begin""#;
+const MANAGED_EMPTY_ELEMENT_END: &str = "</span>";
+const MANAGED_END_TAG: &str = r#"<span data-aialra-managed="end"></span>"#;
+const LEGACY_MANAGED_BEGIN: &str = "<!-- AIALRA:BEGIN -->";
+const LEGACY_MANAGED_END: &str = "<!-- AIALRA:END -->";
+const OBJECT_ATTRIBUTE: &str = "data-aialra-object=\"";
 
 #[derive(Clone)]
 struct ReadWeaveClient {
@@ -247,7 +253,7 @@ impl ReadWeaveClient {
             // local mapping can be cleaned up idempotently in that case.
             return Ok(());
         };
-        if !content.contains(MANAGED_BEGIN) {
+        if managed_bounds(&content).is_none() {
             bail!("ReadWeave ownership marker is missing")
         }
         let response = self
@@ -962,7 +968,7 @@ async fn update_managed_note(
     remote_id: &str,
     body: &str,
 ) -> Result<(), ProjectionError> {
-    let managed = managed_region(body);
+    let managed = managed_object_region(object_type, local_id, body);
     let hash = content_hash(&managed);
     let current = client
         .get_content(remote_id)
@@ -971,7 +977,7 @@ async fn update_managed_note(
     let merged = match merge_managed_content(&current, &managed) {
         Ok(merged) => merged,
         Err(conflict) => {
-            ensure_recovery_note(state, client, local_id, &managed).await?;
+            ensure_recovery_note(state, client, local_id, body).await?;
             return Err(ProjectionError::Conflict(conflict));
         }
     };
@@ -1004,7 +1010,7 @@ async fn ensure_recovery_note(
     state: &AppState,
     client: &ReadWeaveClient,
     local_id: &str,
-    managed: &str,
+    body: &str,
 ) -> Result<(), ProjectionError> {
     let recovery_id = format!("recovery:{local_id}");
     if state
@@ -1025,7 +1031,8 @@ async fn ensure_recovery_note(
     let parent = source.remote_parent_id.as_deref().ok_or_else(|| {
         ProjectionError::Retry(anyhow::anyhow!("conflicted section parent is missing"))
     })?;
-    let managed_hash = content_hash(managed);
+    let managed = managed_object_region("recovery", &recovery_id, body);
+    let managed_hash = content_hash(&managed);
     let title = format!("AIALRA 恢复副本 {}", &managed_hash[..16]);
     let placement = match client
         .find_created_note(
@@ -1038,11 +1045,7 @@ async fn ensure_recovery_note(
     {
         Some(placement) => placement,
         None => client
-            .create_note(
-                parent,
-                &title,
-                &managed_object_region("recovery", &recovery_id, managed),
-            )
+            .create_note(parent, &title, &managed)
             .await
             .map_err(ProjectionError::Retry)?,
     };
@@ -1055,7 +1058,7 @@ async fn ensure_recovery_note(
             local_id: recovery_id.clone(),
             remote_id: placement.note_id,
             remote_parent_id: Some(parent.to_owned()),
-            content_hash: Some(content_hash(managed)),
+            content_hash: Some(content_hash(&managed)),
             created_at: now,
             updated_at: now,
         })
@@ -1076,40 +1079,96 @@ async fn ensure_recovery_note(
 }
 
 fn merge_managed_content(current: &str, managed: &str) -> Result<String> {
-    let Some(start) = current.find(MANAGED_BEGIN) else {
-        if current.trim().is_empty() {
-            return Ok(managed.to_owned());
-        }
-        bail!("managed begin marker is missing")
-    };
-    let Some(relative_end) = current[start..].find(MANAGED_END) else {
-        bail!("managed end marker is missing")
-    };
-    let end = start + relative_end + MANAGED_END.len();
-    Ok(format!(
-        "{}{}{}",
-        &current[..start],
-        managed,
-        &current[end..]
-    ))
+    if let Some((start, _, end_start, end_len)) = managed_bounds(current) {
+        let replacement = preserve_object_attribute(current, managed);
+        return Ok(format!(
+            "{}{}{}",
+            &current[..start],
+            replacement,
+            &current[end_start + end_len..]
+        ));
+    }
+    if current.trim().is_empty() {
+        return Ok(managed.to_owned());
+    }
+
+    // ReadWeave currently normalizes HTML comments away on PUT. Rebuild a
+    // marker only when the remaining body is the generated body; any manual
+    // edit stays a conflict and is never overwritten.
+    if let Some((_, body_start, end_start, _)) = managed_bounds(managed)
+        && current.trim() == managed[body_start..end_start].trim()
+    {
+        return Ok(managed.to_owned());
+    }
+    bail!("managed begin marker is missing")
 }
 
+#[cfg(test)]
 fn managed_region(body: &str) -> String {
-    format!("{MANAGED_BEGIN}\n{body}\n{MANAGED_END}")
+    format!("{MANAGED_BEGIN_TAG}\n{body}\n{MANAGED_END_TAG}")
 }
 
 fn object_identity_marker(object_type: &str, local_id: &str) -> String {
     let identity = format!("{object_type}:{local_id}");
     let digest = hex::encode(Sha256::digest(identity.as_bytes()));
-    format!("<!-- AIALRA:OBJECT:{digest} -->")
+    format!("{OBJECT_ATTRIBUTE}{digest}\"")
 }
 
 fn managed_object_region(object_type: &str, local_id: &str, body: &str) -> String {
     format!(
-        "{}\n{}",
+        "<span data-aialra-managed=\"begin\" {}></span>\n{}\n{}",
         object_identity_marker(object_type, local_id),
-        managed_region(body)
+        body,
+        MANAGED_END_TAG
     )
+}
+
+/// Return `(start, body_start, end_start, end_len)` for an AIALRA-managed
+/// region. New markers use HTML data attributes because ReadWeave preserves
+/// those while normalizing HTML comments; the legacy form remains readable so
+/// existing projections can be upgraded safely.
+fn managed_bounds(content: &str) -> Option<(usize, usize, usize, usize)> {
+    if let Some(start) = content.find(MANAGED_BEGIN_PREFIX) {
+        let tag_end = content[start..].find('>')? + start + 1;
+        let body_start = if content[tag_end..].starts_with(MANAGED_EMPTY_ELEMENT_END) {
+            tag_end + MANAGED_EMPTY_ELEMENT_END.len()
+        } else {
+            tag_end
+        };
+        let end_start = content[body_start..].find(MANAGED_END_TAG)? + body_start;
+        return Some((start, body_start, end_start, MANAGED_END_TAG.len()));
+    }
+    let start = content.find(LEGACY_MANAGED_BEGIN)?;
+    let body_start = start + LEGACY_MANAGED_BEGIN.len();
+    let end_start = content[body_start..].find(LEGACY_MANAGED_END)? + body_start;
+    Some((start, body_start, end_start, LEGACY_MANAGED_END.len()))
+}
+
+fn preserve_object_attribute(current: &str, managed: &str) -> String {
+    if managed.contains(OBJECT_ATTRIBUTE) {
+        return managed.to_owned();
+    }
+    let Some((current_start, current_body_start, _, _)) = managed_bounds(current) else {
+        return managed.to_owned();
+    };
+    let opening = &current[current_start..current_body_start];
+    let Some(attribute_start) = opening.find(OBJECT_ATTRIBUTE) else {
+        return managed.to_owned();
+    };
+    let value_start = attribute_start + OBJECT_ATTRIBUTE.len();
+    let Some(value_end_relative) = opening[value_start..].find('\"') else {
+        return managed.to_owned();
+    };
+    let attribute_end = value_start + value_end_relative + 1;
+    let attribute = &opening[attribute_start..attribute_end];
+    let Some(managed_start) = managed.find(MANAGED_BEGIN_PREFIX) else {
+        return managed.to_owned();
+    };
+    let Some(close_relative) = managed[managed_start..].find('>') else {
+        return managed.to_owned();
+    };
+    let close = managed_start + close_relative;
+    format!("{} {}{}", &managed[..close], attribute, &managed[close..])
 }
 fn content_hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
@@ -1619,7 +1678,7 @@ mod tests {
     fn managed_merge_preserves_user_content() {
         let current = format!(
             "<p>before</p>{}<p>old</p>{}<p>after</p>",
-            MANAGED_BEGIN, MANAGED_END
+            LEGACY_MANAGED_BEGIN, LEGACY_MANAGED_END
         );
         let merged = merge_managed_content(&current, &managed_region("<p>new</p>")).unwrap();
         assert!(merged.contains("<p>before</p>"));
@@ -1637,8 +1696,8 @@ mod tests {
         let first = object_identity_marker("session", "session_private_example");
         let second = object_identity_marker("session", "session_private_example");
         assert_eq!(first, second);
-        assert!(first.starts_with("<!-- AIALRA:OBJECT:"));
-        assert!(first.ends_with(" -->"));
+        assert!(first.starts_with(OBJECT_ATTRIBUTE));
+        assert!(first.ends_with('"'));
         assert!(!first.contains("session_private_example"));
     }
 
@@ -1651,6 +1710,32 @@ mod tests {
             "project_private_example"
         )));
         assert!(updated.contains("<p>new</p>"));
+    }
+
+    #[test]
+    fn normalized_generated_body_can_restore_markers_safely() {
+        let generated = managed_object_region("section", "section_private_example", "<p>body</p>");
+        let normalized = "<p>body</p>";
+        let restored = merge_managed_content(normalized, &generated).unwrap();
+        assert!(restored.contains(MANAGED_BEGIN_PREFIX));
+        assert!(restored.contains(&object_identity_marker(
+            "section",
+            "section_private_example"
+        )));
+        assert!(merge_managed_content("<p>manual edit</p>", &generated).is_err());
+    }
+
+    #[test]
+    fn legacy_markers_are_readable_and_upgraded() {
+        let current = format!(
+            "<p>before</p>{}<p>old</p>{}<p>after</p>",
+            LEGACY_MANAGED_BEGIN, LEGACY_MANAGED_END
+        );
+        let merged = merge_managed_content(&current, &managed_region("<p>new</p>")).unwrap();
+        assert!(merged.contains(MANAGED_BEGIN_TAG));
+        assert!(merged.contains("<p>before</p>"));
+        assert!(merged.contains("<p>new</p>"));
+        assert!(merged.contains("<p>after</p>"));
     }
 
     #[test]
