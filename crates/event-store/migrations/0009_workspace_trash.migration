@@ -1,0 +1,91 @@
+-- Workspace items are soft-deleted into a recoverable, owner-scoped recycle bin.
+CREATE TABLE IF NOT EXISTS workspace_trash_items (
+    owner_subject TEXT NOT NULL,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('folder', 'project', 'session')),
+    entity_id TEXT NOT NULL,
+    original_parent_id TEXT,
+    original_project_id TEXT,
+    original_sort_order INTEGER NOT NULL DEFAULT 0,
+    original_pinned INTEGER NOT NULL DEFAULT 0,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY(owner_subject, entity_type, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_trash_owner_deleted
+    ON workspace_trash_items(owner_subject, deleted_at, entity_type, entity_id);
+
+-- Existing archived rows become recoverable without changing their original location.
+INSERT OR IGNORE INTO workspace_trash_items(
+    owner_subject, entity_type, entity_id, original_parent_id,
+    original_sort_order, deleted_at
+)
+SELECT owner_subject, 'folder', id, parent_id, sort_order, archived_at
+FROM workspace_folders
+WHERE archived_at IS NOT NULL;
+
+INSERT OR IGNORE INTO workspace_trash_items(
+    owner_subject, entity_type, entity_id, original_parent_id,
+    original_sort_order, deleted_at
+)
+SELECT p.owner_subject, 'project', w.project_id, w.folder_id, w.sort_order, w.archived_at
+FROM workspace_project_placements w
+JOIN projects p ON p.id = w.project_id
+WHERE w.archived_at IS NOT NULL;
+
+INSERT OR IGNORE INTO workspace_trash_items(
+    owner_subject, entity_type, entity_id, original_project_id,
+    original_sort_order, original_pinned, deleted_at
+)
+SELECT p.owner_subject, 'session', w.session_id, ps.project_id,
+       w.sort_order, w.pinned, w.archived_at
+FROM workspace_session_metadata w
+JOIN project_sessions ps ON ps.session_id = w.session_id
+JOIN projects p ON p.id = ps.project_id
+WHERE w.archived_at IS NOT NULL;
+
+-- Older releases could archive a project without archiving its sessions.  Bring
+-- those children into the same recoverable selection so purging an archived
+-- project cannot violate the project_sessions foreign key or orphan its notes.
+INSERT OR IGNORE INTO workspace_session_metadata(session_id, updated_at)
+SELECT ps.session_id, placement.archived_at
+FROM workspace_project_placements placement
+JOIN project_sessions ps ON ps.project_id = placement.project_id
+WHERE placement.archived_at IS NOT NULL;
+
+INSERT OR IGNORE INTO workspace_trash_items(
+    owner_subject, entity_type, entity_id, original_project_id,
+    original_sort_order, original_pinned, deleted_at
+)
+SELECT p.owner_subject, 'session', ps.session_id, ps.project_id,
+       COALESCE(w.sort_order, 0), COALESCE(w.pinned, 0), placement.archived_at
+FROM workspace_project_placements placement
+JOIN project_sessions ps ON ps.project_id = placement.project_id
+JOIN projects p ON p.id = placement.project_id
+LEFT JOIN workspace_session_metadata w ON w.session_id = ps.session_id
+WHERE placement.archived_at IS NOT NULL;
+
+UPDATE workspace_session_metadata
+SET archived_at = (
+        SELECT placement.archived_at
+        FROM workspace_project_placements placement
+        JOIN project_sessions ps ON ps.project_id = placement.project_id
+        WHERE ps.session_id = workspace_session_metadata.session_id
+          AND placement.archived_at IS NOT NULL
+        LIMIT 1
+    ),
+    updated_at = (
+        SELECT placement.archived_at
+        FROM workspace_project_placements placement
+        JOIN project_sessions ps ON ps.project_id = placement.project_id
+        WHERE ps.session_id = workspace_session_metadata.session_id
+          AND placement.archived_at IS NOT NULL
+        LIMIT 1
+    )
+WHERE archived_at IS NULL
+  AND EXISTS (
+      SELECT 1
+      FROM workspace_project_placements placement
+      JOIN project_sessions ps ON ps.project_id = placement.project_id
+      WHERE ps.session_id = workspace_session_metadata.session_id
+        AND placement.archived_at IS NOT NULL
+  );

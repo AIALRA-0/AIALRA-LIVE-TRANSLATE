@@ -1,9 +1,9 @@
 import { FormEvent, useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type DingtalkCapabilities, type RuntimeHealth } from "./api";
+import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type RuntimeHealth } from "./api";
 import { BrowserCapture, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
 import { applySessionStateEvent } from "./sessionState";
 import { appendEvent } from "./timeline";
-import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot } from "./types";
+import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
 
 const LEASE_STORAGE_KEY = "aialra-active-recording-lease";
 const TIMELINE_PAGE_SIZE = 160;
@@ -113,10 +113,15 @@ function StatusBadge({ tone, children }: { tone: "green" | "yellow" | "red" | "g
 type ThemeMode = "light" | "dark";
 type WorkspaceDialogState =
   | { action: "create-folder" | "create-project" }
-  | { action: "rename-folder" | "move-folder" | "archive-folder"; folder: WorkspaceFolder }
-  | { action: "rename-project" | "move-project" | "archive-project"; project: Project };
+  | { action: "rename-folder" | "move-folder"; folder: WorkspaceFolder }
+  | { action: "rename-project" | "move-project"; project: Project }
+  | { action: "rename-session"; project: Project; session: Session };
+type WorkspaceTarget = { entityType: "folder" | "project" | "session"; entityId: string; projectId?: string };
+type ContextMenuState =
+  | { kind: "workspace"; x: number; y: number; target: WorkspaceTarget }
+  | { kind: "trash"; x: number; y: number; item: WorkspaceTrashItem };
 
-function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, onToggleTheme, onSelectProject, onSelectSession, onCreateFolder, onCreateProject, onUpdateFolder, onPlaceProject, onUpdateProject, onUpdateSession }: {
+function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, onToggleTheme, onSelectProject, onSelectSession, onCreateFolder, onCreateProject, onUpdateFolder, onPlaceProject, onUpdateProject, onUpdateSession, onTrash, onRestoreTrash, onPurgeTrash, onOpenSettings }: {
   snapshot: WorkspaceSnapshot;
   activeProjectId: string | null;
   activeSessionId: string | null;
@@ -126,10 +131,14 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   onSelectSession: (project: Project, session: Session) => void;
   onCreateFolder: (title: string, parentId: string | null) => Promise<void>;
   onCreateProject: (title: string, folderId: string | null) => Promise<void>;
-  onUpdateFolder: (folder: WorkspaceFolder, title: string, parentId: string | null, archived: boolean) => Promise<void>;
-  onPlaceProject: (project: Project, folderId: string | null, archived: boolean) => Promise<void>;
+  onUpdateFolder: (folder: WorkspaceFolder, title: string, parentId: string | null, archived: boolean, sortOrder?: number) => Promise<void>;
+  onPlaceProject: (project: Project, folderId: string | null, archived: boolean, sortOrder?: number) => Promise<void>;
   onUpdateProject: (project: Project, title: string) => Promise<void>;
-  onUpdateSession: (project: Project, session: Session, archived: boolean) => Promise<void>;
+  onUpdateSession: (project: Project, session: Session, archived: boolean, sortOrder?: number, title?: string) => Promise<void>;
+  onTrash: (entityType: "folder" | "project" | "session", entityId: string) => Promise<void>;
+  onRestoreTrash: (item: WorkspaceTrashItem) => Promise<void>;
+  onPurgeTrash: (item: WorkspaceTrashItem) => Promise<void>;
+  onOpenSettings: () => void;
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -139,8 +148,11 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   const [dialog, setDialog] = useState<WorkspaceDialogState | null>(null);
   const [dialogTitle, setDialogTitle] = useState("");
   const [dialogParentId, setDialogParentId] = useState<string>("");
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [dragging, setDragging] = useState<WorkspaceTarget | null>(null);
   const placements = new Map(snapshot.project_placements.map((item) => [item.project_id, item]));
   const sessionMetadata = new Map(snapshot.session_metadata.map((item) => [item.session_id, item]));
+  const trashItems = snapshot.trash ?? [];
   const projectSessions = (projectId: string) => snapshot.sessions
     .filter((session) => snapshot.session_projects[session.id] === projectId && !sessionMetadata.get(session.id)?.archived_at)
     .sort((left, right) => {
@@ -161,13 +173,87 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
       || left.id.localeCompare(right.id);
   });
 
-  function openDialog(next: WorkspaceDialogState): void {
+  useEffect(() => {
+    const close = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, []);
+
+  function targetTitle(target: WorkspaceTarget): string {
+    if (target.entityType === "folder") return snapshot.folders.find((folder) => folder.id === target.entityId)?.title ?? "文件夹";
+    if (target.entityType === "project") return snapshot.projects.find((project) => project.id === target.entityId)?.title ?? "项目";
+    return snapshot.sessions.find((session) => session.id === target.entityId)?.title ?? "课程会话";
+  }
+
+  function trashTitle(item: WorkspaceTrashItem): string {
+    return targetTitle({ entityType: item.entity_type, entityId: item.entity_id, projectId: item.original_project_id ?? undefined });
+  }
+
+  function isNestedTrashItem(item: WorkspaceTrashItem): boolean {
+    if (item.entity_type === "folder") return Boolean(item.original_parent_id && trashItems.some((parent) => parent.entity_type === "folder" && parent.entity_id === item.original_parent_id));
+    if (item.entity_type === "project") return Boolean(item.original_parent_id && trashItems.some((parent) => parent.entity_type === "folder" && parent.entity_id === item.original_parent_id));
+    return Boolean(item.original_project_id && trashItems.some((parent) => parent.entity_type === "project" && parent.entity_id === item.original_project_id));
+  }
+
+  function showContextMenu(event: React.MouseEvent, target: WorkspaceTarget): void {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({ kind: "workspace", x: event.clientX, y: event.clientY, target });
+  }
+
+  function showTrashMenu(event: React.MouseEvent, item: WorkspaceTrashItem): void {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({ kind: "trash", x: event.clientX, y: event.clientY, item });
+  }
+
+  function toggleFolder(folderId: string): void {
+    setSelectedFolderId(folderId);
+    setExpandedFolderIds((current) => {
+      const next = new Set(current);
+      if (next.has(folderId)) next.delete(folderId);
+      else next.add(folderId);
+      return next;
+    });
+  }
+
+  function selectFolder(folderId: string): void {
+    setSelectedFolderId(folderId);
+  }
+
+  function openTarget(target: WorkspaceTarget): void {
+    setContextMenu(null);
+    if (target.entityType === "folder") {
+      selectFolder(target.entityId);
+      setExpandedFolderIds((current) => new Set(current).add(target.entityId));
+      return;
+    }
+    if (target.entityType === "project") {
+      const project = snapshot.projects.find((item) => item.id === target.entityId);
+      if (project) onSelectProject(project);
+      return;
+    }
+    const session = snapshot.sessions.find((item) => item.id === target.entityId);
+    const projectId = target.projectId ?? snapshot.session_projects[target.entityId];
+    const project = snapshot.projects.find((item) => item.id === projectId);
+    if (project && session) onSelectSession(project, session);
+  }
+
+  function openDialog(next: WorkspaceDialogState, parentOverride?: string | null): void {
+    setContextMenu(null);
     setDialog(next);
-    setDialogTitle("folder" in next ? next.folder.title : "project" in next ? next.project.title : "");
+    setDialogTitle(next.action === "rename-session" ? next.session.title : "folder" in next ? next.folder.title : "project" in next ? next.project.title : "");
     setDialogParentId(
       "folder" in next ? next.folder.parent_id ?? ""
         : "project" in next ? placements.get(next.project.id)?.folder_id ?? ""
-          : selectedFolderId ?? "",
+          : parentOverride ?? selectedFolderId ?? "",
     );
   }
 
@@ -179,47 +265,153 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     if (dialog.action === "create-project" && title) await onCreateProject(title, dialogParentId || null);
     if (dialog.action === "rename-folder" && title) await onUpdateFolder(dialog.folder, title, dialog.folder.parent_id, false);
     if (dialog.action === "move-folder") await onUpdateFolder(dialog.folder, dialog.folder.title, dialogParentId || null, false);
-    if (dialog.action === "archive-folder") await onUpdateFolder(dialog.folder, dialog.folder.title, dialog.folder.parent_id, true);
     if (dialog.action === "rename-project" && title) await onUpdateProject(dialog.project, title);
     if (dialog.action === "move-project") await onPlaceProject(dialog.project, dialogParentId || null, false);
-    if (dialog.action === "archive-project") await onPlaceProject(dialog.project, placements.get(dialog.project.id)?.folder_id ?? null, true);
+    if (dialog.action === "rename-session" && title) await onUpdateSession(dialog.project, dialog.session, false, sessionMetadata.get(dialog.session.id)?.sort_order ?? 0, title);
     setDialog(null);
   }
 
-  const dialogNeedsTitle = dialog?.action === "create-folder" || dialog?.action === "create-project" || dialog?.action === "rename-folder" || dialog?.action === "rename-project";
+  function moveTargetToTrash(target: WorkspaceTarget): void {
+    setContextMenu(null);
+    if (window.confirm(`将“${targetTitle(target)}”移入回收站？其中的课程内容仍可恢复。`)) void onTrash(target.entityType, target.entityId);
+  }
+
+  function restoreTrash(item: WorkspaceTrashItem): void {
+    setContextMenu(null);
+    void onRestoreTrash(item);
+  }
+
+  function purgeTrash(item: WorkspaceTrashItem): void {
+    setContextMenu(null);
+    if (window.confirm(`永久删除“${trashTitle(item)}”及其关联内容？此操作不可恢复。`)) void onPurgeTrash(item);
+  }
+
+  function parseDrag(event: React.DragEvent): WorkspaceTarget | null {
+    if (dragging) return dragging;
+    try {
+      return JSON.parse(event.dataTransfer.getData("application/x-aialra-workspace")) as WorkspaceTarget;
+    } catch {
+      return null;
+    }
+  }
+
+  function beginDrag(event: React.DragEvent, target: WorkspaceTarget): void {
+    setDragging(target);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-aialra-workspace", JSON.stringify(target));
+  }
+
+  function allowDrop(event: React.DragEvent): void {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+
+  function dropOnFolder(event: React.DragEvent, folderId: string | null): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const source = parseDrag(event);
+    setDragging(null);
+    if (!source) return;
+    if (source.entityType === "folder" && source.entityId !== folderId) {
+      const folder = snapshot.folders.find((item) => item.id === source.entityId);
+      if (folder) void onUpdateFolder(folder, folder.title, folderId, false, folder.sort_order);
+    }
+    if (source.entityType === "project") {
+      const project = snapshot.projects.find((item) => item.id === source.entityId);
+      if (project) void onPlaceProject(project, folderId, false, placements.get(project.id)?.sort_order ?? 0);
+    }
+  }
+
+  function dropOnProject(event: React.DragEvent, targetProject: Project): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const source = parseDrag(event);
+    setDragging(null);
+    if (!source || source.entityType !== "project" || source.entityId === targetProject.id) return;
+    const sourceProject = snapshot.projects.find((item) => item.id === source.entityId);
+    const sourcePlacement = sourceProject ? placements.get(sourceProject.id) : undefined;
+    const targetPlacement = placements.get(targetProject.id);
+    if (sourceProject && targetPlacement) {
+      const sameFolder = sourcePlacement?.folder_id === targetPlacement.folder_id;
+      const sortOrder = sameFolder && (sourcePlacement?.sort_order ?? 0) <= targetPlacement.sort_order
+        ? targetPlacement.sort_order + 1
+        : targetPlacement.sort_order - 1;
+      void onPlaceProject(sourceProject, targetPlacement.folder_id, false, sortOrder);
+    }
+  }
+
+  function dropOnSession(event: React.DragEvent, project: Project, targetSession: Session): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const source = parseDrag(event);
+    setDragging(null);
+    if (!source || source.entityType !== "session" || source.entityId === targetSession.id) return;
+    const sourceProject = snapshot.projects.find((item) => item.id === (source.projectId ?? snapshot.session_projects[source.entityId]));
+    const sourceSession = snapshot.sessions.find((item) => item.id === source.entityId);
+    const sourceMeta = sourceSession ? sessionMetadata.get(sourceSession.id) : undefined;
+    const targetMeta = sessionMetadata.get(targetSession.id);
+    if (sourceProject && sourceSession && sourceProject.id === project.id) {
+      const sortOrder = (sourceMeta?.sort_order ?? 0) <= (targetMeta?.sort_order ?? 0)
+        ? (targetMeta?.sort_order ?? 0) + 1
+        : (targetMeta?.sort_order ?? 0) - 1;
+      void onUpdateSession(sourceProject, sourceSession, false, sortOrder);
+    }
+  }
+
+  function isDescendant(folderId: string, ancestorId: string): boolean {
+    let current = snapshot.folders.find((folder) => folder.id === folderId)?.parent_id ?? null;
+    const visited = new Set<string>();
+    while (current && !visited.has(current)) {
+      if (current === ancestorId) return true;
+      visited.add(current);
+      current = snapshot.folders.find((folder) => folder.id === current)?.parent_id ?? null;
+    }
+    return false;
+  }
+
+  const dialogNeedsTitle = dialog?.action === "create-folder" || dialog?.action === "create-project" || dialog?.action === "rename-folder" || dialog?.action === "rename-project" || dialog?.action === "rename-session";
   const dialogNeedsParent = dialog?.action === "create-folder" || dialog?.action === "create-project" || dialog?.action === "move-folder" || dialog?.action === "move-project";
   const dialogTitleText = dialog ? ({
-    "create-folder": "新建课程文件夹", "create-project": "新建课程项目", "rename-folder": "重命名文件夹", "rename-project": "重命名项目",
-    "move-folder": "移动文件夹", "move-project": "移动项目", "archive-folder": "归档文件夹", "archive-project": "归档项目",
+    "create-folder": "新建课程文件夹", "create-project": "新建课程项目", "rename-folder": "重命名文件夹", "rename-project": "重命名项目", "rename-session": "重命名课程会话",
+    "move-folder": "移动文件夹", "move-project": "移动项目",
   } as Record<WorkspaceDialogState["action"], string>)[dialog.action] : "";
 
   const renderProject = (project: Project) => (
-    <li key={project.id} className="tree-project">
-      <div className={`tree-item-row ${activeProjectId === project.id && !activeSessionId ? "selected" : ""}`}>
-        <button onClick={() => onSelectProject(project)}><span aria-hidden="true">▣</span><span>{project.title}</span></button>
-        <details className="tree-actions">
-          <summary aria-label={`管理项目 ${project.title}`}>•••</summary>
-          <div>
-            <button onClick={() => openDialog({ action: "rename-project", project })}>重命名</button>
-            <button onClick={() => openDialog({ action: "move-project", project })}>移动</button>
-            <button onClick={() => openDialog({ action: "archive-project", project })}>归档</button>
-          </div>
-        </details>
+    <li key={project.id} className={`tree-project ${dragging?.entityId === project.id ? "dragging" : ""}`}>
+      <div
+        className={`tree-item-row ${activeProjectId === project.id && !activeSessionId ? "selected" : ""}`}
+        draggable
+        onDragStart={(event) => beginDrag(event, { entityType: "project", entityId: project.id })}
+        onDragEnd={() => setDragging(null)}
+        onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}
+        onDragOver={allowDrop}
+        onDrop={(event) => dropOnProject(event, project)}
+      >
+        <button className="tree-item-button" onClick={() => onSelectProject(project)}><span aria-hidden="true">▣</span><span>{project.title}</span></button>
+        <button className="tree-context-hint" aria-label={`右键管理项目 ${project.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}>⋯</button>
       </div>
       {activeProjectId === project.id && (
         <ul className="tree-sessions">
           {projectSessions(project.id).map((session) => (
-            <li key={session.id}>
-              <div className={`tree-item-row ${activeSessionId === session.id ? "selected" : ""}`}><button onClick={() => onSelectSession(project, session)}><span aria-hidden="true">◫</span><span>{session.title}</span><i className={`tiny-dot ${stateTone(session.state)}`} aria-label={stateLabel(session.state)} /></button><button aria-label={`归档 ${session.title}`} disabled={session.state === "recording"} onClick={() => void onUpdateSession(project, session, true)}>⌫</button></div>
+            <li key={session.id} className={dragging?.entityId === session.id ? "dragging" : ""}>
+              <div
+                className={`tree-item-row ${activeSessionId === session.id ? "selected" : ""}`}
+                draggable
+                onDragStart={(event) => beginDrag(event, { entityType: "session", entityId: session.id, projectId: project.id })}
+                onDragEnd={() => setDragging(null)}
+                onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}
+                onDragOver={allowDrop}
+                onDrop={(event) => dropOnSession(event, project, session)}
+              >
+                <button className="tree-item-button" onClick={() => onSelectSession(project, session)}><span aria-hidden="true">◫</span><span>{session.title}</span><i className={`tiny-dot ${stateTone(session.state)}`} aria-label={stateLabel(session.state)} /></button>
+                <button className="tree-context-hint" aria-label={`右键管理课程 ${session.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}>⋯</button>
+              </div>
               {activeSessionId === session.id && (
-                <>
-                  <div className="system-notes-caption">课程文档 · 自动整理</div>
-                  <ul className="system-notes">
-                    {Object.entries(SYSTEM_NOTE_LABELS).map(([section, title]) => (
-                      <li key={section}><button title={section === "user-notes" ? "只由你编辑，AIALRA 不会覆盖正文" : "AIALRA 自动整理并同步到 ReadWeave"} onClick={() => navigate(project.id, session.id, section)}>{title}</button></li>
-                    ))}
-                  </ul>
-                </>
+                <ul className="system-notes tree-note-category" aria-label="课程笔记分类">
+                  {Object.entries(SYSTEM_NOTE_LABELS).map(([section, title]) => (
+                    <li key={section}><button title={section === "user-notes" ? "只由你编辑，AIALRA 不会覆盖正文" : "AIALRA 自动整理并同步到 ReadWeave"} onClick={() => navigate(project.id, session.id, section)}>{title}</button></li>
+                  ))}
+                </ul>
               )}
             </li>
           ))}
@@ -229,30 +421,19 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   );
 
   const renderFolder = (folder: WorkspaceFolder, depth: number): React.ReactNode => (
-    <li key={folder.id} className="tree-folder" style={{ "--tree-depth": depth } as React.CSSProperties}>
-      <div className={`folder-label ${selectedFolderId === folder.id ? "selected" : ""}`}>
-        <button
-          aria-expanded={expandedFolderIds.has(folder.id)}
-          onClick={() => {
-            setSelectedFolderId(folder.id);
-            setExpandedFolderIds((current) => {
-              const next = new Set(current);
-              if (next.has(folder.id)) next.delete(folder.id);
-              else next.add(folder.id);
-              return next;
-            });
-          }}
-        >
-          <span aria-hidden="true">{expandedFolderIds.has(folder.id) ? "▾" : "▸"}</span>{folder.title}
-        </button>
-        <details className="tree-actions">
-          <summary aria-label={`管理文件夹 ${folder.title}`}>•••</summary>
-          <div>
-            <button onClick={() => openDialog({ action: "rename-folder", folder })}>重命名</button>
-            <button onClick={() => openDialog({ action: "move-folder", folder })}>移动</button>
-            <button onClick={() => openDialog({ action: "archive-folder", folder })}>归档</button>
-          </div>
-        </details>
+    <li key={folder.id} className={`tree-folder ${dragging?.entityId === folder.id ? "dragging" : ""}`} style={{ "--tree-depth": depth } as React.CSSProperties}>
+      <div
+        className={`folder-label ${selectedFolderId === folder.id ? "selected" : ""}`}
+        draggable
+        onDragStart={(event) => beginDrag(event, { entityType: "folder", entityId: folder.id })}
+        onDragEnd={() => setDragging(null)}
+        onContextMenu={(event) => showContextMenu(event, { entityType: "folder", entityId: folder.id })}
+        onDragOver={allowDrop}
+        onDrop={(event) => dropOnFolder(event, folder.id)}
+      >
+        <button className="folder-disclosure" aria-label={`${expandedFolderIds.has(folder.id) ? "折叠" : "展开"}${folder.title}`} aria-expanded={expandedFolderIds.has(folder.id)} onClick={() => toggleFolder(folder.id)}><span aria-hidden="true">{expandedFolderIds.has(folder.id) ? "▾" : "▸"}</span></button>
+        <button className="folder-name" onClick={() => selectFolder(folder.id)}>{folder.title}</button>
+        <button className="tree-context-hint" aria-label={`右键管理文件夹 ${folder.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "folder", entityId: folder.id })}>⋯</button>
       </div>
       {expandedFolderIds.has(folder.id) && <ul>
         {snapshot.folders.filter((item) => !item.archived_at && item.parent_id === folder.id).map((child) => renderFolder(child, depth + 1))}
@@ -261,28 +442,45 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     </li>
   );
 
+  const renderWorkspaceContextMenu = (menu: Extract<ContextMenuState, { kind: "workspace" }>) => {
+    const target = menu.target;
+    const project = target.entityType === "project" ? snapshot.projects.find((item) => item.id === target.entityId) : null;
+    const session = target.entityType === "session" ? snapshot.sessions.find((item) => item.id === target.entityId) : null;
+    const sessionProject = session ? snapshot.projects.find((item) => item.id === (target.projectId ?? snapshot.session_projects[session.id])) : null;
+    const folder = target.entityType === "folder" ? snapshot.folders.find((item) => item.id === target.entityId) : null;
+    return <div className="workspace-context-menu" role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>
+      <button role="menuitem" onClick={() => openTarget(target)}>打开</button>
+      {folder && <><button role="menuitem" onClick={() => { setSelectedFolderId(folder.id); openDialog({ action: "create-folder" }, folder.id); }}>在此新建子文件夹</button><button role="menuitem" onClick={() => { setSelectedFolderId(folder.id); openDialog({ action: "create-project" }, folder.id); }}>在此新建项目</button><button role="menuitem" onClick={() => openDialog({ action: "rename-folder", folder })}>重命名</button><button role="menuitem" onClick={() => openDialog({ action: "move-folder", folder })}>移动</button></>}
+      {project && <><button role="menuitem" onClick={() => openDialog({ action: "rename-project", project })}>重命名</button><button role="menuitem" onClick={() => openDialog({ action: "move-project", project })}>移动</button></>}
+      {session && sessionProject && <button role="menuitem" onClick={() => openDialog({ action: "rename-session", project: sessionProject, session })}>重命名</button>}
+      <button className="danger-menu-item" role="menuitem" onClick={() => moveTargetToTrash(target)}>移入回收站</button>
+    </div>;
+  };
+
   return (
     <aside className={`workspace-sidebar ${mobileOpen ? "mobile-open" : ""}`} aria-label="课程工作区">
       <div className="workspace-brand"><span>A</span><div><strong>AIALRA</strong><small>课程工作区</small></div><button className="theme-toggle" aria-label={`切换到${theme === "light" ? "黑色" : "白色"}模式`} onClick={onToggleTheme}>{theme === "light" ? "◐ 黑色" : "◑ 白色"}</button><button className="mobile-tree-toggle" aria-expanded={mobileOpen} onClick={() => setMobileOpen((current) => !current)}>{mobileOpen ? "关闭课程树" : "打开课程树"}</button></div>
       <nav className="workspace-tree">
-        <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-label="新建文件夹" onClick={() => openDialog({ action: "create-folder" })}>＋文件夹</button><button aria-label="新建项目" onClick={() => openDialog({ action: "create-project" })}>＋项目</button></div></div>
-        <ul>
+        <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-label="新建文件夹" onClick={() => openDialog({ action: "create-folder" })}>＋文件夹</button><button aria-label="新建项目" onClick={() => openDialog({ action: "create-project" })}>＋项目</button><button aria-label="打开设置和运行状态" onClick={onOpenSettings}>设置</button></div></div>
+        <ul onDragOver={allowDrop} onDrop={(event) => dropOnFolder(event, null)}>
           {snapshot.folders.filter((folder) => !folder.archived_at && folder.parent_id === null).map((folder) => renderFolder(folder, 0))}
           {projectsInFolder(null).map(renderProject)}
         </ul>
       </nav>
-      <div className="workspace-create">
-        {(snapshot.folders.some((folder) => folder.archived_at) || snapshot.project_placements.some((placement) => placement.archived_at)) && <details className="archive-list"><summary>已归档</summary>{snapshot.folders.filter((folder) => folder.archived_at).map((folder) => <button key={folder.id} onClick={() => void onUpdateFolder(folder, folder.title, folder.parent_id, false)}>恢复文件夹 {folder.title}</button>)}{snapshot.projects.filter((project) => placements.get(project.id)?.archived_at).map((project) => <button key={project.id} onClick={() => void onPlaceProject(project, placements.get(project.id)?.folder_id ?? null, false)}>恢复项目 {project.title}</button>)}</details>}
-      </div>
+      <section className="workspace-trash" aria-label="回收站">
+        <div className="trash-heading"><span>回收站</span><small>{trashItems.length ? `${trashItems.length} 项 · 右键管理` : "暂无内容"}</small></div>
+        {trashItems.filter((item) => !isNestedTrashItem(item)).map((item) => <button key={`${item.entity_type}:${item.entity_id}`} className="trash-item" onClick={() => restoreTrash(item)} onContextMenu={(event) => showTrashMenu(event, item)}><span aria-hidden="true">⌫</span><span>{trashTitle(item)}</span><small>{item.entity_type === "folder" ? "文件夹" : item.entity_type === "project" ? "项目" : "课程"}</small></button>)}
+      </section>
       {dialog && <div className="workspace-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialog(null); }}><dialog className="workspace-dialog" open aria-modal="true" aria-labelledby="workspace-dialog-title" onCancel={() => setDialog(null)}>
         <form method="dialog" onSubmit={(event) => void submitDialog(event)}>
           <header><div><p>工作区操作</p><h2 id="workspace-dialog-title">{dialogTitleText}</h2></div><button type="button" aria-label="关闭" onClick={() => setDialog(null)}>×</button></header>
           {dialogNeedsTitle && <label>名称<input autoFocus value={dialogTitle} placeholder="请输入清晰的名称" onChange={(event) => setDialogTitle(event.target.value)} required /></label>}
-          {dialogNeedsParent && <label>位置<select value={dialogParentId} onChange={(event) => setDialogParentId(event.target.value)}><option value="">工作区根目录</option>{snapshot.folders.filter((folder) => !folder.archived_at && !("folder" in dialog && folder.id === dialog.folder.id)).map((folder) => <option key={folder.id} value={folder.id}>{folder.title}</option>)}</select></label>}
-          {(dialog.action === "archive-folder" || dialog.action === "archive-project") && <p className="dialog-warning">归档后不会删除录音、字幕或笔记，可以随时从“已归档”恢复</p>}
-          <footer><button type="button" className="secondary-button" onClick={() => setDialog(null)}>取消</button><button type="submit" className={dialog.action.startsWith("archive") ? "stop-button" : "primary-button"} disabled={dialogNeedsTitle && !dialogTitle.trim()}>{dialog.action.startsWith("archive") ? "确认归档" : "保存"}</button></footer>
+          {dialogNeedsParent && <label>位置<select value={dialogParentId} onChange={(event) => setDialogParentId(event.target.value)}><option value="">工作区根目录</option>{snapshot.folders.filter((item) => !item.archived_at && !("folder" in dialog && (item.id === dialog.folder.id || isDescendant(item.id, dialog.folder.id)))).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>}
+          <footer><button type="button" className="secondary-button" onClick={() => setDialog(null)}>取消</button><button type="submit" className="primary-button" disabled={Boolean(dialogNeedsTitle && !dialogTitle.trim())}>保存</button></footer>
         </form>
       </dialog></div>}
+      {contextMenu?.kind === "workspace" && renderWorkspaceContextMenu(contextMenu)}
+      {contextMenu?.kind === "trash" && <div className="workspace-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => restoreTrash(contextMenu.item)}>恢复</button><button className="danger-menu-item" role="menuitem" onClick={() => purgeTrash(contextMenu.item)}>永久删除</button></div>}
     </aside>
   );
 }
@@ -365,6 +563,26 @@ function GpuPanel({ runtime }: { runtime: RuntimeHealth | null }) {
   );
 }
 
+function RuntimeSettingsDialog({ runtime, readWeave, onClose }: { runtime: RuntimeHealth | null; readWeave: ReadWeaveStatus | null; onClose: () => void }) {
+  const worker = runtime?.worker;
+  const queue = runtime?.model_queue;
+  return <div className="workspace-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><dialog className="workspace-dialog runtime-settings-dialog" open aria-modal="true" aria-labelledby="runtime-settings-title" onCancel={onClose}>
+    <header><div><p>只读状态</p><h2 id="runtime-settings-title">设置与运行状态</h2></div><button type="button" aria-label="关闭" onClick={onClose}>×</button></header>
+    <p className="dialog-description">这里仅显示当前连接和运行信息；API 令牌、设备凭证和其他秘密配置不会在网页中编辑或展示。</p>
+    <dl className="runtime-settings-grid">
+      <div><dt>当前登录</dt><dd>{runtime ? "已由服务端验证" : "正在读取"}</dd></div>
+      <div><dt>服务地址</dt><dd>{window.location.origin}</dd></div>
+      <div><dt>Core</dt><dd>{runtime ? `${runtime.status} · ${runtime.deployment_mode}` : "未读取"}</dd></div>
+      <div><dt>构建 SHA</dt><dd className="monospace">{runtime?.build_id ?? "未读取"}</dd></div>
+      <div><dt>GPU Worker</dt><dd>{worker ? `${worker.online ? "在线" : "离线"} · ${worker.capabilities.join("、") || "无能力声明"}` : "未连接"}</dd></div>
+      <div><dt>模型队列</dt><dd>{queue ? `排队 ${queue.queued} · 租约中 ${queue.leased} · 失败 ${queue.failed}` : "未读取"}</dd></div>
+      <div><dt>ReadWeave</dt><dd>{readWeave?.connection?.public_url ?? (readWeave?.configured ? "已配置（地址受保护）" : "未配置")}</dd></div>
+      <div><dt>同步范围</dt><dd>{readWeave?.connection?.policy ?? "仅同步稳定内容"}</dd></div>
+    </dl>
+    <footer><button type="button" className="primary-button" onClick={onClose}>完成</button></footer>
+  </dialog></div>;
+}
+
 function SessionConsole({ project, initial, languageView, onLanguageView }: { project: Project; initial: Session; languageView: LanguageView; onLanguageView: (view: LanguageView) => void }) {
   const [session, setSession] = useState(initial);
   const [timeline, dispatch] = useReducer(timelineReducer, { events: [], items: [] });
@@ -383,11 +601,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [micResult, setMicResult] = useState<MicrophoneTestResult | null>(null);
   const [micTesting, setMicTesting] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeHealth | null>(null);
-  const [dingtalk, setDingtalk] = useState<DingtalkCapabilities | null>(null);
-  const [dingtalkRecording, setDingtalkRecording] = useState(false);
   const [readWeave, setReadWeave] = useState<ReadWeaveStatus | null>(null);
   const [readWeavePreview, setReadWeavePreview] = useState<ReadWeavePreview | null>(null);
-  const [pairing, setPairing] = useState<{ code: string; expires_at: string } | null>(null);
+  const [readWeaveConfirmUrl, setReadWeaveConfirmUrl] = useState<string | null>(null);
+  const [readWeaveReconciling, setReadWeaveReconciling] = useState(false);
   const [visibleItemLimit, setVisibleItemLimit] = useState(TIMELINE_PAGE_SIZE);
   const capture = useRef<BrowserCapture | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -421,7 +638,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }, setStreamConnected), [project.id, initial.id]);
 
   useEffect(() => {
-    void api.dingtalkCapabilities(initial.id).then(setDingtalk).catch(() => setDingtalk(null));
     void api.readWeaveStatus(project.id).then(setReadWeave).catch(() => setReadWeave(null));
     void api.readWeavePreview(project.id).then(setReadWeavePreview).catch(() => setReadWeavePreview(null));
     if (navigator.mediaDevices?.enumerateDevices) void navigator.mediaDevices.enumerateDevices().then((devices) => setAudioInputs(devices.filter((device) => device.kind === "audioinput")));
@@ -500,7 +716,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     setCapturePhase("requesting-permission");
     let acquired: RecordingLease | null = null;
     let preparedCapture: BrowserCapture | null = null;
-    let dingtalkStarted = false;
     try {
       // Request the browser input while the click still carries user intent.
       // The server lease is created only after this local step succeeds.
@@ -525,20 +740,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       saveLocalLease(acquired);
       setSession((current) => ({ ...current, state: "recording" }));
       await startCapture(acquired, preparedCapture);
-      if (dingtalk?.configured) {
-        try {
-          await api.startDingtalk(project.id, session.id, recorderDeviceId(), acquired.lease_token);
-          dingtalkStarted = true;
-          setDingtalkRecording(true);
-        } catch {
-          setCaptureNotice("DingTalk A1 未启动，但浏览器录音已经开始");
-        }
-      }
     } catch (caught) {
-      if (dingtalkStarted && acquired) {
-        await api.stopDingtalk(project.id, session.id, recorderDeviceId(), acquired.lease_token).catch(() => undefined);
-        setDingtalkRecording(false);
-      }
       if (!acquired) {
         preparedCapture?.dispose();
         if (capture.current === preparedCapture) capture.current = null;
@@ -567,22 +769,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         return;
       }
       capture.current = null; setCaptureActive(false);
-      let dingtalkStopFailed = false;
-      if (dingtalkRecording && lease) {
-        // DingTalk A1 is a backup path.  A transient control failure must not
-        // leave the primary browser lease recording forever or block its durable
-        // stop and tail flush.
-        await api.stopDingtalk(project.id, session.id, recorderDeviceId(), lease.lease_token)
-          .catch(() => { dingtalkStopFailed = true; });
-        setDingtalkRecording(false);
-      }
       if (!lease) throw new Error("本机不是当前录音设备");
       const next = await api.stopRecording(project.id, session.id, recorderDeviceId(), lease.lease_token);
       setSession(next); setLease(null); saveLocalLease(null);
       setCapturePhase(next.state === "processing" ? "processing" : "idle");
-      if (dingtalkStopFailed) {
-        setNotice("浏览器采集已结束，DingTalk A1 停止请求失败，请稍后在设备侧核对；服务器已安全封存音频并开始处理");
-      }
     } catch (caught) {
       setCapturePhase("error");
       setCaptureNotice(caught instanceof Error ? caught.message : "停止录音失败");
@@ -595,13 +785,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     try { const result = await api.uploadAsset(session.id, file); setNotice(`真实解析任务 ${result.job_id.slice(0, 12)} 已排队`); }
     catch (caught) { setNotice(caught instanceof Error ? caught.message : "材料解析失败"); }
     finally { setBusy(false); if (fileInput.current) fileInput.current.value = ""; }
-  }
-
-  async function createDevicePairing(): Promise<void> {
-    setBusy(true); setCaptureNotice("");
-    try { setPairing(await api.createDevicePairing(project.id, session.id)); }
-    catch (caught) { setCaptureNotice(caught instanceof Error ? caught.message : "手机配对失败"); }
-    finally { setBusy(false); }
   }
 
   const isRecording = ["recording", "degraded"].includes(session.state);
@@ -667,7 +850,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               {micResult && <small>噪声 {micResult.noiseFloorDbfs.toFixed(1)} dBFS · 语音 {micResult.speechP95Dbfs.toFixed(1)} dBFS · 峰值 {micResult.peakDbfs.toFixed(1)} dBFS</small>}
               <button className="secondary-button" disabled={micTesting || isRecording || captureMode !== "microphone"} onClick={() => void runMicTest()}>{micTesting ? "测试中 4 秒" : "测试麦克风"}</button>
             </div>
-            <p className="capture-help">默认使用当前设备的麦克风；只有本机没有麦克风时才需要安卓手机</p>
+            <p className="capture-help">音频在确认写入后才会从本机发送队列中移除；浏览器端不需要额外配对设备。</p>
             {captureNotice && <div className="capture-inline-alert" role="alert">{captureNotice}</div>}
             <p className="capture-copy" aria-live="polite"><strong>{captureLabel}</strong> · {visibleCaptureStatus}</p>
             {!isRecording ? (
@@ -679,12 +862,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             ) : (
               <p className="other-recorder-notice">另一台设备正在录音，请在录音设备停止</p>
             )}
-            <details className="device-pairing">
-              <summary>没有本机麦克风？使用安卓手机作为备用收音</summary>
-              <p>有本机麦克风时无需 Android。配对只用于没有可用麦克风的设备，失败也不会影响浏览器录音</p>
-              <button className="secondary-button" disabled={busy || isRecording} onClick={() => void createDevicePairing()}>生成安卓备用连接码</button>
-              {pairing && <div className="pairing-code"><strong>{pairing.code}</strong><small>5 分钟内有效，只能使用一次</small><a href={`aialra://pair?server=${encodeURIComponent(window.location.origin)}&code=${encodeURIComponent(pairing.code)}`}>在安卓手机打开配对</a></div>}
-            </details>
           </section>
           <GpuPanel runtime={runtime} />
           <section className="side-card">
@@ -698,8 +875,20 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           <section className="side-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
             <p>{readWeavePreview?.sessions.find((item) => item.session_id === session.id)?.latest_entries[0]?.translation ?? "稳定字幕和讲解会自动进入对应笔记"}</p>
-            <button className="secondary-button" disabled={!readWeave?.configured} onClick={() => void api.reconcileReadWeave(project.id).then(() => setNotice("ReadWeave 全量校对已排队"))}>立即校对</button>
-            {readWeaveUrl && <button className="text-link-button" onClick={() => window.location.assign(readWeaveUrl)}>在当前标签打开{readWeaveNodeType ? "对应" : "项目"}笔记 →</button>}
+            <dl className="readweave-connection">
+              <div><dt>连接目标</dt><dd>{readWeave?.connection?.public_url ?? (readWeave?.configured ? "已连接（地址受保护）" : "未配置")}</dd></div>
+              <div><dt>同步范围</dt><dd>{readWeave?.connection?.policy ?? "仅同步稳定内容，不同步原始音频或秘密配置"}</dd></div>
+              <div><dt>最近同步</dt><dd>{readWeave?.updated_at ? new Date(readWeave.updated_at).toLocaleString("zh-CN") : "尚无同步记录"}</dd></div>
+            </dl>
+            <button className="secondary-button" disabled={!readWeave?.configured || readWeaveReconciling || Boolean(readWeave?.queued || readWeave?.syncing)} onClick={() => {
+              setReadWeaveReconciling(true);
+              void api.reconcileReadWeave(project.id)
+                .then(() => setNotice("ReadWeave 校对已排队，同一项目不会重复创建后台任务"))
+                .catch((caught) => setNotice(caught instanceof Error ? caught.message : "ReadWeave 校对失败"))
+                .finally(() => setReadWeaveReconciling(false));
+            }}>{readWeaveReconciling ? "正在排队…" : "立即校对"}</button>
+            {readWeaveUrl && <button className="text-link-button" onClick={() => setReadWeaveConfirmUrl(readWeaveUrl)}>打开{readWeaveNodeType ? "对应" : "项目"}笔记 →</button>}
+            {readWeaveConfirmUrl && <div className="inline-confirm" role="dialog" aria-label="确认打开 ReadWeave"><p>即将打开 ReadWeave 对应目标：</p><code>{readWeaveConfirmUrl}</code><div><button className="secondary-button" onClick={() => setReadWeaveConfirmUrl(null)}>取消</button><button className="primary-button" onClick={() => { const url = readWeaveConfirmUrl; setReadWeaveConfirmUrl(null); window.location.assign(url); }}>确认打开</button></div></div>}
           </section>
           {notice && <div className="notice-box" role="status">{notice}</div>}
         </aside>
@@ -714,6 +903,9 @@ export default function App() {
   const [route, setRoute] = useState(routeSelection);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(() => window.localStorage.getItem("aialra-theme") === "dark" ? "dark" : "light");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsRuntime, setSettingsRuntime] = useState<RuntimeHealth | null>(null);
+  const [settingsReadWeave, setSettingsReadWeave] = useState<ReadWeaveStatus | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -739,9 +931,24 @@ export default function App() {
     return () => { window.removeEventListener("popstate", updateRoute); unsubscribe(); };
   }, [deviceId, refresh]);
 
-  const activeProject = snapshot?.projects.find((project) => project.id === route.projectId) ?? null;
-  const activeSession = snapshot?.sessions.find((session) => session.id === route.sessionId) ?? null;
+  const activeProject = snapshot?.projects.find((project) => {
+    if (project.id !== route.projectId) return false;
+    return !snapshot.project_placements.find((placement) => placement.project_id === project.id)?.archived_at;
+  }) ?? null;
+  const activeSession = snapshot?.sessions.find((session) => {
+    if (session.id !== route.sessionId) return false;
+    return !snapshot.session_metadata.find((metadata) => metadata.session_id === session.id)?.archived_at;
+  }) ?? null;
   const languageView = snapshot?.preference?.language_view ?? "bilingual";
+  const activeProjectIdForSettings = activeProject?.id ?? null;
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let active = true;
+    void api.health().then((value) => { if (active) setSettingsRuntime(value); }).catch(() => { if (active) setSettingsRuntime(null); });
+    if (activeProjectIdForSettings) void api.readWeaveStatus(activeProjectIdForSettings).then((value) => { if (active) setSettingsReadWeave(value); }).catch(() => { if (active) setSettingsReadWeave(null); });
+    return () => { active = false; };
+  }, [settingsOpen, activeProjectIdForSettings]);
 
   async function persistSelection(projectId: string | null, sessionId: string | null, view = languageView): Promise<void> {
     await api.updatePreference(deviceId, { active_project_id: projectId, active_session_id: sessionId, language_view: view, sidebar_collapsed: false });
@@ -769,19 +976,31 @@ export default function App() {
         activeSessionId={activeSession?.id ?? null}
         theme={theme}
         onToggleTheme={() => setTheme((current) => current === "light" ? "dark" : "light")}
+        onOpenSettings={() => { setSettingsRuntime(null); setSettingsReadWeave(null); setSettingsOpen(true); }}
         onSelectProject={(project) => { navigate(project.id, null); void persistSelection(project.id, null); }}
         onSelectSession={(project, session) => { navigate(project.id, session.id); void persistSelection(project.id, session.id); }}
         onCreateFolder={(title, parentId) => runWorkspaceAction(async () => { await api.createFolder({ title, parent_id: parentId }); await refresh(); })}
         onCreateProject={(title, folderId) => runWorkspaceAction(async () => { const project = await api.createProject(title); if (folderId) await api.placeProject(project.id, { folder_id: folderId, sort_order: 0, archived: false }); await refresh(); navigate(project.id, null); await persistSelection(project.id, null); })}
-        onUpdateFolder={(folder, title, parentId, archived) => runWorkspaceAction(async () => { await api.updateFolder(folder.id, { title, parent_id: parentId, sort_order: folder.sort_order, archived }); await refresh(); })}
-        onPlaceProject={(project, folderId, archived) => runWorkspaceAction(async () => { const placement = snapshot.project_placements.find((item) => item.project_id === project.id); await api.placeProject(project.id, { folder_id: folderId, sort_order: placement?.sort_order ?? 0, archived }); await refresh(); if (archived && activeProject?.id === project.id) navigate(null, null); })}
+        onUpdateFolder={(folder, title, parentId, archived, sortOrder) => runWorkspaceAction(async () => { await api.updateFolder(folder.id, { title, parent_id: parentId, sort_order: sortOrder ?? folder.sort_order, archived }); await refresh(); })}
+        onPlaceProject={(project, folderId, archived, sortOrder) => runWorkspaceAction(async () => { const placement = snapshot.project_placements.find((item) => item.project_id === project.id); await api.placeProject(project.id, { folder_id: folderId, sort_order: sortOrder ?? placement?.sort_order ?? 0, archived }); await refresh(); if (archived && activeProject?.id === project.id) navigate(null, null); })}
         onUpdateProject={(project, title) => runWorkspaceAction(async () => { await api.updateProject(project.id, title.trim()); await refresh(); })}
-        onUpdateSession={(project, session, archived) => runWorkspaceAction(async () => { const metadata = snapshot.session_metadata.find((item) => item.session_id === session.id); await api.updateSession(project.id, session.id, { pinned: metadata?.pinned ?? false, sort_order: metadata?.sort_order ?? 0, archived }); await refresh(); if (archived && activeSession?.id === session.id) navigate(project.id, null); })}
+        onUpdateSession={(project, session, archived, sortOrder, title) => runWorkspaceAction(async () => { const metadata = snapshot.session_metadata.find((item) => item.session_id === session.id); await api.updateSession(project.id, session.id, { title, pinned: metadata?.pinned ?? false, sort_order: sortOrder ?? metadata?.sort_order ?? 0, archived }); await refresh(); if (archived && activeSession?.id === session.id) navigate(project.id, null); })}
+        onTrash={(entityType, entityId) => runWorkspaceAction(async () => { await api.trash(entityType, entityId); await refresh(); if (entityType === "folder" || (entityType === "project" && activeProject?.id === entityId) || (entityType === "session" && activeSession?.id === entityId)) navigate(null, null); })}
+        onRestoreTrash={(item) => runWorkspaceAction(async () => { await api.restoreTrash(item.entity_type, item.entity_id); await refresh(); })}
+        onPurgeTrash={(item) => runWorkspaceAction(async () => {
+          await api.purgeTrash(item.entity_type, item.entity_id);
+          await refresh();
+          const removesActive = item.entity_type === "folder"
+            || (item.entity_type === "project" && activeProject?.id === item.entity_id)
+            || (item.entity_type === "session" && activeSession?.id === item.entity_id);
+          if (removesActive) navigate(null, null);
+        })}
       />
+      {settingsOpen && <RuntimeSettingsDialog runtime={settingsRuntime} readWeave={settingsReadWeave} onClose={() => setSettingsOpen(false)} />}
       {activeProject && activeSession ? (
         <SessionConsole key={activeSession.id} project={activeProject} initial={activeSession} languageView={languageView} onLanguageView={(view) => void persistSelection(activeProject.id, activeSession.id, view)} />
       ) : activeProject ? (
-        <ProjectOverview project={activeProject} sessions={snapshot.sessions.filter((session) => snapshot.session_projects[session.id] === activeProject.id)} onCreated={(session) => { void refresh(); navigate(activeProject.id, session.id); void persistSelection(activeProject.id, session.id); }} />
+        <ProjectOverview project={activeProject} sessions={snapshot.sessions.filter((session) => snapshot.session_projects[session.id] === activeProject.id && !snapshot.session_metadata.find((metadata) => metadata.session_id === session.id)?.archived_at)} onCreated={(session) => { void refresh(); navigate(activeProject.id, session.id); void persistSelection(activeProject.id, session.id); }} />
       ) : (
         <main className="workspace-empty"><div className="brand-mark">A</div><h1>课程工作区已准备好</h1><p>在左侧创建课程项目，之后每次登录都会直接回到这里</p></main>
       )}

@@ -152,7 +152,7 @@ async function openSession(page) {
 
 try {
   await Promise.all([openSession(recorder), openSession(observer)]);
-  await recorder.getByText("默认使用当前设备的麦克风；只有本机没有麦克风时才需要安卓手机", { exact: true }).waitFor({ timeout: 10_000 });
+  await recorder.getByText("音频在确认写入后才会从本机发送队列中移除；浏览器端不需要额外配对设备。", { exact: true }).waitFor({ timeout: 10_000 });
   if (await recorder.locator("details.device-pairing[open]").count()) throw new Error("Android fallback must be collapsed by default");
   await recorder.getByRole("button", { name: "开始录音", exact: true }).click();
   await recorder.getByText("收音正常，服务器已确认全部音频块").waitFor({ timeout: 30_000 });

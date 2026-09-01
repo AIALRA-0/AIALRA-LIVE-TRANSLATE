@@ -77,6 +77,17 @@ export interface WorkspaceSessionMetadata {
   updated_at: string;
 }
 
+export interface WorkspaceTrashItem {
+  owner_subject: string;
+  entity_type: "folder" | "project" | "session";
+  entity_id: string;
+  original_parent_id: string | null;
+  original_project_id: string | null;
+  original_sort_order: number;
+  original_pinned: boolean;
+  deleted_at: string;
+}
+
 export type LanguageView = "bilingual" | "source" | "translation";
 
 export interface WorkspacePreference {
@@ -96,6 +107,7 @@ export interface WorkspaceSnapshot {
   sessions: Session[];
   session_projects: Record<string, string>;
   session_metadata: WorkspaceSessionMetadata[];
+  trash: WorkspaceTrashItem[];
   preference: WorkspacePreference | null;
 }
 
@@ -125,6 +137,11 @@ export interface ReadWeaveStatus {
   updated_at: string | null;
   note_url: string | null;
   targets?: ReadWeaveTarget[];
+  connection?: {
+    configured: boolean;
+    public_url: string | null;
+    policy: string;
+  };
 }
 
 export interface ReadWeaveTarget {

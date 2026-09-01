@@ -84,10 +84,16 @@ async fn handle_socket(
                         "duplicate": duplicate,
                         "commit_id": commit_id
                     }),
-                    Err(error) => json!({
-                        "type": "audio.error",
-                        "message": error.to_string()
-                    }),
+                    Err(_error) => {
+                        tracing::warn!(
+                            error_kind = "audio_frame_rejected",
+                            "audio frame was not accepted"
+                        );
+                        json!({
+                            "type": "audio.error",
+                            "message": "音频帧未被接受，请重新连接后重试"
+                        })
+                    }
                 };
                 if sender
                     .send(Message::Text(response.to_string().into()))
@@ -176,7 +182,14 @@ async fn persist_frame(
     drop(_guard);
     if inserted {
         let _ = state.events.send(event.clone());
-        state.record_session_event_update(&event)?;
+        // The chunk and its commit ID are already durable.  Auxiliary project
+        // notifications must not turn a successful ACK into a client retry.
+        if let Err(_error) = state.record_session_event_update(&event) {
+            tracing::warn!(
+                error_kind = "audio_auxiliary_update_failed",
+                "durable audio commit notification failed"
+            );
+        }
 
         let _ = state
             .audio_pending
@@ -240,10 +253,16 @@ pub async fn run_audio_assembler(state: AppState) {
                     assemble_source(&worker_state, &session_id, &source_id, false)
                 })
                 .await;
-                if let Err(error) = result {
-                    tracing::warn!(error_kind = "audio_assembler_join_failed", error = %error, "audio assembler task failed");
-                } else if let Ok(Err(error)) = result {
-                    tracing::warn!(error_kind = "audio_assembler_failed", error = %error, "audio assembler will retry from durable chunks");
+                if let Err(_error) = result {
+                    tracing::warn!(
+                        error_kind = "audio_assembler_join_failed",
+                        "audio assembler task failed"
+                    );
+                } else if let Ok(Err(_error)) = result {
+                    tracing::warn!(
+                        error_kind = "audio_assembler_failed",
+                        "audio assembler will retry from durable chunks"
+                    );
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

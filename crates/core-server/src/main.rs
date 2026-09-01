@@ -65,6 +65,19 @@ async fn main() -> Result<()> {
             "/workspace/folders/{folder_id}/archive",
             post(workspace::archive_folder),
         )
+        .route("/workspace/trash", get(workspace::list_trash))
+        .route(
+            "/workspace/trash/{entity_type}/{entity_id}",
+            post(workspace::trash_entity),
+        )
+        .route(
+            "/workspace/trash/{entity_type}/{entity_id}/restore",
+            post(workspace::restore_entity),
+        )
+        .route(
+            "/workspace/trash/{entity_type}/{entity_id}/purge",
+            post(workspace::purge_entity),
+        )
         .route(
             "/workspace/preferences/{device_id}",
             axum::routing::patch(workspace::update_preference),
@@ -126,11 +139,23 @@ async fn main() -> Result<()> {
             post(projects::acquire_recording),
         )
         .route(
+            "/device/projects/{project_id}/sessions/{session_id}/recording/acquire",
+            post(projects::acquire_recording),
+        )
+        .route(
             "/projects/{project_id}/sessions/{session_id}/recording/renew",
             post(projects::renew_recording),
         )
         .route(
+            "/device/projects/{project_id}/sessions/{session_id}/recording/renew",
+            post(projects::renew_recording),
+        )
+        .route(
             "/projects/{project_id}/sessions/{session_id}/recording/stop",
+            post(projects::stop_recording),
+        )
+        .route(
+            "/device/projects/{project_id}/sessions/{session_id}/recording/stop",
             post(projects::stop_recording),
         )
         .route(
@@ -194,7 +219,13 @@ async fn main() -> Result<()> {
         .nest("/api/v1", api.merge(public_api))
         .nest("/internal/v1", internal)
         .fallback_service(static_files)
-        .layer(TraceLayer::new_for_http())
+        // Keep request tracing useful without putting session IDs, project IDs,
+        // query strings or temporary paths into ordinary application logs.
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<_>| {
+                tracing::info_span!("http_request", method = %request.method())
+            },
+        ))
         .with_state(state);
 
     // Localhost is the default boundary; LAN access requires an explicit environment change.

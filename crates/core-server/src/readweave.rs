@@ -3,7 +3,7 @@
 use crate::app::{ApiError, AppState};
 use aialra_event_store::{
     ConnectorJobRecord, NewConnectorJob, RemoteObjectDetailsRecord, RemoteObjectMapRecord,
-    WorkspaceFolderRecord,
+    WorkspaceFolderRecord, WorkspaceTrashItemRecord,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -46,6 +46,21 @@ struct CreatedBranch {
     branch_id: String,
     note_id: String,
     parent_note_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchNotesResponse {
+    #[serde(default)]
+    results: Vec<RemoteSearchNote>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteSearchNote {
+    note_id: String,
+    title: String,
+    #[serde(default)]
+    parent_note_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +127,68 @@ impl ReadWeaveClient {
         })
     }
 
+    /// Recover a note created before its local mapping was committed.
+    ///
+    /// ETAPI does not expose an idempotency key for create-note.  Searching
+    /// the exact title among direct children and requiring the AIALRA managed
+    /// marker gives retries a conservative recovery path without blindly
+    /// creating another remote note.  Ambiguous or unreadable results remain
+    /// a retryable connector failure instead of creating a duplicate.
+    async fn find_created_note(
+        &self,
+        parent: &str,
+        title: &str,
+        _initial_content: &str,
+    ) -> Result<Option<CreatedPlacement>> {
+        let search = format!("\"{}\"", title.replace(['"', '\\'], " "));
+        let response = self
+            .http
+            .get(self.endpoint("/notes"))
+            .header("Authorization", &self.token)
+            .query(&[
+                ("search", search.as_str()),
+                ("ancestorNoteId", parent),
+                ("ancestorDepth", "eq1"),
+                ("fastSearch", "true"),
+                ("limit", "10"),
+            ])
+            .send()
+            .await
+            .context("send ReadWeave note recovery search")?
+            .error_for_status()
+            .context("ReadWeave note recovery search rejected")?
+            .json::<SearchNotesResponse>()
+            .await
+            .context("decode ReadWeave note recovery search")?;
+
+        let mut matches = Vec::new();
+        for candidate in response.results.into_iter().filter(|candidate| {
+            candidate.title == title && candidate.parent_note_ids.iter().any(|id| id == parent)
+        }) {
+            // AIALRA-owned notes retain the managed marker even after their
+            // generated region changes.  This excludes unrelated user notes
+            // with the same visible title.
+            if !self
+                .get_content(&candidate.note_id)
+                .await?
+                .contains(MANAGED_BEGIN)
+            {
+                continue;
+            }
+            if let Some(branch) = self.find_branch(&candidate.note_id, parent).await? {
+                matches.push(CreatedPlacement {
+                    note_id: candidate.note_id,
+                    branch_id: branch.branch_id,
+                });
+            }
+        }
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.pop()),
+            _ => bail!("ReadWeave note recovery identity is ambiguous"),
+        }
+    }
+
     async fn patch_title(&self, note_id: &str, title: &str) -> Result<()> {
         self.http
             .patch(self.endpoint(&format!("/notes/{note_id}")))
@@ -152,15 +229,71 @@ impl ReadWeaveClient {
     }
 
     async fn delete_branch(&self, branch_id: &str) -> Result<()> {
-        self.http
+        let response = self
+            .http
             .delete(self.endpoint(&format!("/branches/{branch_id}")))
             .header("Authorization", &self.token)
             .send()
             .await
-            .context("send ReadWeave branch deletion")?
-            .error_for_status()
-            .context("ReadWeave branch deletion rejected")?;
+            .context("send ReadWeave branch deletion")?;
+        if response.status().as_u16() != 404 {
+            response
+                .error_for_status()
+                .context("ReadWeave branch deletion rejected")?;
+        }
         Ok(())
+    }
+
+    async fn delete_owned_branch(&self, note_id: &str, branch_id: &str) -> Result<()> {
+        let Some(content) = self.get_content_for_delete(note_id).await? else {
+            // A previous purge may already have removed the remote note.  The
+            // local mapping can be cleaned up idempotently in that case.
+            return Ok(());
+        };
+        if !content.contains(MANAGED_BEGIN) {
+            bail!("ReadWeave ownership marker is missing")
+        }
+        let response = self
+            .http
+            .get(self.endpoint(&format!("/branches/{branch_id}")))
+            .header("Authorization", &self.token)
+            .send()
+            .await
+            .context("send ReadWeave branch ownership read")?;
+        if response.status().as_u16() == 404 {
+            return Ok(());
+        }
+        let branch = response
+            .error_for_status()
+            .context("ReadWeave branch ownership read rejected")?
+            .json::<CreatedBranch>()
+            .await
+            .context("decode ReadWeave branch ownership")?;
+        if branch.note_id != note_id {
+            bail!("ReadWeave branch does not belong to mapped note")
+        }
+        self.delete_branch(branch_id).await
+    }
+
+    async fn get_content_for_delete(&self, note_id: &str) -> Result<Option<String>> {
+        let response = self
+            .http
+            .get(self.endpoint(&format!("/notes/{note_id}/content")))
+            .header("Authorization", &self.token)
+            .send()
+            .await
+            .context("send ReadWeave content read for deletion")?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        Ok(Some(
+            response
+                .error_for_status()
+                .context("ReadWeave content read for deletion rejected")?
+                .text()
+                .await
+                .context("decode ReadWeave content for deletion")?,
+        ))
     }
 
     async fn find_branch(&self, note_id: &str, parent_id: &str) -> Result<Option<CreatedBranch>> {
@@ -177,13 +310,20 @@ impl ReadWeaveClient {
             .await
             .context("decode ReadWeave note")?;
         for branch_id in note.parent_branch_ids {
-            let branch = self
+            let response = self
                 .http
                 .get(self.endpoint(&format!("/branches/{branch_id}")))
                 .header("Authorization", &self.token)
                 .send()
                 .await
-                .context("send ReadWeave branch read")?
+                .context("send ReadWeave branch read")?;
+            if response.status().as_u16() == 404 {
+                // A stale local branch ID can remain after a successful remote
+                // delete.  The caller can still recover a newly created or
+                // previously persisted desired branch without duplicating it.
+                continue;
+            }
+            let branch = response
                 .error_for_status()
                 .context("ReadWeave branch read rejected")?
                 .json::<CreatedBranch>()
@@ -286,11 +426,7 @@ pub fn enqueue_manual_reconcile(state: &AppState, project_id: &str) -> Result<()
             connector: CONNECTOR.to_owned(),
             job_type: "reconcile_session".to_owned(),
             payload: json!({"session_id": session.id}),
-            idempotency_key: format!(
-                "readweave:{}:manual:{}",
-                session.id,
-                Uuid::now_v7().simple()
-            ),
+            idempotency_key: format!("readweave:{}:manual", session.id),
             delay_seconds: 0,
         })?;
     }
@@ -311,7 +447,11 @@ pub async fn run_connector_loop(state: AppState) {
             Ok(Some(job)) => job,
             Ok(None) => continue,
             Err(error) => {
-                tracing::warn!(error_kind = "connector_lease_failed", error = %error, "ReadWeave connector lease failed");
+                let _ = error;
+                tracing::warn!(
+                    error_kind = "connector_lease_failed",
+                    "ReadWeave connector lease failed"
+                );
                 continue;
             }
         };
@@ -339,7 +479,12 @@ pub async fn run_connector_loop(state: AppState) {
                     "readweave.conflict",
                     json!({"job_id": job.id}),
                 );
-                tracing::warn!(job_id = %job.id, error_kind = "managed_region_conflict", error = %error, "ReadWeave projection stopped on conflict");
+                let _ = error;
+                tracing::warn!(
+                    attempt = job.attempts,
+                    error_kind = "managed_region_conflict",
+                    "ReadWeave projection stopped on conflict"
+                );
             }
             Err(ProjectionError::Retry(error)) => {
                 let delay = 2_i64.saturating_pow(job.attempts.min(5)).min(30);
@@ -350,7 +495,12 @@ pub async fn run_connector_loop(state: AppState) {
                     delay,
                     false,
                 );
-                tracing::warn!(job_id = %job.id, error_kind = "readweave_unavailable", error = %error, "ReadWeave projection will retry");
+                let _ = error;
+                tracing::warn!(
+                    attempt = job.attempts,
+                    error_kind = "readweave_unavailable",
+                    "ReadWeave projection will retry"
+                );
             }
         }
         release_projection_memory();
@@ -515,7 +665,7 @@ async fn project_job(
             local_id: &user_notes_id,
             parent_id: &session_note,
             title: "99 我的笔记",
-            initial_content: "<p>这里的内容只由你编辑，AIALRA 不会覆盖</p>".to_owned(),
+            initial_content: managed_region("<p>这里的内容只由你编辑，AIALRA 不会覆盖</p>"),
             position: 990,
         },
     )
@@ -647,10 +797,17 @@ async fn ensure_note(
         ensure_parent_branch(state, client, &record, parent_id, position).await?;
         return Ok(record.remote_id);
     }
-    let placement = client
-        .create_note(parent_id, title, &initial_content)
+    let placement = match client
+        .find_created_note(parent_id, title, &initial_content)
         .await
-        .map_err(ProjectionError::Retry)?;
+        .map_err(ProjectionError::Retry)?
+    {
+        Some(placement) => placement,
+        None => client
+            .create_note(parent_id, title, &initial_content)
+            .await
+            .map_err(ProjectionError::Retry)?,
+    };
     let now = Utc::now();
     state
         .store
@@ -687,17 +844,65 @@ async fn ensure_parent_branch(
     desired_parent: &str,
     position: i64,
 ) -> Result<(), ProjectionError> {
+    let details = state
+        .store
+        .get_remote_object_details(CONNECTOR, &mapping.object_type, &mapping.local_id)
+        .map_err(ProjectionError::Retry)?;
     if mapping.remote_parent_id.as_deref() == Some(desired_parent) {
+        if details
+            .as_ref()
+            .and_then(|details| details.remote_branch_id.as_deref())
+            .is_none()
+        {
+            let branch = client
+                .find_branch(&mapping.remote_id, desired_parent)
+                .await
+                .map_err(ProjectionError::Retry)?
+                .ok_or_else(|| {
+                    ProjectionError::Conflict(anyhow::anyhow!(
+                        "ReadWeave current branch cannot be identified safely"
+                    ))
+                })?;
+            state
+                .store
+                .upsert_remote_object_details(&RemoteObjectDetailsRecord {
+                    connector: CONNECTOR.to_owned(),
+                    object_type: mapping.object_type.clone(),
+                    local_id: mapping.local_id.clone(),
+                    remote_branch_id: Some(branch.branch_id),
+                    node_type: Some(mapping.object_type.clone()),
+                    last_synced_version: None,
+                    updated_at: Utc::now(),
+                })
+                .map_err(ProjectionError::Retry)?;
+        }
         return Ok(());
     }
+    // A previous attempt may have created the desired branch before its local
+    // mapping update completed. Recover that branch first; otherwise the next
+    // retry would create a second placement for the same note.
+    let new_branch = match client
+        .find_branch(&mapping.remote_id, desired_parent)
+        .await
+        .map_err(ProjectionError::Retry)?
+    {
+        Some(branch) => branch,
+        None => {
+            // The new branch must exist before the old branch is deleted.
+            // ETAPI deletes the note when the last branch is deleted, so
+            // reversing this order would make a workspace move destructive.
+            client
+                .create_branch(&mapping.remote_id, desired_parent, position)
+                .await
+                .map_err(ProjectionError::Retry)?
+        }
+    };
     let old_parent = mapping.remote_parent_id.as_deref().ok_or_else(|| {
         ProjectionError::Conflict(anyhow::anyhow!("ReadWeave mapping has no current parent"))
     })?;
-    let old_branch = match state
-        .store
-        .get_remote_object_details(CONNECTOR, &mapping.object_type, &mapping.local_id)
-        .map_err(ProjectionError::Retry)?
-        .and_then(|details| details.remote_branch_id)
+    let old_branch = match details
+        .as_ref()
+        .and_then(|details| details.remote_branch_id.clone())
     {
         Some(branch_id) => Some(branch_id),
         None => client
@@ -705,22 +910,10 @@ async fn ensure_parent_branch(
             .await
             .map_err(ProjectionError::Retry)?
             .map(|branch| branch.branch_id),
-    }
-    .ok_or_else(|| {
-        ProjectionError::Conflict(anyhow::anyhow!(
-            "ReadWeave source branch cannot be identified safely"
-        ))
-    })?;
-
-    // The new branch must exist before the old branch is deleted. ETAPI deletes the note when
-    // the last branch is deleted, so reversing this order would make a workspace move destructive.
-    let new_branch = client
-        .create_branch(&mapping.remote_id, desired_parent, position)
-        .await
-        .map_err(ProjectionError::Retry)?;
-    if new_branch.branch_id != old_branch {
+    };
+    if let Some(old_branch) = old_branch.filter(|branch_id| *branch_id != new_branch.branch_id) {
         client
-            .delete_branch(&old_branch)
+            .delete_owned_branch(&mapping.remote_id, &old_branch)
             .await
             .map_err(ProjectionError::Retry)?;
     }
@@ -819,11 +1012,19 @@ async fn ensure_recovery_note(
     let parent = source.remote_parent_id.as_deref().ok_or_else(|| {
         ProjectionError::Retry(anyhow::anyhow!("conflicted section parent is missing"))
     })?;
-    let title = format!("AIALRA 恢复副本 {}", Utc::now().format("%Y-%m-%d %H%M%S"));
-    let placement = client
-        .create_note(parent, &title, managed)
+    let managed_hash = content_hash(managed);
+    let title = format!("AIALRA 恢复副本 {}", &managed_hash[..16]);
+    let placement = match client
+        .find_created_note(parent, &title, managed)
         .await
-        .map_err(ProjectionError::Retry)?;
+        .map_err(ProjectionError::Retry)?
+    {
+        Some(placement) => placement,
+        None => client
+            .create_note(parent, &title, managed)
+            .await
+            .map_err(ProjectionError::Retry)?,
+    };
     let now = Utc::now();
     state
         .store
@@ -1204,9 +1405,99 @@ pub fn status_payload(state: &AppState, project_id: &str) -> Result<Value, ApiEr
             }
         }
     }
-    Ok(
-        json!({"configured": configured(), "queued": status.queued, "syncing": status.leased, "completed": status.completed, "conflicts": status.conflicts, "updated_at": status.updated_at, "note_url": note_url, "targets": targets}),
-    )
+    let public_url = ReadWeaveClient::from_env().and_then(|client| client.public_url);
+    Ok(json!({
+        "configured": configured(),
+        "queued": status.queued,
+        "syncing": status.leased,
+        "completed": status.completed,
+        "conflicts": status.conflicts,
+        "updated_at": status.updated_at,
+        "note_url": note_url,
+        "targets": targets,
+        "connection": {
+            "configured": configured(),
+            "public_url": public_url,
+            "policy": "仅同步稳定字幕、译文、讲解和课件索引，不同步原始音频或秘密配置"
+        }
+    }))
+}
+
+/// Remove only AIALRA-owned ReadWeave branches before local data is purged.
+/// Missing branches are already deleted and therefore idempotently successful.
+pub async fn purge_workspace_objects(
+    state: &AppState,
+    items: &[WorkspaceTrashItemRecord],
+) -> Result<(), ApiError> {
+    let Some(client) = ReadWeaveClient::from_env() else {
+        return Ok(());
+    };
+    let mut targets = Vec::<(u8, String, String)>::new();
+    for item in items {
+        match item.entity_type.as_str() {
+            "folder" => targets.push((3, "workspace_folder".to_owned(), item.entity_id.clone())),
+            "project" => targets.push((2, "project".to_owned(), item.entity_id.clone())),
+            "session" => {
+                targets.push((1, "session".to_owned(), item.entity_id.clone()));
+                for (local_id, object_type) in [
+                    (format!("{}:overview", item.entity_id), "section"),
+                    (format!("{}:transcript", item.entity_id), "section"),
+                    (format!("{}:explanations", item.entity_id), "section"),
+                    (format!("{}:assets", item.entity_id), "section"),
+                    (format!("{}:user", item.entity_id), "user_notes"),
+                ] {
+                    targets.push((0, object_type.to_owned(), local_id));
+                }
+            }
+            _ => continue,
+        }
+    }
+    targets.sort_by_key(|(rank, _, _)| *rank);
+    for (_, object_type, local_id) in targets {
+        let Some(mapping) =
+            state
+                .store
+                .get_remote_object_map(CONNECTOR, &object_type, &local_id)?
+        else {
+            continue;
+        };
+        let details = state
+            .store
+            .get_remote_object_details(CONNECTOR, &object_type, &local_id)?;
+        let branch_id = match details.and_then(|details| details.remote_branch_id) {
+            Some(branch_id) => Some(branch_id),
+            None => {
+                if let Some(parent) = mapping.remote_parent_id.as_deref() {
+                    client
+                        .find_branch(&mapping.remote_id, parent)
+                        .await
+                        .map_err(|_error| {
+                            tracing::warn!(
+                                error_kind = "readweave_purge_lookup_failed",
+                                "ReadWeave branch lookup failed during purge"
+                            );
+                            ApiError::conflict("ReadWeave 节点无法确认归属，已保留在回收站")
+                        })?
+                        .map(|branch| branch.branch_id)
+                } else {
+                    None
+                }
+            }
+        };
+        let branch_id = branch_id
+            .ok_or_else(|| ApiError::conflict("ReadWeave 节点无法确认归属，已保留在回收站"))?;
+        client
+            .delete_owned_branch(&mapping.remote_id, &branch_id)
+            .await
+            .map_err(|_error| {
+                tracing::warn!(
+                    error_kind = "readweave_purge_delete_failed",
+                    "ReadWeave 节点删除失败"
+                );
+                ApiError::conflict("ReadWeave 节点删除失败，已保留在回收站，请重试")
+            })?;
+    }
+    Ok(())
 }
 
 pub fn preview_payload(state: &AppState, project_id: &str) -> Result<Value, ApiError> {

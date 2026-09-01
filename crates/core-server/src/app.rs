@@ -201,10 +201,13 @@ impl AppState {
                 event.event_type.as_str(),
                 "session.processing" | "session.completed" | "session.failed"
             );
-            if let Err(error) =
+            if let Err(_error) =
                 crate::readweave::enqueue_projection(self, &event.session_id, immediate)
             {
-                tracing::warn!(error_kind = "readweave_enqueue_failed", error = %error, "ReadWeave projection enqueue failed without blocking the course pipeline");
+                tracing::warn!(
+                    error_kind = "readweave_enqueue_failed",
+                    "ReadWeave projection enqueue failed without blocking the course pipeline"
+                );
             }
         }
         Ok(())
@@ -215,6 +218,7 @@ impl AppState {
 pub struct ApiError {
     status: StatusCode,
     message: String,
+    code: &'static str,
 }
 
 impl ApiError {
@@ -222,6 +226,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            code: "bad_request",
         }
     }
 
@@ -229,6 +234,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            code: "not_found",
         }
     }
 
@@ -236,6 +242,7 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
+            code: "service_unavailable",
         }
     }
 
@@ -243,6 +250,15 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: message.into(),
+            code: "unauthorized",
+        }
+    }
+
+    pub fn unauthorized_with_code(message: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+            code,
         }
     }
 
@@ -250,6 +266,7 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
+            code: "forbidden",
         }
     }
 
@@ -257,41 +274,54 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             message: message.into(),
+            code: "conflict",
         }
     }
 
-    pub fn upstream(error: anyhow::Error) -> Self {
-        tracing::warn!(error = %error, "upstream provider request failed");
+    pub fn upstream(_error: anyhow::Error) -> Self {
+        tracing::warn!(
+            error_kind = "upstream_provider_failed",
+            "upstream provider request failed"
+        );
         Self {
             status: StatusCode::BAD_GATEWAY,
-            message: "DingTalk request failed; local recording can continue".to_owned(),
+            message: "外部服务暂时不可用，本地录音仍可继续".to_owned(),
+            code: "upstream_provider_failed",
         }
     }
 }
 
 impl From<anyhow::Error> for ApiError {
-    fn from(error: anyhow::Error) -> Self {
-        tracing::error!(error = %error, "request failed");
+    fn from(_error: anyhow::Error) -> Self {
+        tracing::error!(error_kind = "local_service_failed", "request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "local service operation failed".to_owned(),
+            message: "后台操作失败，请稍后重试".to_owned(),
+            code: "internal_error",
         }
     }
 }
 
 impl From<axum::extract::multipart::MultipartError> for ApiError {
-    fn from(error: axum::extract::multipart::MultipartError) -> Self {
-        tracing::warn!(error = %error, "multipart request rejected");
+    fn from(_error: axum::extract::multipart::MultipartError) -> Self {
+        tracing::warn!(
+            error_kind = "invalid_multipart",
+            "multipart request rejected"
+        );
         Self::bad_request("invalid multipart upload")
     }
 }
 
 impl From<serde_json::Error> for ApiError {
-    fn from(error: serde_json::Error) -> Self {
-        tracing::error!(error = %error, "JSON serialization failed");
+    fn from(_error: serde_json::Error) -> Self {
+        tracing::error!(
+            error_kind = "json_operation_failed",
+            "JSON serialization failed"
+        );
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "local JSON operation failed".to_owned(),
+            message: "后台结果暂时无法读取，请稍后重试".to_owned(),
+            code: "json_operation_failed",
         }
     }
 }
@@ -299,6 +329,7 @@ impl From<serde_json::Error> for ApiError {
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
+    code: &'static str,
 }
 
 impl IntoResponse for ApiError {
@@ -307,6 +338,7 @@ impl IntoResponse for ApiError {
             self.status,
             Json(ErrorBody {
                 error: self.message,
+                code: self.code,
             }),
         )
             .into_response()

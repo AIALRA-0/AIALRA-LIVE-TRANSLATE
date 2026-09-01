@@ -136,8 +136,6 @@ tailscale_ip="$(tailscale ip -4 | head -n 1)"
 [[ "$tailscale_ip" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]
 
 export AIALRA_BUILD_ID="$build_id"
-docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" build
-
 deployment_counts() {
   python3 - "$data_path/aialra.sqlite" <<'PY'
 import sqlite3
@@ -162,6 +160,9 @@ if (( active_leases != 0 || active_jobs != 0 )); then
   exit 69
 fi
 
+# Reject busy deployments before spending time or disk on a candidate image.
+docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" build
+
 env_stage="$(mktemp "$backup_dir/.env.XXXXXX")"
 grep -v '^AIALRA_BUILD_ID=' "$env_file" > "$env_stage"
 printf 'AIALRA_BUILD_ID=%s\n' "$build_id" >> "$env_stage"
@@ -182,7 +183,7 @@ for database_file in aialra.sqlite aialra.sqlite-wal aialra.sqlite-shm; do
 done
 
 ln -sfn "$release_dir" "$current_link"
-docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" up -d --remove-orphans
+docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" up -d
 
 # ReadWeave remains independently deployable while ETAPI stays on the private application network
 readweave_container="${AIALRA_READWEAVE_CONTAINER:-readweave}"

@@ -2,6 +2,21 @@
 
 状态日期：2026-09-01
 
+## feedback-01 候选验证（2026-09-01，待远端发布）
+
+本节只记录本批候选，不覆盖下方历史 v25 线上结果；在远端合并和快速生产冒烟完成前，候选状态为 `NOT DEPLOYED`。
+
+| 范围 | 当前结果 | 说明 |
+|---|---|---|
+| Rust | 通过 | 格式、workspace 测试、Clippy 和 `git diff --check` 通过 |
+| Python | 通过 | GPU Agent／Model Worker 30 项测试、Ruff、mypy 通过 |
+| Web | 通过 | TypeScript、21 项测试、ESLint、生产构建通过 |
+| Android | 环境阻断 | 本机 Java loopback 建连失败；没有把环境失败记为代码通过 |
+| 本地容器 | 未使用 | 未启动 Docker、Docker Desktop、WSL 或本地容器构建 |
+| 远端发布 | 未完成 | 远端 Bash、合并、VPS 部署和新版本生产冒烟待后续步骤 |
+
+本批新增路径包括浏览器／Android 录音认证隔离、durable ACK 辅助失败收口、幂等停止、GPU 失败阶段上报、ReadWeave 映射恢复与所有权安全删除、回收站依赖顺序、右键菜单、拖拽、主题、只读运行状态和显式 ReadWeave 确认。公开文档不写入令牌、真实会话 ID、私有路径、录音、模型原文或原始日志。
+
 ## 1 结论
 
 线上运行 `quality-v25-20260901-43a61ad`；v25 已通过相关快速检查、部署追溯核对和生产合成音频链路冒烟，当前判定为 `V25 ONLINE / TECHNICAL SMOKE PASSED`

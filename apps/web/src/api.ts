@@ -38,8 +38,29 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
   if (!response.ok) {
     const body = (await response.json().catch(() => ({ error: response.statusText }))) as {
       error?: string;
+      code?: string;
     };
-    throw new Error(body.error || `请求失败：${response.status}`);
+    const knownMessages: Record<string, string> = {
+      auth_session_required: "登录状态未生效，请刷新页面后重试",
+      auth_identity_required: "登录身份未确认，请刷新页面后重试",
+      unauthorized: "当前登录状态无效，请重新登录",
+      forbidden: "当前账号没有执行此操作的权限",
+      bad_request: "请求内容不完整或已失效，请检查后重试",
+      not_found: "目标内容不存在，可能已被移动或删除",
+      conflict: "当前操作与另一台设备或后台处理冲突，请稍后重试",
+      service_unavailable: "后台服务暂时不可用，请稍后重试",
+      upstream_provider_failed: "外部服务暂时不可用，本地课程流程仍可继续",
+      json_operation_failed: "后台结果暂时无法读取，请稍后重试",
+      internal_error: "后台操作失败，请稍后重试",
+    };
+    const message = body.code && knownMessages[body.code]
+      ? knownMessages[body.code]
+      : body.error && /[\u3400-\u4dbf\u4e00-\u9fff]/.test(body.error) && !(/[\\/]|token|session_|job_|sha256:/i.test(body.error))
+        ? body.error
+        : `请求未完成（${response.status}）`;
+    const error = new Error(message);
+    Object.assign(error, { code: body.code ?? "request_failed", status: response.status });
+    throw error;
   }
   return (await response.json()) as T;
 }
@@ -97,6 +118,11 @@ export const api = {
   readWeaveStatus: (projectId: string) => checked<ReadWeaveStatus>(fetch(`/api/v1/projects/${projectId}/readweave`)),
   readWeavePreview: (projectId: string) => checked<ReadWeavePreview>(fetch(`/api/v1/projects/${projectId}/readweave/preview`)),
   reconcileReadWeave: (projectId: string) => checked<{ queued: boolean }>(fetch(`/api/v1/projects/${projectId}/readweave/reconcile`, { method: "POST" })),
+  trash: (entityType: "folder" | "project" | "session", entityId: string) => checked<{ accepted: boolean }>(fetch(`/api/v1/workspace/trash/${entityType}/${entityId}`, { method: "POST" })),
+  restoreTrash: (entityType: "folder" | "project" | "session", entityId: string) => checked<{ accepted: boolean }>(fetch(`/api/v1/workspace/trash/${entityType}/${entityId}/restore`, { method: "POST" })),
+  purgeTrash: (entityType: "folder" | "project" | "session", entityId: string) => checked<{ accepted: boolean; removed_objects: number }>(fetch(`/api/v1/workspace/trash/${entityType}/${entityId}/purge`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation: "永久删除" }),
+  })),
   createSession: (input: {
     title: string;
     source_language: string;
@@ -154,7 +180,7 @@ export function subscribeWorkspace(onUpdate: (update: WorkspaceUpdate) => void, 
   const source = new EventSource("/api/v1/workspace/stream");
   source.onopen = () => onConnection(true);
   source.onerror = () => onConnection(false);
-  ["workspace.folder.created", "workspace.folder.updated", "workspace.folder.moved", "workspace.folder.archived", "workspace.project.created", "workspace.project.updated", "workspace.project.placed", "workspace.session.created", "workspace.session.updated"].forEach((eventName) => {
+  ["workspace.folder.created", "workspace.folder.updated", "workspace.folder.moved", "workspace.folder.archived", "workspace.project.created", "workspace.project.updated", "workspace.project.placed", "workspace.session.created", "workspace.session.updated", "workspace.trash.moved", "workspace.trash.restored", "workspace.trash.purged"].forEach((eventName) => {
     source.addEventListener(eventName, (message) => onUpdate(JSON.parse((message as MessageEvent).data) as WorkspaceUpdate));
   });
   return () => source.close();
