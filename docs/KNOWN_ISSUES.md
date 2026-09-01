@@ -10,10 +10,11 @@
 - 浏览器音频 WebSocket 曾在公网代理的安卓免登录位置被 Core 判定为缺少可信 Authentik 代理，`quality-v24-20260831` 已改为验证已签发租约恢复项目身份，并经 `wss://live.aialra.online` 公网路径收到 durable ACK；远程 Mac Chrome 的 CDP 端口当前返回空标签，暂不能自动附着现有登录页完成真实硬件收音
 - 浏览器优先录音和可见阶段反馈已部署到 `quality-v24-20260831`，现有浏览器标签已验证工作区文案、录音阶段提示、权限超时和 Android 备用入口
 - Android 已完成前台与锁屏收音、ACK 清理和页面安全停止，真实设备证据仍缺通知栏停止、来电、蓝牙、Wi-Fi 切换和耗电矩阵
-- VPS 根分区可用空间约 20 GB，长测期间需要继续监控磁盘增长，不能把磁盘满测试和生产运行混用
-- 脱敏公开候选已消除迁移后缀、局部参数名和锁文件序列化造成的保守扫描误报；GitHub PR #2 已创建，但最终树签名认证、完整 PR 自审、合并和远端回读完成前仍不得视为主干收敛完成
+- VPS 根分区可用空间为 56 GiB，当前满足“至少 20 GiB 或 5%”的构建门槛；长测期间仍需监控磁盘增长，不能把磁盘满测试和生产运行混用
+- 脱敏公开候选已消除迁移后缀、局部参数名和锁文件序列化造成的保守扫描误报；最终候选已完成签名认证、完整 PR 自审、squash 合并和远端主干回读，旧 PR 与远端旧分支已经关闭并删除
 - Android 构建每次运行需要系统提供 PowerShell（Windows）或 Base64 与 SHA-256 工具（macOS/Linux）来复核已固定摘要的 Wrapper；缓存不匹配会从已审计文本恢复，缺少基础工具会明确失败，不会执行未验证缓存或下载替代品
-- 本轮 Wrapper 与门禁修订已重新通过 Rust、Python、Web、Clippy、Windows／POSIX 缓存破坏恢复、Android 单元测试与 debug assemble，以及浏览器 durable ACK、租约、工作区和 IDOR 等合成运行门；最终树签名认证、合并后 main 回读和 VPS 版本追溯尚未完成，因此不能标记为 GitHub 收敛完成
+- 本轮 Wrapper 与门禁修订已重新通过 Rust、Python、Web、Clippy、Windows／POSIX 缓存破坏恢复、Android 单元测试与 debug assemble，以及浏览器 durable ACK、租约、工作区和 IDOR 等合成运行门；最终树签名认证、合并后 `main` 回读和 VPS 发布文件追溯已经完成
+- 当前 v24 发布目录没有内嵌 `BUILD_ID` 或 OCI revision 标签；现有追溯依赖 183／183 文件与私有归档源的精确匹配。下一次运行代码发布必须写入已合并 `main` SHA，避免继续依赖外部清单
 
 ## 1 长时与真实课堂证据
 

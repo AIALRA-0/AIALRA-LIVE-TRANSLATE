@@ -14,7 +14,9 @@ P0 数据与安全修正已大部分通过自动检查和真实短测；P1 长�
 - 2026-09-01 自审修订已重新通过 Rust 45 项、Python 29 项、Web 21 项、Ruff、mypy、类型检查、ESLint、生产构建、Clippy 零警告、`git diff --check` 以及 Windows／POSIX Wrapper 缓存破坏恢复
 - Android 全量重跑在默认临时目录下数次于项目任务开始前被 Java `Unable to establish loopback connection` 阻断；切换到独立短路径临时目录和现有 Android Studio JBR 后，`testDebugUnitTest` 与 `assembleDebug` 在 1 分 5 秒内完成，41 个实际任务全部通过，Debug APK 为 3,095,538 字节
 - 2026-09-01 本地合成运行复核通过：浏览器 durable ACK 与安全停止、对象租约授权、工作区树、第二设备 `409`、租约接管、旧租约拒绝和 SSE 游标重放；IDOR 音频用例使用攻击者身份加未签发租约，和公网 Nginx 清空身份头的真实边界一致
-- GitHub PR #2 已创建但尚未合并；最终文件树仍必须完成隔离签名认证和 PR 自审，合并后 main 回读与 VPS release SHA 尚未完成，不提前宣称发布或最终 sign-off
+- 最终候选已完成完整 diff 自审和隔离签名认证，未决发现为 0；GitHub PR #2 已 squash 合并，合并后 `main` 文件树与认证候选精确一致，短期分支已删除
+- VPS 只读回读确认仍运行 `quality-v24-20260831`：183／183 个发布文件与私有归档源精确匹配，Core healthy、重启计数 0、私有健康接口 `200`、公开入口 `302`、公开 `/internal/` 为 `404`，根分区可用 56 GiB；本批没有运行代码变化，因此没有创建 v25 或重复部署 v24
+- 上述结果关闭 GitHub 单主干收敛门，不改变总体 `PARTIAL / NOT RELEASE SIGN-OFF`：6 小时失败、24 小时无正式结果和真实设备矩阵仍未关闭
 
 ### 1.0 本轮线上执行读回（2026-08-31，优先于下方历史记录）
 

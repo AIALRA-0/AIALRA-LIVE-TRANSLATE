@@ -17,7 +17,9 @@
 - Android Gradle Wrapper 以可扫描的 Base64 文本保存；启动脚本每次执行都会复核缓存 JAR 的固定 SHA-256，摘要不一致时从已审计文本原子恢复，并原子刷新同版本 properties；不下载或替换 Wrapper
 - 上一精确候选 `8ec1094` 已通过 Rust workspace 45 项、Python 29 项、Web 21 项、Android 单元测试与 debug assemble；2026-09-01 自审修订已重新通过 Rust 45 项、Python 29 项、Web 21 项、Ruff／mypy、类型检查／ESLint／生产构建、Clippy 零警告、Windows／POSIX Wrapper 缓存破坏恢复，以及 Android `testDebugUnitTest` 与 `assembleDebug` 41 个实际任务
 - 2026-09-01 的本地合成运行复核已通过浏览器 durable ACK 与安全停止、对象租约授权、工作区树、单录音租约第二设备 `409`、租约接管、旧租约拒绝和 SSE 游标重放；IDOR WebSocket 用例已改为攻击者身份加未签发租约，避免把已签发高熵租约错误建模为公开对象 ID
-- GitHub PR #2 已建立但尚未合并；最终文件树仍须完成签名认证、PR 自审和合并后主干回读。这些调整不改变当前 VPS `quality-v24-20260831`，不执行无差异部署
+- GitHub PR #2 已经完整 diff 自审、隔离签名认证并以 squash 方式合并；合并后 `main` 文件树与认证候选精确一致，短期分支已删除，旧 PR #1 已注明被取代并关闭
+- 本地日常仓库已收敛为一个工作目录和一个跟踪 `origin/main` 的长期 `main`；旧私有 refs 只保留在已验证的离线 bundle，不进入 GitHub 历史
+- VPS 继续运行 `quality-v24-20260831`，183／183 个发布文件与私有归档源精确匹配；Core healthy、重启计数 0、私有健康接口 `200`、公开入口 `302`、公开 `/internal/` 为 `404`，根分区可用 56 GiB。本批没有运行代码变化，因此不创建 v25，也不执行无差异部署
 
 ### 1.0 本轮浏览器优先录音修正（已部署）
 
