@@ -63,6 +63,17 @@ struct RecordingAdmission {
     max_asr_backlog_seconds: i64,
 }
 
+#[derive(Debug, Serialize)]
+struct RecordingSessionStatus {
+    session_id: String,
+    session_title: String,
+    state: &'static str,
+    active_model_jobs: u64,
+    recoverable: bool,
+    reason: &'static str,
+    updated_at: chrono::DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AcquireLeaseRequest {
     device_id: String,
@@ -285,11 +296,22 @@ pub async fn recording_status(
     } else {
         None
     };
+    let active_lease_session_id = lease
+        .as_ref()
+        .and_then(|value| value.get("session_id"))
+        .and_then(Value::as_str);
+    let sessions = state
+        .store
+        .list_project_sessions(&project_id)?
+        .into_iter()
+        .map(|session| recording_session_status(&state, session, active_lease_session_id))
+        .collect::<Result<Vec<_>, ApiError>>()?;
     Ok(Json(json!({
         "project_id": project_id,
         "server_time": now,
         "lease": lease,
-        "admission": recording_admission(&state)?
+        "admission": recording_admission(&state)?,
+        "sessions": sessions
     })))
 }
 
@@ -306,6 +328,19 @@ pub async fn acquire_recording(
         .store
         .get_recording_lease(&project_id)?
         .is_some_and(|record| record.expires_at > now);
+    let active_model_jobs = state.store.model_queue_counts(Some(&session_id))?;
+    if !has_active_project_lease
+        && matches!(
+            session.state,
+            SessionState::Recording | SessionState::Degraded
+        )
+        && active_model_jobs.queued + active_model_jobs.leased > 0
+    {
+        return Err(ApiError::conflict_with_code(
+            "本次课程仍有后台任务处理中，请等待队列排空后再继续收音",
+            "recording_session_processing",
+        ));
+    }
     if recording_requires_admission(session.state, has_active_project_lease) {
         let admission = recording_admission(&state)?;
         if !admission.allowed {
@@ -347,7 +382,10 @@ pub async fn acquire_recording(
         let _ = state
             .store
             .release_recording_lease(&project_id, &session_id, &hash);
-        return Err(ApiError::conflict("session is not available for recording"));
+        return Err(ApiError::conflict_with_code(
+            "本次课程当前不能继续录音",
+            "recording_session_unavailable",
+        ));
     }
     if state
         .record_project_update(
@@ -363,11 +401,19 @@ pub async fn acquire_recording(
             "recording lease committed without notification"
         );
     }
-    let _ = state.record_workspace_update(
-        &user.0,
-        "workspace.recording.changed",
-        json!({"project_id": project_id, "session_id": session_id, "active": true}),
-    );
+    if state
+        .record_workspace_update(
+            &user.0,
+            "workspace.recording.changed",
+            json!({"project_id": project_id, "session_id": session_id, "active": true, "generation": lease.generation}),
+        )
+        .is_err()
+    {
+        tracing::warn!(
+            error_kind = "recording_workspace_notification_failed",
+            "recording lease committed without workspace notification"
+        );
+    }
     Ok(Json(lease_response(lease, token)))
 }
 
@@ -385,16 +431,33 @@ pub async fn renew_recording(
         return Err(ApiError::conflict("session is not recording"));
     }
     validate_device_id(&request.device_id)?;
-    let lease = state
-        .store
-        .renew_recording_lease(
-            &project_id,
-            &session_id,
-            &request.device_id,
-            &hash_token(&request.lease_token),
-            LEASE_SECONDS,
-        )?
-        .ok_or_else(|| ApiError::conflict("recording lease expired or changed"))?;
+    let lease = match state.store.renew_recording_lease(
+        &project_id,
+        &session_id,
+        &request.device_id,
+        &hash_token(&request.lease_token),
+        LEASE_SECONDS,
+    )? {
+        Some(lease) => lease,
+        None => {
+            let active_other =
+                state
+                    .store
+                    .get_recording_lease(&project_id)?
+                    .is_some_and(|current| {
+                        current.expires_at > Utc::now()
+                            && current.holder_device_id != request.device_id
+                    });
+            return Err(if active_other {
+                ApiError::conflict_with_code(
+                    "另一台设备已经接管本项目录音",
+                    "recording_lease_conflict",
+                )
+            } else {
+                ApiError::conflict_with_code("本机录音租约已到期或失效", "recording_lease_expired")
+            });
+        }
+    };
     if state
         .record_project_update(
             &project_id,
@@ -409,6 +472,11 @@ pub async fn renew_recording(
             "recording lease renewal committed without notification"
         );
     }
+    let _ = state.record_workspace_update(
+        &user.0,
+        "workspace.recording.changed",
+        json!({"project_id": project_id, "session_id": session_id, "active": true, "expires_at": lease.expires_at}),
+    );
     Ok(Json(public_lease(&lease)))
 }
 
@@ -419,6 +487,7 @@ pub async fn stop_recording(
     Json(request): Json<LeaseSecretRequest>,
 ) -> Result<Json<SessionRecord>, ApiError> {
     owned_project_session(&state, &user.0, &project_id, &session_id)?;
+    validate_device_id(&request.device_id)?;
     let hash = hash_token(&request.lease_token);
     let current = state
         .store
@@ -445,13 +514,36 @@ pub async fn stop_recording(
             state.store.get_session(&session_id)?.unwrap_or(current),
         ));
     }
-    let lease = state
+    let lease = match state
         .store
         .validate_recording_lease(&session_id, &hash)?
         .filter(|lease| {
             lease.project_id == project_id && lease.holder_device_id == request.device_id
-        })
-        .ok_or_else(|| ApiError::conflict("recording lease expired or changed"))?;
+        }) {
+        Some(lease) => lease,
+        None => {
+            let active_other =
+                state
+                    .store
+                    .get_recording_lease(&project_id)?
+                    .is_some_and(|current| {
+                        current.expires_at > Utc::now()
+                            && (current.session_id != session_id
+                                || current.holder_device_id != request.device_id)
+                    });
+            return Err(if active_other {
+                ApiError::conflict_with_code(
+                    "另一台设备已经接管本项目录音",
+                    "recording_lease_conflict",
+                )
+            } else {
+                ApiError::conflict_with_code(
+                    "本机录音租约已到期或失效，未确认音频仍保留",
+                    "recording_lease_expired",
+                )
+            });
+        }
+    };
     if matches!(
         current.state,
         SessionState::Recording | SessionState::Degraded
@@ -469,7 +561,10 @@ pub async fn stop_recording(
             json!({"generation": lease.generation}),
         );
     } else if current.state != SessionState::Stopping {
-        return Err(ApiError::conflict("session is not recording"));
+        return Err(ApiError::conflict_with_code(
+            "本次课程当前不能停止录音",
+            "recording_session_unavailable",
+        ));
     }
     let sealed = flush_session_buffers(&state, &session_id)?;
     let processing = if state
@@ -717,6 +812,55 @@ fn recording_status_lease(
     })
 }
 
+fn recording_session_status(
+    state: &AppState,
+    session: SessionRecord,
+    active_lease_session_id: Option<&str>,
+) -> Result<RecordingSessionStatus, ApiError> {
+    let active_model_jobs = state.store.model_queue_counts(Some(&session.id))?;
+    let has_active_lease = active_lease_session_id == Some(session.id.as_str());
+    let (recoverable, reason) = match session.state {
+        SessionState::Ready => (false, "ready"),
+        SessionState::Recording | SessionState::Degraded if has_active_lease => {
+            (false, "active_recording")
+        }
+        SessionState::Recording | SessionState::Degraded
+            if active_model_jobs.queued + active_model_jobs.leased == 0 =>
+        {
+            (true, "recovery_available")
+        }
+        SessionState::Recording | SessionState::Degraded => (false, "processing"),
+        SessionState::Stopping | SessionState::Processing => (false, "processing"),
+        SessionState::Completed
+        | SessionState::Failed
+        | SessionState::Created
+        | SessionState::Archived => (false, "not_recordable"),
+    };
+    Ok(RecordingSessionStatus {
+        session_id: session.id,
+        session_title: session.title,
+        state: session_state_name(session.state),
+        active_model_jobs: active_model_jobs.queued + active_model_jobs.leased,
+        recoverable,
+        reason,
+        updated_at: session.updated_at,
+    })
+}
+
+fn session_state_name(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Created => "created",
+        SessionState::Ready => "ready",
+        SessionState::Recording => "recording",
+        SessionState::Degraded => "degraded",
+        SessionState::Stopping => "stopping",
+        SessionState::Processing => "processing",
+        SessionState::Completed => "completed",
+        SessionState::Failed => "failed",
+        SessionState::Archived => "archived",
+    }
+}
+
 pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
@@ -822,7 +966,7 @@ fn default_target_language() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aialra_event_store::WorkerHeartbeat;
+    use aialra_event_store::{NewModelJob, NewSession, WorkerHeartbeat};
 
     #[test]
     fn lease_tokens_are_url_safe_and_hashable() {
@@ -914,5 +1058,70 @@ mod tests {
         assert!(!recording_requires_admission(SessionState::Degraded, false));
         assert!(!recording_requires_admission(SessionState::Ready, true));
         assert!(recording_requires_admission(SessionState::Ready, false));
+    }
+
+    #[test]
+    fn recording_status_marks_an_idle_unfinished_session_as_recoverable() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_recoverable".to_owned(),
+                title: "Recoverable course".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .store
+            .transition_session("session_recoverable", SessionState::Ready)
+            .unwrap();
+        state
+            .store
+            .transition_session("session_recoverable", SessionState::Recording)
+            .unwrap();
+
+        let recoverable = recording_session_status(
+            &state,
+            state
+                .store
+                .get_session("session_recoverable")
+                .unwrap()
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        assert!(recoverable.recoverable);
+        assert_eq!(recoverable.reason, "recovery_available");
+
+        state
+            .store
+            .enqueue_model_job(&NewModelJob {
+                id: "job-recoverable-translate".to_owned(),
+                session_id: "session_recoverable".to_owned(),
+                job_type: "translate".to_owned(),
+                priority: 70,
+                input: json!({"text": "pending"}),
+                input_object_hash: None,
+                idempotency_key: "translate:recoverable".to_owned(),
+            })
+            .unwrap();
+        let processing = recording_session_status(
+            &state,
+            state
+                .store
+                .get_session("session_recoverable")
+                .unwrap()
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        assert!(!processing.recoverable);
+        assert_eq!(processing.reason, "processing");
+        assert_eq!(processing.active_model_jobs, 1);
     }
 }

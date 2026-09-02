@@ -323,16 +323,29 @@ pub async fn upload_asset(
         .store
         .get_session(&session_id)?
         .ok_or_else(|| ApiError::not_found("session not found"))?;
-    let field = multipart
-        .next_field()
-        .await?
-        .ok_or_else(|| ApiError::bad_request("asset file is required"))?;
-    let file_name = field.file_name().unwrap_or("asset.bin").to_owned();
-    let media_type = field
-        .content_type()
-        .unwrap_or("application/octet-stream")
-        .to_owned();
-    let bytes = field.bytes().await?;
+    let mut file_name = None;
+    let mut media_type = None;
+    let mut bytes = None;
+    let mut queue_explanation = false;
+    while let Some(field) = multipart.next_field().await? {
+        if field.name() == Some("queue_explanation") {
+            queue_explanation = field.text().await?.trim() == "true";
+            continue;
+        }
+        if field.name() == Some("file") || bytes.is_none() {
+            file_name = Some(field.file_name().unwrap_or("asset.bin").to_owned());
+            media_type = Some(
+                field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_owned(),
+            );
+            bytes = Some(field.bytes().await?);
+        }
+    }
+    let file_name = file_name.ok_or_else(|| ApiError::bad_request("asset file is required"))?;
+    let media_type = media_type.unwrap_or_else(|| "application/octet-stream".to_owned());
+    let bytes = bytes.ok_or_else(|| ApiError::bad_request("asset file is required"))?;
     if bytes.len() > MAX_ASSET_BYTES {
         return Err(ApiError::bad_request(
             "asset exceeds 50 MiB bootstrap limit",
@@ -374,9 +387,23 @@ pub async fn upload_asset(
         input_object_hash: Some(stored.hash),
         idempotency_key: format!("asset_parse:{session_id}:{asset_id}"),
     })?;
-    Ok(Json(
-        json!({"asset_id": asset_id, "job_id": job.id, "page_ids": []}),
-    ))
+    let explain_job = if queue_explanation {
+        Some(crate::explanation::enqueue_deferred_explanation(
+            &state,
+            &session_id,
+            &asset_id,
+            &job.id,
+        )?)
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "asset_id": asset_id,
+        "job_id": job.id,
+        "page_ids": [],
+        "explain_job_id": explain_job.as_ref().map(|value| value.id.clone()),
+        "explain_status": explain_job.as_ref().map(|_| "等待材料解析和稳定段落")
+    })))
 }
 
 pub async fn asset_content(

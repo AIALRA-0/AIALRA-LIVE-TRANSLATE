@@ -99,7 +99,16 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
     }
 
     if (event.event_type === "model.job.failed" || event.event_type === "model.job.retry_scheduled") {
-      items.push({ id: event.event_id, kind: "status", title: event.event_type === "model.job.failed" ? "模型任务暂时不可用" : "真实模型等待恢复", body: "输入已经安全保存，任务会在本机模型恢复后继续处理", evidenceIds: [], occurredAt: event.captured_at_wall });
+      const errorKind = text(payload.error_kind);
+      const materialFailure = errorKind === "material_parse_failed";
+      items.push({
+        id: event.event_id,
+        kind: "status",
+        title: materialFailure ? "材料解析失败，讲解未执行" : event.event_type === "model.job.failed" ? "模型任务暂时不可用" : "真实模型等待恢复",
+        body: materialFailure ? "材料已经保存，但解析没有完成；请重新上传后再确认排队。" : "输入已经安全保存，任务会在本机模型恢复后继续处理",
+        evidenceIds: [],
+        occurredAt: event.captured_at_wall,
+      });
     }
   }
   return items;

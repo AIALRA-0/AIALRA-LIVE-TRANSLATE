@@ -74,6 +74,16 @@ describe("timeline mapping", () => {
     expect(item.body).toContain("最终总结暂未完成");
   });
 
+  it("shows a material parse failure without pretending explanation ran", () => {
+    const [item] = buildCourseDocument([event("model.job.failed", {
+      job_type: "asset_parse",
+      error_kind: "material_parse_failed",
+    })]);
+    expect(item.kind).toBe("status");
+    expect(item.title).toBe("材料解析失败，讲解未执行");
+    expect(item.body).toContain("请重新上传后再确认排队");
+  });
+
   it("keeps summary terminology visible as a separate readable line", () => {
     const [item] = buildCourseDocument([event("session.summary.created", {
       summary_id: "summary-1",

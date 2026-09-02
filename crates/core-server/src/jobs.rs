@@ -239,6 +239,13 @@ pub async fn complete_job(
             "runtime_proof_at_unix_ms": request.runtime_proof.observed_at_unix_ms
         }),
     );
+    if let Err(_error) = crate::explanation::activate_deferred_explanation(&state, &job.session_id)
+    {
+        tracing::warn!(
+            error_kind = "deferred_explanation_activation_failed",
+            "completed model job could not activate a waiting explanation"
+        );
+    }
     finish_session_if_drained(&state, &job.session_id)?;
     Ok(Json(json!({"accepted": true, "duplicate": false})))
 }
@@ -312,6 +319,28 @@ pub async fn fail_job(
                 "manual_retry_available": true,
             }),
         )?;
+    }
+    if status == "failed" && job.job_type == "asset_parse" {
+        for deferred in state
+            .store
+            .fail_deferred_explanations_for_dependency(&job_id, "material_parse_failed")?
+        {
+            let _ = state.emit_idempotent(
+                &format!("{}:material_dependency_failed", deferred.id),
+                &deferred.session_id,
+                "model_scheduler",
+                "model.job.failed",
+                0,
+                &deferred.id,
+                None,
+                json!({
+                    "job_id": deferred.id,
+                    "job_type": "explain",
+                    "error_kind": "material_parse_failed",
+                    "dependency_failed": true
+                }),
+            );
+        }
     }
     finish_session_if_drained(&state, &job.session_id)?;
     Ok(Json(json!({"accepted": true, "status": status})))

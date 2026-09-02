@@ -189,6 +189,7 @@ impl AppState {
                 event.event_type.as_str(),
                 "session.ready"
                     | "session.recording.started"
+                    | "session.stopping"
                     | "session.processing"
                     | "session.completed"
                     | "session.failed"

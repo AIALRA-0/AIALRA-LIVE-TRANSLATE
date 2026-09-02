@@ -109,6 +109,7 @@ function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: 
   if (phase === "connecting") return "正在连接服务器";
   if (phase === "recording") return "正在收音";
   if (phase === "blocked") return "项目录音已被其他设备占用";
+  if (phase === "recoverable") return "本次课程可恢复";
   if (phase === "stopping") return "正在停止并保存尾音";
   if (phase === "processing") return "模型处理中";
   if (phase === "error") return "录音需要处理";
@@ -121,8 +122,9 @@ function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: 
 }
 
 function capturePhaseTone(phase: CapturePhase, sessionState: string, hasLease: boolean): "green" | "yellow" | "red" | "gray" {
-  if (phase === "recording" || phase === "error" || (sessionState === "recording" && !hasLease)) return "red";
+  if (phase === "recording" || phase === "error" || (sessionState === "recording" && !hasLease && !["recoverable", "processing"].includes(phase))) return "red";
   if (phase === "blocked") return "yellow";
+  if (phase === "recoverable") return "green";
   if (["requesting-permission", "acquiring-lease", "connecting", "stopping", "processing"].includes(phase) || sessionState === "processing") return "yellow";
   if (sessionState === "ready" || sessionState === "completed") return "green";
   if (sessionState === "failed") return "red";
@@ -137,6 +139,7 @@ function captureActionLabel(phase: CapturePhase, hasLease: boolean, mode: Captur
   if (phase === "stopping") return "正在保存尾音";
   if (phase === "processing") return "模型处理中";
   if (phase === "blocked") return "重新检查录音状态";
+  if (phase === "recoverable") return "确认后继续本次课程";
   return hasLease ? "继续连接收音" : "开始录音";
 }
 
@@ -168,8 +171,9 @@ type WorkspaceDialogState =
   | { action: "rename-project" | "move-project" | "project-language"; project: Project }
   | { action: "rename-session"; project: Project; session: Session };
 type WorkspaceTarget = WorkspaceDragTarget;
+type WorkspaceContextTarget = WorkspaceTarget | { entityType: "root" };
 type ContextMenuState =
-  | { kind: "workspace"; x: number; y: number; target: WorkspaceTarget }
+  | { kind: "workspace"; x: number; y: number; target: WorkspaceContextTarget }
   | { kind: "trash"; x: number; y: number; item: WorkspaceTrashItem };
 
 function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, onToggleTheme, onSelectProject, onSelectSession, onCreateFolder, onCreateProject, onUpdateFolder, onPlaceProject, onUpdateProject, onUpdateSession, onMoveWorkspace, onTrash, onRestoreTrash, onPurgeTrash, onOpenSettings }: {
@@ -274,13 +278,44 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     return targetTitle({ entityType: item.entity_type, entityId: item.entity_id, projectId: item.original_project_id ?? undefined });
   }
 
+  function trashBlockReason(target: WorkspaceTarget): string | null {
+    const blockedStates = new Set(["recording", "degraded", "stopping", "processing"]);
+    let sessionIds: string[] = [];
+    if (target.entityType === "session") {
+      sessionIds = [target.entityId];
+    } else if (target.entityType === "project") {
+      sessionIds = snapshot.sessions.filter((session) => snapshot.session_projects[session.id] === target.entityId).map((session) => session.id);
+    } else {
+      const folders = new Set<string>([target.entityId]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        snapshot.folders.forEach((folder) => {
+          if (folder.parent_id && folders.has(folder.parent_id) && !folders.has(folder.id)) {
+            folders.add(folder.id);
+            changed = true;
+          }
+        });
+      }
+      const projectIds = [...placements.values()]
+        .filter((placement) => placement.folder_id && folders.has(placement.folder_id))
+        .map((placement) => placement.project_id);
+      sessionIds = snapshot.sessions.filter((session) => projectIds.includes(snapshot.session_projects[session.id])).map((session) => session.id);
+    }
+    const blocked = snapshot.sessions.find((session) => sessionIds.includes(session.id) && blockedStates.has(session.state));
+    if (!blocked) return null;
+    return blocked.state === "processing" || blocked.state === "stopping"
+      ? "请先停止录音并等待处理完成"
+      : "请先停止当前录音";
+  }
+
   function isNestedTrashItem(item: WorkspaceTrashItem): boolean {
     if (item.entity_type === "folder") return Boolean(item.original_parent_id && trashItems.some((parent) => parent.entity_type === "folder" && parent.entity_id === item.original_parent_id));
     if (item.entity_type === "project") return Boolean(item.original_parent_id && trashItems.some((parent) => parent.entity_type === "folder" && parent.entity_id === item.original_parent_id));
     return Boolean(item.original_project_id && trashItems.some((parent) => parent.entity_type === "project" && parent.entity_id === item.original_project_id));
   }
 
-  function showContextMenu(event: React.MouseEvent, target: WorkspaceTarget): void {
+  function showContextMenu(event: React.MouseEvent, target: WorkspaceContextTarget): void {
     event.preventDefault();
     event.stopPropagation();
     setContextMenu({ kind: "workspace", x: event.clientX, y: event.clientY, target });
@@ -331,7 +366,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     setDialogParentId(
       "folder" in next ? next.folder.parent_id ?? ""
         : "project" in next ? placements.get(next.project.id)?.folder_id ?? ""
-          : parentOverride ?? selectedFolderId ?? "",
+          : parentOverride !== undefined ? parentOverride ?? "" : selectedFolderId ?? "",
     );
     if ("project" in next) {
       setDialogSourceLanguage(next.project.source_language);
@@ -396,8 +431,9 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     setDropTarget(null);
   }
 
-  function deriveDropTarget(event: React.DragEvent, target: WorkspaceDragTarget | { entityType: "root" }): WorkspaceDropTarget {
+  function deriveDropTarget(event: React.DragEvent, target: WorkspaceDragTarget | { entityType: "root" }, explicitIntent?: WorkspaceDropTarget["intent"]): WorkspaceDropTarget {
     if (target.entityType === "root") return { entityType: "root", intent: "root" };
+    if (explicitIntent && explicitIntent !== "root") return { ...target, intent: explicitIntent };
     const bounds = event.currentTarget.getBoundingClientRect();
     const ratio = bounds.height > 0 ? (event.clientY - bounds.top) / bounds.height : 0.5;
     const intent = target.entityType === "folder"
@@ -406,9 +442,9 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     return { ...target, intent };
   }
 
-  function allowDrop(event: React.DragEvent, baseTarget: WorkspaceDragTarget | { entityType: "root" }): void {
+  function allowDrop(event: React.DragEvent, baseTarget: WorkspaceDragTarget | { entityType: "root" }, explicitIntent?: WorkspaceDropTarget["intent"]): void {
     const source = parseDrag(event);
-    const target = deriveDropTarget(event, baseTarget);
+    const target = deriveDropTarget(event, baseTarget, explicitIntent);
     if (!source || !canDropWorkspaceTarget(source, target, folderParents)) {
       event.dataTransfer.dropEffect = "none";
       setDropTarget(null);
@@ -419,11 +455,11 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     setDropTarget(target);
   }
 
-  function dropWorkspace(event: React.DragEvent, baseTarget: WorkspaceDragTarget | { entityType: "root" }): void {
+  function dropWorkspace(event: React.DragEvent, baseTarget: WorkspaceDragTarget | { entityType: "root" }, explicitIntent?: WorkspaceDropTarget["intent"]): void {
     event.preventDefault();
     event.stopPropagation();
     const source = parseDrag(event);
-    const target = dropTarget ?? deriveDropTarget(event, baseTarget);
+    const target = dropTarget ?? deriveDropTarget(event, baseTarget, explicitIntent);
     endDrag();
     if (!source || !canDropWorkspaceTarget(source, target, folderParents)) return;
     void onMoveWorkspace({
@@ -432,6 +468,22 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
       intent: target.intent,
       ...(target.entityType === "root" ? {} : { target_type: target.entityType, target_id: target.entityId }),
     });
+  }
+
+  function renderDropZone(target: WorkspaceDragTarget | { entityType: "root" }, intent: WorkspaceDropTarget["intent"]): React.ReactNode {
+    if (!dragging) return null;
+    const candidate = target.entityType === "root" ? { entityType: "root", intent: "root" as const } : { ...target, intent };
+    const active = currentDropIntent(target) === candidate.intent;
+    const label = candidate.entityType === "root" ? "放到工作区根目录" : dropHint(candidate.intent);
+    return <div
+      className={"workspace-drop-zone" + (active ? " active" : "") + (candidate.entityType === "root" ? " root-drop-zone" : "")}
+      role="button"
+      aria-label={label}
+      onDragOver={(event) => { event.stopPropagation(); allowDrop(event, target, intent); }}
+      onDrop={(event) => dropWorkspace(event, target, intent)}
+    >
+      <span>{label}</span>
+    </div>;
   }
 
   function isDescendant(folderId: string, ancestorId: string): boolean {
@@ -452,16 +504,14 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     <li key={project.id} className={`tree-project ${dragging?.entityId === project.id ? "dragging" : ""}`}>
       <div
         className={`tree-item-row ${activeProjectId === project.id && !activeSessionId ? "selected" : ""} ${projectDropIntent ? `drop-target drop-${projectDropIntent}` : ""}`}
-        draggable
-        onDragStart={(event) => beginDrag(event, { entityType: "project", entityId: project.id })}
         onDragEnd={endDrag}
         onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}
-        onDragOver={(event) => allowDrop(event, projectTarget)}
-        onDrop={(event) => dropWorkspace(event, projectTarget)}
       >
         <button className="tree-item-button" onClick={() => onSelectProject(project)}><span aria-hidden="true">▣</span><span>{project.title}</span></button>
-        {projectDropIntent && <span className="drop-target-hint" aria-hidden="true">{dropHint(projectDropIntent)}</span>}
-        <button className="tree-context-hint" aria-label={`右键管理项目 ${project.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}>⋯</button>
+        <button className="tree-drag-handle" draggable aria-label={"拖动项目 " + project.title} title="拖动项目" onClick={(event) => event.stopPropagation()} onDragStart={(event) => beginDrag(event, { entityType: "project", entityId: project.id })}>⠿</button>
+        {renderDropZone(projectTarget, "before")}
+        {renderDropZone(projectTarget, "after")}
+        <button className="tree-context-hint" aria-label={`管理项目 ${project.title}`} onClick={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })} onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}>⋯</button>
       </div>
       {activeProjectId === project.id && (
         <ul className="tree-sessions">
@@ -471,16 +521,14 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
             return <li key={session.id} className={dragging?.entityId === session.id ? "dragging" : ""}>
               <div
                 className={`tree-item-row ${activeSessionId === session.id ? "selected" : ""} ${sessionDropIntent ? `drop-target drop-${sessionDropIntent}` : ""}`}
-                draggable
-                onDragStart={(event) => beginDrag(event, { entityType: "session", entityId: session.id, projectId: project.id })}
                 onDragEnd={endDrag}
                 onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}
-                onDragOver={(event) => allowDrop(event, sessionTarget)}
-                onDrop={(event) => dropWorkspace(event, sessionTarget)}
               >
                 <button className="tree-item-button" onClick={() => onSelectSession(project, session)}><span aria-hidden="true">◫</span><span>{session.title}</span><i className={`tiny-dot ${stateTone(session.state)}`} aria-label={stateLabel(session.state)} /></button>
-                {sessionDropIntent && <span className="drop-target-hint" aria-hidden="true">{dropHint(sessionDropIntent)}</span>}
-                <button className="tree-context-hint" aria-label={`右键管理课程 ${session.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}>⋯</button>
+                <button className="tree-drag-handle" draggable aria-label={"拖动课程 " + session.title} title="拖动课程" onClick={(event) => event.stopPropagation()} onDragStart={(event) => beginDrag(event, { entityType: "session", entityId: session.id, projectId: project.id })}>⠿</button>
+                {renderDropZone(sessionTarget, "before")}
+                {renderDropZone(sessionTarget, "after")}
+                <button className="tree-context-hint" aria-label={`管理课程 ${session.title}`} onClick={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })} onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}>⋯</button>
               </div>
               {activeSessionId === session.id && (
                 <ul className="system-notes tree-note-category" aria-label="课程笔记分类">
@@ -504,17 +552,16 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     <li key={folder.id} className={`tree-folder ${dragging?.entityId === folder.id ? "dragging" : ""}`} style={{ "--tree-depth": depth } as React.CSSProperties}>
       <div
         className={`folder-label ${selectedFolderId === folder.id ? "selected" : ""} ${folderDropIntent ? `drop-target drop-${folderDropIntent}` : ""}`}
-        draggable
-        onDragStart={(event) => beginDrag(event, { entityType: "folder", entityId: folder.id })}
         onDragEnd={endDrag}
         onContextMenu={(event) => showContextMenu(event, { entityType: "folder", entityId: folder.id })}
-        onDragOver={(event) => allowDrop(event, folderTarget)}
-        onDrop={(event) => dropWorkspace(event, folderTarget)}
       >
         <button className="folder-disclosure" aria-label={`${expandedFolderIds.has(folder.id) ? "折叠" : "展开"}${folder.title}`} aria-expanded={expandedFolderIds.has(folder.id)} onClick={() => toggleFolder(folder.id)}><span aria-hidden="true">{expandedFolderIds.has(folder.id) ? "▾" : "▸"}</span></button>
         <button className="folder-name" onClick={() => selectFolder(folder.id)}>{folder.title}</button>
-        {folderDropIntent && <span className="drop-target-hint" aria-hidden="true">{dropHint(folderDropIntent)}</span>}
-        <button className="tree-context-hint" aria-label={`右键管理文件夹 ${folder.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "folder", entityId: folder.id })}>⋯</button>
+        <button className="tree-drag-handle" draggable aria-label={"拖动文件夹 " + folder.title} title="拖动文件夹" onClick={(event) => event.stopPropagation()} onDragStart={(event) => beginDrag(event, { entityType: "folder", entityId: folder.id })}>⠿</button>
+        {renderDropZone(folderTarget, "before")}
+        {renderDropZone(folderTarget, "inside")}
+        {renderDropZone(folderTarget, "after")}
+        <button className="tree-context-hint" aria-label={`管理文件夹 ${folder.title}`} onClick={(event) => showContextMenu(event, { entityType: "folder", entityId: folder.id })} onContextMenu={(event) => showContextMenu(event, { entityType: "folder", entityId: folder.id })}>⋯</button>
       </div>
       {expandedFolderIds.has(folder.id) && <ul>
         {snapshot.folders.filter((item) => !item.archived_at && item.parent_id === folder.id).map((child) => renderFolder(child, depth + 1))}
@@ -526,16 +573,26 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
 
   const renderWorkspaceContextMenu = (menu: Extract<ContextMenuState, { kind: "workspace" }>) => {
     const target = menu.target;
+    if (target.entityType === "root") {
+      return <div className="workspace-context-menu" role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>
+        <strong className="context-menu-heading">工作区根目录</strong>
+        <button role="menuitem" onClick={() => openDialog({ action: "create-folder" }, null)}>新建文件夹</button>
+        <button role="menuitem" onClick={() => openDialog({ action: "create-project" }, null)}>新建项目</button>
+        <button role="menuitem" onClick={() => { setContextMenu(null); onOpenSettings(); }}>设置与运行状态</button>
+      </div>;
+    }
     const project = target.entityType === "project" ? snapshot.projects.find((item) => item.id === target.entityId) : null;
     const session = target.entityType === "session" ? snapshot.sessions.find((item) => item.id === target.entityId) : null;
     const sessionProject = session ? snapshot.projects.find((item) => item.id === (target.projectId ?? snapshot.session_projects[session.id])) : null;
     const folder = target.entityType === "folder" ? snapshot.folders.find((item) => item.id === target.entityId) : null;
+    const blockedReason = trashBlockReason(target);
     return <div className="workspace-context-menu" role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>
       <button role="menuitem" onClick={() => openTarget(target)}>打开</button>
       {folder && <><button role="menuitem" onClick={() => { setSelectedFolderId(folder.id); openDialog({ action: "create-folder" }, folder.id); }}>在此新建子文件夹</button><button role="menuitem" onClick={() => { setSelectedFolderId(folder.id); openDialog({ action: "create-project" }, folder.id); }}>在此新建项目</button><button role="menuitem" onClick={() => openDialog({ action: "rename-folder", folder })}>重命名</button><button role="menuitem" onClick={() => openDialog({ action: "move-folder", folder })}>移动</button></>}
       {project && <><button role="menuitem" onClick={() => openDialog({ action: "rename-project", project })}>重命名</button><button role="menuitem" onClick={() => openDialog({ action: "project-language", project })}>语言默认值</button><button role="menuitem" onClick={() => openDialog({ action: "move-project", project })}>移动</button></>}
       {session && sessionProject && <button role="menuitem" onClick={() => openDialog({ action: "rename-session", project: sessionProject, session })}>重命名</button>}
-      <button className="danger-menu-item" role="menuitem" onClick={() => moveTargetToTrash(target)}>移入回收站</button>
+      <button className="danger-menu-item" role="menuitem" disabled={Boolean(blockedReason)} title={blockedReason ?? "移入回收站"} onClick={() => moveTargetToTrash(target)}>移入回收站</button>
+      {blockedReason && <span className="context-menu-reason" role="note">{blockedReason}</span>}
     </div>;
   };
 
@@ -543,12 +600,12 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     <aside className={`workspace-sidebar ${mobileOpen ? "mobile-open" : ""}`} aria-label="课程工作区">
       <div className="workspace-brand"><span>A</span><div><strong>AIALRA</strong><small>课程工作区</small></div><button className="theme-toggle" aria-label={`切换到${theme === "light" ? "黑色" : "白色"}模式`} onClick={onToggleTheme}>{theme === "light" ? "◐ 黑色" : "◑ 白色"}</button><button className="mobile-tree-toggle" aria-expanded={mobileOpen} onClick={() => setMobileOpen((current) => !current)}>{mobileOpen ? "关闭课程树" : "打开课程树"}</button></div>
       <nav className="workspace-tree">
-        <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-label="新建文件夹" onClick={() => openDialog({ action: "create-folder" })}>＋文件夹</button><button aria-label="新建项目" onClick={() => openDialog({ action: "create-project" })}>＋项目</button><button aria-label="打开设置和运行状态" onClick={onOpenSettings}>设置</button></div></div>
+        <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-label="打开设置和运行状态" onClick={onOpenSettings}>设置</button></div></div>
         {dragging && <div className="drag-status" role="status" aria-live="polite"><strong>正在移动：{targetTitle(dragging)}</strong><span>{dropTarget ? `松开放入“${dropTargetTitle(dropTarget)}”` : "将光标移到高亮位置，再松开鼠标"}</span></div>}
-        <ul className={currentDropIntent({ entityType: "root" }) ? "workspace-root-drop drop-target drop-root" : "workspace-root-drop"} onDragOver={(event) => allowDrop(event, { entityType: "root" })} onDrop={(event) => dropWorkspace(event, { entityType: "root" })}>
+        <ul className={currentDropIntent({ entityType: "root" }) ? "workspace-root-drop drop-target drop-root" : "workspace-root-drop"} onContextMenu={(event) => showContextMenu(event, { entityType: "root" })}>
           {snapshot.folders.filter((folder) => !folder.archived_at && folder.parent_id === null).map((folder) => renderFolder(folder, 0))}
           {projectsInFolder(null).map(renderProject)}
-          {dragging && dragging.entityType !== "session" && <li className="root-drop-hint" aria-hidden="true">放到这里：工作区根目录</li>}
+          {dragging && dragging.entityType !== "session" && <li>{renderDropZone({ entityType: "root" }, "root")}</li>}
         </ul>
       </nav>
       <section className="workspace-trash" aria-label="回收站">
@@ -708,6 +765,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [readWeaveConfirmUrl, setReadWeaveConfirmUrl] = useState<string | null>(null);
   const [readWeaveReconciling, setReadWeaveReconciling] = useState(false);
   const [visibleItemLimit, setVisibleItemLimit] = useState(TIMELINE_PAGE_SIZE);
+  const [pendingUpload, setPendingUpload] = useState<File | null>(null);
+  const [uploadDropActive, setUploadDropActive] = useState(false);
   const capture = useRef<BrowserCapture | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
@@ -725,17 +784,26 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         setCapturePhase("blocked");
         setCaptureNotice("这个项目当前由其他设备录音；租约释放或到期后可以重新尝试。");
       } else if (!next.lease) {
-        setCapturePhase((current) => {
-          if (current !== "blocked") return current;
-          setCaptureNotice("");
-          return "idle";
-        });
+        const currentStatus = next.sessions?.find((item) => item.session_id === initial.id);
+        if (currentStatus?.recoverable) {
+          setCapturePhase("recoverable");
+          setCaptureNotice("本次课程没有活动租约或排队任务；确认后会接续已有历史，并按时间戳追加新的内容。");
+        } else if (currentStatus?.reason === "processing") {
+          setCapturePhase("processing");
+          setCaptureNotice("本次课程仍有后台任务处理中；队列排空后会恢复“确认后继续本次课程”。");
+        } else {
+          setCapturePhase((current) => {
+            if (!["blocked", "recoverable", "processing"].includes(current)) return current;
+            setCaptureNotice("");
+            return "idle";
+          });
+        }
       }
       return next;
     } catch {
       return null;
     }
-  }, [project.id]);
+  }, [project.id, initial.id]);
 
   const refreshAudioInputs = useCallback(async (requestPermission = false): Promise<MediaDeviceInfo[]> => {
     try {
@@ -880,10 +948,11 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       (message) => reportCaptureStatus(message),
       captureMode,
       selectedAudioInput || undefined,
-      () => {
+      (message) => {
         setCaptureActive(false);
         setCapturePhase("error");
-        setCaptureNotice("录音权限已由另一台设备接管，未确认音频仍保留在本机");
+        setCaptureNotice(message ?? "录音权限已由另一台设备接管，未确认音频仍保留在本机");
+        void refreshRecordingStatus();
       },
     );
     capture.current = next;
@@ -924,6 +993,17 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         setCaptureNotice("这个项目当前由其他设备录音；租约释放或到期后可以重新尝试。");
         return;
       }
+      const currentStatus = status?.sessions?.find((item) => item.session_id === initial.id);
+      if (currentStatus?.reason === "processing") {
+        setCapturePhase("processing");
+        setCaptureNotice("本次课程仍有后台任务处理中，请等待队列排空后再继续收音。");
+        return;
+      }
+      if (currentStatus?.recoverable && !window.confirm("本次课程已有历史内容。确认后将接续原课程，新的录音按时间戳追加，不会覆盖历史。")) {
+        setCapturePhase("recoverable");
+        setCaptureNotice("已保留本次课程历史；确认后才会重新获取录音租约。");
+        return;
+      }
       if (status && !status.lease && !status.admission.allowed && !["recording", "degraded"].includes(session.state)) {
         setCapturePhase("idle");
         setCaptureNotice("GPU 正在处理已有课程，新项目暂时不能开始录音；当前录音、停止和确认不会受影响。");
@@ -943,10 +1023,11 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         (message) => reportCaptureStatus(message),
         captureMode,
         requestedDeviceId,
-        () => {
+        (message) => {
           setCaptureActive(false);
           setCapturePhase("error");
-          setCaptureNotice("录音权限已由另一台设备接管，未确认音频仍保留在本机");
+          setCaptureNotice(message ?? "录音权限已由另一台设备接管，未确认音频仍保留在本机");
+          void refreshRecordingStatus();
         },
       );
       capture.current = preparedCapture;
@@ -961,6 +1042,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       void refreshRecordingStatus();
       await startCapture(acquired, preparedCapture);
     } catch (caught) {
+      const code = (caught as Error & { code?: string })?.code;
       if (!acquired) {
         preparedCapture?.dispose();
         if (capture.current === preparedCapture) capture.current = null;
@@ -973,7 +1055,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         // can press “继续连接收音” instead of losing the whole session.
         setCaptureNotice((caught instanceof Error ? caught.message : "浏览器无法连接录音服务") + "；录音权限仍保留，可点击“继续连接收音”重试");
       }
-      setCapturePhase((caught as Error & { code?: string })?.code === "recording_lease_conflict" ? "blocked" : "error");
+      setCapturePhase(code === "recording_lease_conflict" ? "blocked" : code === "recording_session_processing" ? "processing" : "error");
+      if (code === "recording_lease_conflict" || code === "recording_lease_expired") void refreshRecordingStatus();
       if (!acquired) setCaptureStatus("尚未连接麦克风");
     } finally { setBusy(false); }
   }
@@ -997,15 +1080,42 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     } catch (caught) {
       setCapturePhase("error");
       setCaptureNotice(caught instanceof Error ? caught.message : "停止录音失败");
+      const code = (caught as Error & { code?: string })?.code;
+      if (code === "recording_lease_conflict" || code === "recording_lease_expired") void refreshRecordingStatus();
     }
     finally { setBusy(false); }
   }
 
-  async function upload(file: File): Promise<void> {
-    setBusy(true); setNotice(`正在保存并解析 ${file.name}`);
-    try { const result = await api.uploadAsset(session.id, file); setNotice(`真实解析任务 ${result.job_id.slice(0, 12)} 已排队`); }
-    catch (caught) { setNotice(caught instanceof Error ? caught.message : "材料解析失败"); }
-    finally { setBusy(false); if (fileInput.current) fileInput.current.value = ""; }
+  function chooseUpload(file: File): void {
+    if (file.size <= 0) {
+      setNotice("这个文件为空，请选择有内容的材料");
+      return;
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      setNotice("材料不能超过 50 MiB，请压缩后再上传");
+      return;
+    }
+    setNotice("");
+    setPendingUpload(file);
+  }
+
+  async function confirmUpload(): Promise<void> {
+    const file = pendingUpload;
+    if (!file) return;
+    setBusy(true);
+    setNotice(`正在保存已确认材料 ${file.name}`);
+    try {
+      const result = await api.uploadAsset(session.id, file, true);
+      setNotice(result.explain_job_id
+        ? "已确认上传；材料解析任务和等待讲解任务已排队，材料解析完成并出现稳定段落后会自动执行讲解。"
+        : "已确认上传，材料解析任务已排队");
+      setPendingUpload(null);
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : "材料上传失败");
+    } finally {
+      setBusy(false);
+      if (fileInput.current) fileInput.current.value = "";
+    }
   }
 
   const isRecording = ["recording", "degraded"].includes(session.state);
@@ -1014,10 +1124,17 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     : session.state === "completed" ? "录音和模型处理均已完成" : captureStatus;
   const captureTone = capturePhaseTone(capturePhase, session.state, Boolean(lease));
   const captureLabel = capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode);
+  const currentRecordingStatus = recordingStatus?.sessions?.find((item) => item.session_id === initial.id);
   const conflictingLeaseSeconds = recordingStatus?.lease?.holder === "other"
     ? Math.max(0, Math.ceil((new Date(recordingStatus.lease.expires_at).getTime() - statusClock) / 1_000))
     : null;
   const capacityBlocked = Boolean(recordingStatus && !recordingStatus.lease && !recordingStatus.admission.allowed && !["recording", "degraded"].includes(session.state));
+  const recordingWaitsForQueue = Boolean(
+    !lease
+      && ["recording", "degraded"].includes(session.state)
+      && currentRecordingStatus
+      && !currentRecordingStatus.recoverable,
+  );
   const defaultAudioInput = audioInputs.find((device) => device.deviceId === "default");
   const selectedAudioDevice = audioInputs.find((device) => device.deviceId === selectedAudioInput);
   const defaultAudioLabel = defaultAudioInput?.label.trim()
@@ -1074,6 +1191,26 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             )}
             {renderedItems.length ? renderedItems.map((item) => <DocumentItem key={item.id} item={item} languageView={languageView} />) : <div className="document-empty"><div className="waveform">{[10, 25, 17, 38, 22, 31, 12].map((height, index) => <span key={index} style={{ height }} />)}</div><h2>课程内容会在这里连续展开</h2><p>字幕、译文、讲解和课件证据来自真实模型，不显示占位结果</p></div>}
           </div>
+          <section
+            className={"material-composer" + (uploadDropActive ? " drop-active" : "")}
+            aria-label="讲解与材料"
+            onDragEnter={(event) => { event.preventDefault(); setUploadDropActive(true); }}
+            onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
+            onDragLeave={(event) => { if (event.currentTarget === event.target || !event.currentTarget.contains(event.relatedTarget as Node)) setUploadDropActive(false); }}
+            onDrop={(event) => { event.preventDefault(); setUploadDropActive(false); const file = event.dataTransfer.files[0]; if (file) chooseUpload(file); }}
+          >
+            <div className="material-composer-heading"><div><h3>讲解与材料</h3><p>上传后先保存材料；只有你确认后才会排队，并自动加入下一次讲解。</p></div><StatusBadge tone={modelStatusTone}>{summaryRetryable ? "总结可重试" : modelQueueDepth > 0 ? "队列处理中" : "可用"}</StatusBadge></div>
+            <div className="material-drop-copy"><strong>拖动材料到这里</strong><span>或选择 PPT、PDF、图片、文档和文本文件</span></div>
+            <input ref={fileInput} className="visually-hidden" type="file" accept=".pptx,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) chooseUpload(file); }} />
+            <button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}>选择材料</button>
+            {summaryRetryable && <button className="secondary-button" disabled={busy || isRecording} onClick={() => void api.summarize(project.id, session.id).then(() => setNotice("课程总结已重新排队，完成后会在当前页面出现")).catch((caught) => setNotice(caught instanceof Error ? caught.message : "课程总结重试失败"))}>重试课程总结</button>}
+            <p className="material-queue-help">确认窗口会列出文件名、类型、大小和目标课程；取消不会创建任何任务。确认后材料解析与等待讲解任务会立即进入队列，讲解会等待材料解析和稳定段落完成。</p>
+            {pendingUpload && <div className="material-confirm" role="dialog" aria-modal="false" aria-label="确认上传材料">
+              <div><strong>确认上传材料</strong><span>{pendingUpload.name}</span><small>{pendingUpload.type || "未知类型"} · {(pendingUpload.size / 1024 / 1024).toFixed(2)} MiB · 目标课程：{session.title}</small></div>
+              <p>确认后将保存材料，并自动加入下一次讲解；不会覆盖已有字幕、译文或人工笔记。</p>
+              <div className="material-confirm-actions"><button className="secondary-button" type="button" disabled={busy} onClick={() => { setPendingUpload(null); if (fileInput.current) fileInput.current.value = ""; }}>取消</button><button className="primary-button" type="button" disabled={busy} onClick={() => void confirmUpload()}>{busy ? "正在确认…" : "确认上传并排队"}</button></div>
+            </div>}
+          </section>
         </section>
         <aside className="session-sidebar">
            <section className="side-card capture-card">
@@ -1094,6 +1231,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             <p className="capture-help">音频在确认写入后才会从本机发送队列中移除；浏览器端不需要额外配对设备。</p>
             {conflictingLeaseSeconds !== null && <div className="recording-lease-status" role="status"><strong>其他设备正在录制本项目</strong><span>{recordingStatus?.lease?.session_title ? `课程“${recordingStatus.lease.session_title}”` : "当前课程会话"} · 租约约 {conflictingLeaseSeconds} 秒后到期</span></div>}
             {capacityBlocked && <div className="recording-capacity-status" role="status"><strong>暂不接纳新的项目录音</strong><span>原因：{recordingStatus?.admission.reason === "asr_backlog" ? "ASR 队列积压" : recordingStatus?.admission.reason === "asr_degraded" ? "ASR/CUDA 状态降级" : "ASR Worker 暂时离线"} · 约 {recordingStatus?.admission.retry_after_seconds ?? 5} 秒后自动复查</span></div>}
+            {currentRecordingStatus?.recoverable && !lease && <div className="recording-recovery-status" role="status"><strong>发现可继续的历史收音</strong><span>服务端确认没有活动租约或排队任务；点击下方按钮并确认后，会在原课程中按时间戳追加。</span></div>}
+            {recordingWaitsForQueue && <div className="recording-capacity-status" role="status"><strong>本次课程正在收尾</strong><span>还有 {currentRecordingStatus?.active_model_jobs ?? 0} 个后台任务；完成后会自动恢复继续入口。</span></div>}
             {captureNotice && <div className="capture-inline-alert" role="alert">{captureNotice}</div>}
             <p className="capture-copy" aria-live="polite"><strong>{captureLabel}</strong> · {visibleCaptureStatus}</p>
             {!isRecording ? (
@@ -1102,19 +1241,13 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="stop-button" disabled={busy} onClick={() => void stop()}>停止并完成处理</button>
             ) : lease ? (
               <button className="primary-button" disabled={busy} onClick={() => void continueCapture()}>继续连接收音</button>
+            ) : currentRecordingStatus?.recoverable ? (
+              <button className="primary-button" disabled={busy} onClick={() => void begin()}>确认并继续本次课程</button>
             ) : (
-              <button className="primary-button" disabled={busy} onClick={() => void begin()}>继续本次课程</button>
+              <button className="primary-button" disabled>等待后台处理完成</button>
             )}
           </section>
           <GpuPanel runtime={runtime} />
-          <section className="side-card">
-            <div className="card-heading"><h3>讲解与材料</h3><StatusBadge tone={modelStatusTone}>{summaryRetryable ? "总结可重试" : modelQueueDepth > 0 ? "队列处理中" : "可用"}</StatusBadge></div>
-            <button className="secondary-button" disabled={busy || !timeline.items.some((item) => item.kind === "paragraph")} onClick={() => void api.explain(session.id).then(() => setNotice("补充讲解已交给本机 GPU")).catch((caught) => setNotice(caught instanceof Error ? caught.message : "讲解失败"))}>根据最近内容讲解</button>
-            {summaryRetryable && <button className="secondary-button" disabled={busy || isRecording} onClick={() => void api.summarize(project.id, session.id).then(() => setNotice("课程总结已重新排队，完成后会在当前页面出现")).catch((caught) => setNotice(caught instanceof Error ? caught.message : "课程总结重试失败"))}>重试课程总结</button>}
-            <input ref={fileInput} className="visually-hidden" type="file" accept=".pptx,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
-            <button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}>上传 PPT、PDF 或图片</button>
-            <p>7B 负责连贯段落翻译和知识补充，14B 在录音停止后生成最终课程总结</p>
-          </section>
           <section className="side-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
             <p>{readWeavePreview?.sessions.find((item) => item.session_id === session.id)?.latest_entries[0]?.translation ?? "稳定字幕和讲解会自动进入对应笔记"}</p>
