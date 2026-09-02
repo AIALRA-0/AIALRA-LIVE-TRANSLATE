@@ -2,6 +2,13 @@
 
 状态日期：2026-09-01
 
+## feedback-07 候选待发布项（2026-09-01）
+
+- 当前候选只修改 Web 工作台，尚未合并、推送或部署；线上仍是 `quality-v25-20260901-2c43fb8`。
+- 拖拽目标提示、未完成会话续接说明和时间戳已加入代码并通过 Web 快速检查；真实登录浏览器中的视觉与操作体验仍需部署后复测。
+- 麦克风设备名称依赖浏览器在用户授权后的 `enumerateDevices()` 返回值；如果 macOS 系统设置仍拒绝访问，页面只能明确显示权限错误，不能伪造硬件型号。
+- 本候选没有运行本地 Docker／Docker Desktop／WSL，也没有执行 6 小时、24 小时、真机矩阵或 Windows 崩溃调查。
+
 ## 当前线上状态（2026-09-01，最新）
 
 - `quality-v25-20260901-2c43fb8` 已部署；运行代码提交 `2c43fb82cf672538b5104bbf9211d4a67480eede` 与发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 一致。随后 `main` 仅追加脱敏文档，Core／ReadWeave healthy，Core restart count 为 0
