@@ -834,7 +834,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       );
       capture.current = preparedCapture;
       await preparedCapture.prepare();
-      if (captureMode === "microphone") await refreshAudioInputs(false);
+      if (captureMode === "microphone") await refreshAudioInputs(false).catch(() => undefined);
       setCapturePhase("acquiring-lease");
       acquired = await api.acquireRecording(project.id, session.id, recorderDeviceId());
       setLease(acquired);
