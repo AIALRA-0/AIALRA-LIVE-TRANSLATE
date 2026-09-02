@@ -11,6 +11,7 @@ export type CapturePhase =
   | "acquiring-lease"
   | "connecting"
   | "recording"
+  | "blocked"
   | "stopping"
   | "processing"
   | "error";

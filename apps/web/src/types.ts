@@ -128,6 +128,24 @@ export interface RecordingLease {
   lease_token: string;
 }
 
+export interface RecordingProjectStatus {
+  project_id: string;
+  server_time: string;
+  lease: {
+    session_id: string;
+    session_title: string | null;
+    holder: "self" | "other";
+    generation: number;
+    expires_at: string;
+  } | null;
+  admission: {
+    allowed: boolean;
+    reason: "ok" | "asr_worker_offline" | "asr_degraded" | "asr_backlog";
+    retry_after_seconds: number;
+    max_asr_backlog_seconds: number;
+  };
+}
+
 export interface ReadWeaveStatus {
   configured: boolean;
   queued: number;

@@ -325,6 +325,24 @@ impl EventStore {
         self.get_project(project_id)
     }
 
+    pub fn update_project(
+        &self,
+        project_id: &str,
+        owner_subject: &str,
+        title: &str,
+        source_language: &str,
+        target_language: &str,
+    ) -> Result<Option<ProjectRecord>> {
+        let now = Utc::now();
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE projects SET title = ?3, source_language = ?4, target_language = ?5, version = version + 1, updated_at = ?6 WHERE id = ?1 AND owner_subject = ?2",
+            params![project_id, owner_subject, title, source_language, target_language, now.to_rfc3339()],
+        )?;
+        drop(connection);
+        self.get_project(project_id)
+    }
+
     pub fn attach_session_to_project(
         &self,
         project_id: &str,
@@ -565,6 +583,78 @@ impl EventStore {
             [session_id],
             map_workspace_session_metadata,
         ).context("query workspace session metadata")
+    }
+
+    pub fn move_workspace_folder_atomic(
+        &self,
+        folder_id: &str,
+        owner_subject: &str,
+        parent_id: Option<&str>,
+        ordered_folder_ids: &[String],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE workspace_folders SET parent_id = ?3, version = version + 1, updated_at = ?4 WHERE id = ?1 AND owner_subject = ?2 AND archived_at IS NULL",
+            params![folder_id, owner_subject, parent_id, now],
+        )?;
+        anyhow::ensure!(changed == 1, "workspace folder move target disappeared");
+        for (index, id) in ordered_folder_ids.iter().enumerate() {
+            let changed = transaction.execute(
+                "UPDATE workspace_folders SET sort_order = ?4, updated_at = ?5 WHERE id = ?1 AND owner_subject = ?2 AND parent_id IS ?3 AND archived_at IS NULL",
+                params![id, owner_subject, parent_id, (index as i64 + 1) * 10, now],
+            )?;
+            anyhow::ensure!(changed == 1, "workspace folder order changed concurrently");
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn move_workspace_project_atomic(
+        &self,
+        project_id: &str,
+        owner_subject: &str,
+        folder_id: Option<&str>,
+        ordered_project_ids: &[String],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE workspace_project_placements SET folder_id = ?3, updated_at = ?4 WHERE project_id = ?1 AND archived_at IS NULL AND EXISTS (SELECT 1 FROM projects p WHERE p.id = workspace_project_placements.project_id AND p.owner_subject = ?2)",
+            params![project_id, owner_subject, folder_id, now],
+        )?;
+        anyhow::ensure!(changed == 1, "workspace project move target disappeared");
+        for (index, id) in ordered_project_ids.iter().enumerate() {
+            let changed = transaction.execute(
+                "UPDATE workspace_project_placements SET sort_order = ?4, updated_at = ?5 WHERE project_id = ?1 AND folder_id IS ?3 AND archived_at IS NULL AND EXISTS (SELECT 1 FROM projects p WHERE p.id = workspace_project_placements.project_id AND p.owner_subject = ?2)",
+                params![id, owner_subject, folder_id, (index as i64 + 1) * 10, now],
+            )?;
+            anyhow::ensure!(changed == 1, "workspace project order changed concurrently");
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn reorder_workspace_sessions_atomic(
+        &self,
+        project_id: &str,
+        owner_subject: &str,
+        ordered_session_ids: &[String],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        for (index, id) in ordered_session_ids.iter().enumerate() {
+            let changed = transaction.execute(
+                "UPDATE workspace_session_metadata SET sort_order = ?4, updated_at = ?5 WHERE session_id = ?1 AND archived_at IS NULL AND EXISTS (SELECT 1 FROM project_sessions ps JOIN projects p ON p.id = ps.project_id WHERE ps.session_id = ?1 AND ps.project_id = ?2 AND p.owner_subject = ?3)",
+                params![id, project_id, owner_subject, (index as i64 + 1) * 10, now],
+            )?;
+            anyhow::ensure!(changed == 1, "workspace session reorder target disappeared");
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn list_workspace_trash(
@@ -1629,6 +1719,16 @@ impl EventStore {
             completed: query("completed")?,
             failed: query("failed")?,
         })
+    }
+
+    pub fn oldest_active_model_job_at(&self, job_type: &str) -> Result<Option<DateTime<Utc>>> {
+        let connection = self.lock()?;
+        let value = connection.query_row(
+            "SELECT MIN(created_at) FROM model_jobs WHERE job_type = ?1 AND status IN ('queued', 'leased')",
+            [job_type],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        Ok(value.map(parse_time).transpose()?)
     }
 
     /// Summary failures are visible and retryable, while failures in the
@@ -3301,6 +3401,93 @@ mod tests {
                 .validate_recording_lease("session_two", "hash_two")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn different_projects_can_hold_live_recording_leases_at_the_same_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        for (project_id, session_id) in [
+            ("project_alpha", "session_alpha"),
+            ("project_beta", "session_beta"),
+        ] {
+            store
+                .create_project(&NewProject {
+                    id: project_id.to_owned(),
+                    owner_subject: "owner".to_owned(),
+                    title: project_id.to_owned(),
+                    source_language: "en".to_owned(),
+                    target_language: "zh-CN".to_owned(),
+                })
+                .unwrap();
+            store.create_session(&named_session(session_id)).unwrap();
+            store
+                .attach_session_to_project(project_id, session_id, "owner", "browser")
+                .unwrap();
+        }
+
+        assert!(matches!(
+            store
+                .acquire_recording_lease(
+                    "project_alpha",
+                    "session_alpha",
+                    "browser-alpha",
+                    "hash-alpha",
+                    45,
+                )
+                .unwrap(),
+            LeaseAcquireOutcome::Acquired(_)
+        ));
+        assert!(matches!(
+            store
+                .acquire_recording_lease(
+                    "project_beta",
+                    "session_beta",
+                    "browser-beta",
+                    "hash-beta",
+                    45,
+                )
+                .unwrap(),
+            LeaseAcquireOutcome::Acquired(_)
+        ));
+    }
+
+    #[test]
+    fn atomic_workspace_moves_normalize_destination_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        for (id, order) in [("folder_one", 40), ("folder_two", 40), ("folder_three", -7)] {
+            store
+                .create_workspace_folder(&NewWorkspaceFolder {
+                    id: id.to_owned(),
+                    owner_subject: "owner".to_owned(),
+                    parent_id: None,
+                    title: id.to_owned(),
+                    sort_order: order,
+                })
+                .unwrap();
+        }
+        store
+            .move_workspace_folder_atomic(
+                "folder_three",
+                "owner",
+                None,
+                &[
+                    "folder_two".to_owned(),
+                    "folder_three".to_owned(),
+                    "folder_one".to_owned(),
+                ],
+            )
+            .unwrap();
+        let mut folders = store.list_workspace_folders("owner").unwrap();
+        folders.sort_by_key(|folder| folder.sort_order);
+        assert_eq!(
+            folders
+                .into_iter()
+                .map(|folder| folder.id)
+                .collect::<Vec<_>>(),
+            vec!["folder_two", "folder_three", "folder_one"]
         );
     }
 

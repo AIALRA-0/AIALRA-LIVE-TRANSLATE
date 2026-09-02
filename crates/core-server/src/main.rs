@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         .route("/runtime/status", get(api::health))
         .route("/workspace", get(workspace::workspace_snapshot))
         .route("/workspace/stream", get(workspace::stream_workspace))
+        .route("/workspace/move", post(workspace::move_workspace_entity))
         .route("/workspace/folders", post(workspace::create_folder))
         .route(
             "/workspace/folders/{folder_id}",
@@ -105,6 +106,10 @@ async fn main() -> Result<()> {
         .route(
             "/projects/{project_id}/sessions",
             get(projects::list_project_sessions).post(projects::create_project_session),
+        )
+        .route(
+            "/projects/{project_id}/recording/status",
+            get(projects::recording_status),
         )
         .route(
             "/projects/{project_id}/sessions/{session_id}",

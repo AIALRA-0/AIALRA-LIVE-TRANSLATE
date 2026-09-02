@@ -6,15 +6,16 @@ describe("workspace drag targets", () => {
 
   it("rejects self and descendant folder drops while allowing a safe parent move", () => {
     expect(isFolderDescendant("child_folder", "root_folder", parents)).toBe(true);
-    expect(canDropWorkspaceTarget({ entityType: "folder", entityId: "root_folder" }, { entityType: "folder", entityId: "root_folder" }, parents)).toBe(false);
-    expect(canDropWorkspaceTarget({ entityType: "folder", entityId: "root_folder" }, { entityType: "folder", entityId: "child_folder" }, parents)).toBe(false);
-    expect(canDropWorkspaceTarget({ entityType: "folder", entityId: "child_folder" }, { entityType: "root" }, parents)).toBe(true);
+    expect(canDropWorkspaceTarget({ entityType: "folder", entityId: "root_folder" }, { entityType: "folder", entityId: "root_folder", intent: "inside" }, parents)).toBe(false);
+    expect(canDropWorkspaceTarget({ entityType: "folder", entityId: "root_folder" }, { entityType: "folder", entityId: "child_folder", intent: "inside" }, parents)).toBe(false);
+    expect(canDropWorkspaceTarget({ entityType: "folder", entityId: "child_folder" }, { entityType: "root", intent: "root" }, parents)).toBe(true);
+    expect(canDropWorkspaceTarget({ entityType: "project", entityId: "project_a" }, { entityType: "folder", entityId: "root_folder", intent: "inside" }, parents)).toBe(true);
   });
 
   it("only allows same-project session reordering", () => {
-    expect(canDropWorkspaceTarget({ entityType: "session", entityId: "one", projectId: "project_a" }, { entityType: "session", entityId: "two", projectId: "project_a" })).toBe(true);
-    expect(canDropWorkspaceTarget({ entityType: "session", entityId: "one", projectId: "project_a" }, { entityType: "session", entityId: "two", projectId: "project_b" })).toBe(false);
-    expect(workspaceTargetKey({ entityType: "root" })).toBe("root");
+    expect(canDropWorkspaceTarget({ entityType: "session", entityId: "one", projectId: "project_a" }, { entityType: "session", entityId: "two", projectId: "project_a", intent: "before" })).toBe(true);
+    expect(canDropWorkspaceTarget({ entityType: "session", entityId: "one", projectId: "project_a" }, { entityType: "session", entityId: "two", projectId: "project_b", intent: "after" })).toBe(false);
+    expect(workspaceTargetKey({ entityType: "root", intent: "root" })).toBe("root:root");
   });
 });
 
