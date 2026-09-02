@@ -36,7 +36,27 @@ certbot_credentials="${AIALRA_CERTBOT_CREDENTIALS:-/etc/letsencrypt/cloudflare.i
 previous_release=''
 previous_image_id=''
 previous_image_ref=''
+previous_image_archive_ref=''
 build_id_file="$release_dir/BUILD_ID"
+
+read_env_value() {
+  local key="$1"
+  awk -v key="$key" 'index($0, key "=") == 1 { sub("^[^=]*=", ""); value=$0 } END { sub("\\r$", "", value); print value }' "$env_file"
+}
+
+if [[ -s "$env_file" ]]; then
+  if [[ -z "${AIALRA_DATA_PATH+x}" ]]; then
+    configured_data_path="$(read_env_value AIALRA_DATA_PATH)"
+    [[ -z "$configured_data_path" ]] || data_path="$configured_data_path"
+  fi
+  if [[ -z "${AIALRA_AUTH_SERVICE+x}" ]]; then
+    configured_auth_service="$(read_env_value AIALRA_AUTH_SERVICE)"
+    [[ -z "$configured_auth_service" ]] || auth_service="$configured_auth_service"
+  fi
+fi
+
+[[ "$data_path" == /* ]]
+[[ "$auth_service" =~ ^[A-Za-z0-9@_.-]+\.service$ ]]
 
 if [[ ! "$site_host" =~ ^[a-z0-9.-]+$ ]] || [[ ! "$service_port" =~ ^[0-9]{2,5}$ ]] || [[ ! "$worker_gateway_port" =~ ^[0-9]{2,5}$ ]]; then
   printf 'deployment hostname or port is invalid\n' >&2
@@ -80,8 +100,13 @@ if [[ -L "$current_link" ]]; then
   if [[ -n "$previous_container" ]]; then
     previous_image_id="$(docker inspect --format '{{.Image}}' "$previous_container")"
     previous_image_ref="$(docker inspect --format '{{.Config.Image}}' "$previous_container")"
+    previous_build_id="$(tr -d '\r\n' < "$previous_release/BUILD_ID")"
+    [[ "$previous_build_id" =~ ^[0-9a-f]{40}$ ]]
+    previous_image_archive_ref="${previous_image_ref%:*}:release-${previous_build_id:0:12}"
+    docker image tag "$previous_image_id" "$previous_image_archive_ref"
     printf '%s\n' "$previous_image_id" > "$backup_dir/previous-image-id.txt"
     printf '%s\n' "$previous_image_ref" > "$backup_dir/previous-image-ref.txt"
+    printf '%s\n' "$previous_image_archive_ref" > "$backup_dir/previous-image-archive-ref.txt"
   fi
 fi
 
@@ -106,11 +131,17 @@ rollback() {
   fi
   if [[ -n "$previous_release" && -d "$previous_release" ]]; then
     docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" down >/dev/null 2>&1 || true
-    if [[ -n "$previous_image_id" && -n "$previous_image_ref" ]]; then
-      docker image tag "$previous_image_id" "$previous_image_ref" >/dev/null 2>&1 || true
+    if [[ -n "$previous_image_archive_ref" && -n "$previous_image_ref" ]]; then
+      docker image tag "$previous_image_archive_ref" "$previous_image_ref" >/dev/null 2>&1 || true
     fi
     ln -sfn "$previous_release" "$current_link"
-    docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" up -d >/dev/null 2>&1 || true
+    docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" up -d --force-recreate --no-build >/dev/null 2>&1 || true
+    rolled_back_container="$(docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" ps -q core 2>/dev/null || true)"
+    rolled_back_image_id="$(docker inspect --format '{{.Image}}' "$rolled_back_container" 2>/dev/null || true)"
+    if [[ -z "$rolled_back_container" || "$rolled_back_image_id" != "$previous_image_id" ]]; then
+      printf 'rollback failed to restore previous image: expected=%s actual=%s\n' "$previous_image_id" "$rolled_back_image_id" >&2
+      exit 70
+    fi
   else
     docker compose --env-file "$env_file" -f "$release_dir/deploy/compose.yaml" down >/dev/null 2>&1 || true
     rm -f -- "$current_link"
