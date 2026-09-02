@@ -28,6 +28,6 @@ describe("recording continuity and input labels", () => {
 
   it("uses the browser-provided concrete microphone name and a safe fallback", () => {
     expect(formatAudioInputLabel({ deviceId: "device", label: "MacBook Pro 麦克风" })).toBe("MacBook Pro 麦克风");
-    expect(formatAudioInputLabel({ deviceId: "abcdef123456", label: "" })).toBe("麦克风（设备 abcdef12）");
+    expect(formatAudioInputLabel({ deviceId: "abcdef123456", label: "" })).toBe("麦克风（浏览器未提供设备名称）");
   });
 });

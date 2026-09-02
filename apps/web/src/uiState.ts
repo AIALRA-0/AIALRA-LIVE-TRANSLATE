@@ -48,8 +48,7 @@ export function canDropWorkspaceTarget(
 export function formatAudioInputLabel(device: Pick<MediaDeviceInfo, "deviceId" | "label">): string {
   const label = device.label.trim();
   if (label) return label;
-  const shortId = device.deviceId ? device.deviceId.slice(0, 8) : "未识别";
-  return `麦克风（设备 ${shortId}）`;
+  return "麦克风（浏览器未提供设备名称）";
 }
 
 export function isRecordingResumable(state: Session["state"] | string): boolean {

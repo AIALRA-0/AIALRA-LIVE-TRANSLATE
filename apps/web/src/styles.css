@@ -371,4 +371,6 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 @media (max-width: 560px) {
   .runtime-settings-grid { grid-template-columns: 1fr; }
   .workspace-context-menu { width: 170px; }
+  .audio-device-row { align-items: stretch; flex-direction: column; }
+  .audio-device-row .text-link-button { width: auto; text-align: left; }
 }
