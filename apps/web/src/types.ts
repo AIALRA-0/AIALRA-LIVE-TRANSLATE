@@ -144,6 +144,15 @@ export interface RecordingProjectStatus {
     retry_after_seconds: number;
     max_asr_backlog_seconds: number;
   };
+  sessions: Array<{
+    session_id: string;
+    session_title: string;
+    state: string;
+    active_model_jobs: number;
+    recoverable: boolean;
+    reason: "ready" | "active_recording" | "recovery_available" | "processing" | "not_recordable";
+    updated_at: string;
+  }>;
 }
 
 export interface ReadWeaveStatus {

@@ -4,7 +4,7 @@ use aialra_core_domain::SessionState;
 use aialra_event_protocol::EventEnvelope;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
@@ -1502,6 +1502,19 @@ impl EventStore {
     /// Idempotency keys make queue creation safe when an audio frame or completion is retried.
     pub fn enqueue_model_job(&self, job: &NewModelJob) -> Result<ModelJobRecord> {
         let now = Utc::now();
+        // Deferred explanation jobs are visible in the queue immediately, but
+        // remain held until Core activates them after their material and
+        // transcript dependencies are complete.
+        let available_at = if job
+            .input
+            .get("deferred_material")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            now + chrono::Duration::days(3650)
+        } else {
+            now
+        };
         let connection = self.lock()?;
         connection.execute(
             "INSERT OR IGNORE INTO model_jobs(id, session_id, job_type, priority, status, input_json, input_object_hash, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, 0, ?8, ?8, ?8)",
@@ -1513,12 +1526,75 @@ impl EventStore {
                 serde_json::to_string(&job.input)?,
                 job.input_object_hash,
                 job.idempotency_key,
-                now.to_rfc3339(),
+                available_at.to_rfc3339(),
             ],
         )?;
         drop(connection);
         self.get_model_job_by_key(&job.idempotency_key)?
             .context("model job disappeared after enqueue")
+    }
+
+    /// Atomically coalesce confirmed material uploads into one waiting explanation.
+    ///
+    /// The immediate transaction matters because two browser tabs can confirm different
+    /// uploads at nearly the same time.  A read-then-update sequence could otherwise create
+    /// two independent explanation jobs before either request observes the other one.
+    pub fn enqueue_or_merge_deferred_explanation(
+        &self,
+        job: &NewModelJob,
+        asset_id: &str,
+        parse_job_id: &str,
+    ) -> Result<ModelJobRecord> {
+        let now = Utc::now();
+        let available_at = now + chrono::Duration::days(3650);
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = {
+            let mut statement = transaction.prepare(
+                "SELECT id, input_json FROM model_jobs WHERE session_id = ?1 AND job_type = 'explain' AND status = 'queued' ORDER BY created_at, id",
+            )?;
+            let rows = statement.query_map([&job.session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut found = None;
+            for row in rows {
+                let (id, input_json) = row?;
+                let input: Value = serde_json::from_str(&input_json)?;
+                if input.get("deferred_material").and_then(Value::as_bool) == Some(true) {
+                    found = Some((id, input));
+                    break;
+                }
+            }
+            found
+        };
+        let result_id = if let Some((existing_id, mut input)) = existing {
+            append_unique_json_string(&mut input, "asset_ids", asset_id);
+            append_unique_json_string(&mut input, "depends_on_job_ids", parse_job_id);
+            transaction.execute(
+                "UPDATE model_jobs SET input_json = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'queued'",
+                params![existing_id, serde_json::to_string(&input)?, now.to_rfc3339()],
+            )?;
+            existing_id
+        } else {
+            transaction.execute(
+                "INSERT INTO model_jobs(id, session_id, job_type, priority, status, input_json, input_object_hash, idempotency_key, attempts, available_at, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, 0, ?8, ?8, ?8)",
+                params![
+                    job.id,
+                    job.session_id,
+                    job.job_type,
+                    job.priority,
+                    serde_json::to_string(&job.input)?,
+                    job.input_object_hash,
+                    job.idempotency_key,
+                    available_at.to_rfc3339(),
+                ],
+            )?;
+            job.id.clone()
+        };
+        transaction.commit()?;
+        drop(connection);
+        self.get_model_job(&result_id)?
+            .context("deferred explanation disappeared after coalescing")
     }
 
     pub fn get_model_job(&self, job_id: &str) -> Result<Option<ModelJobRecord>> {
@@ -1543,6 +1619,99 @@ impl EventStore {
             )
             .optional()
             .context("query model job by idempotency key")
+    }
+
+    /// Return the single queued material-triggered explanation that is waiting
+    /// for its dependencies.  Leased explanations are deliberately excluded:
+    /// their input has already been handed to a worker and must not change.
+    pub fn find_pending_deferred_explanation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ModelJobRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, session_id, job_type, priority, status, input_json, input_object_hash, result_json, idempotency_key, attempts, available_at, lease_owner, lease_expires_at, last_error_kind, created_at, updated_at, completed_at FROM model_jobs WHERE session_id = ?1 AND job_type = 'explain' AND status = 'queued' ORDER BY created_at, id",
+        )?;
+        let mut rows = statement.query([session_id])?;
+        while let Some(row) = rows.next()? {
+            let job = map_model_job(row)?;
+            if job.input.get("deferred_material").and_then(Value::as_bool) == Some(true) {
+                return Ok(Some(job));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Merge new dependency metadata into a queued job without making it
+    /// runnable.  This is used by consecutive confirmed uploads.
+    pub fn update_model_job_input(&self, job_id: &str, input: &Value) -> Result<bool> {
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "UPDATE model_jobs SET input_json = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'queued'",
+            params![job_id, serde_json::to_string(input)?, Utc::now().to_rfc3339()],
+        )? == 1)
+    }
+
+    /// Activate a deferred explanation only after Core has materialized a
+    /// stable transcript/material snapshot.  The update is atomic with the
+    /// queued-state check so a worker cannot observe a half-activated job.
+    pub fn activate_model_job(&self, job_id: &str, input: &Value) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "UPDATE model_jobs SET input_json = ?2, available_at = ?3, updated_at = ?3 WHERE id = ?1 AND status = 'queued'",
+            params![job_id, serde_json::to_string(input)?, now],
+        )? == 1)
+    }
+
+    /// A terminal material parse failure makes its waiting explanation
+    /// explicitly failed instead of leaving an invisible queued tombstone.
+    pub fn fail_deferred_explanations_for_dependency(
+        &self,
+        dependency_job_id: &str,
+        error_kind: &str,
+    ) -> Result<Vec<ModelJobRecord>> {
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
+            "SELECT id, input_json FROM model_jobs WHERE job_type = 'explain' AND status = 'queued'",
+        )?;
+        let mut matching = Vec::new();
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (job_id, input_json) = row?;
+            let input: Value = serde_json::from_str(&input_json)?;
+            let depends = input
+                .get("depends_on_job_ids")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.as_str() == Some(dependency_job_id))
+                });
+            if depends && input.get("deferred_material").and_then(Value::as_bool) == Some(true) {
+                matching.push(job_id);
+            }
+        }
+        drop(statement);
+        for job_id in &matching {
+            transaction.execute(
+                "UPDATE model_jobs SET status = 'failed', available_at = ?2, last_error_kind = ?3, updated_at = ?2, completed_at = ?2 WHERE id = ?1 AND status = 'queued'",
+                params![job_id, now, error_kind],
+            )?;
+        }
+        transaction.commit()?;
+        drop(connection);
+        matching
+            .into_iter()
+            .map(|job_id| {
+                self.get_model_job(&job_id)?
+                    .context("deferred explanation disappeared after failure")
+            })
+            .collect()
     }
 
     /// A user-triggered retry can reopen a visible summary failure without
@@ -1590,18 +1759,27 @@ impl EventStore {
         )?;
         let selected_id = {
             let mut statement = transaction.prepare(
-                "SELECT id, job_type FROM model_jobs WHERE status = 'queued' AND available_at <= ?1 AND (?2 IS NULL OR id = ?2) ORDER BY priority DESC, created_at, id LIMIT 100",
+                "SELECT id, job_type, input_json FROM model_jobs WHERE status = 'queued' AND available_at <= ?1 AND (?2 IS NULL OR id = ?2) ORDER BY priority DESC, created_at, id LIMIT 100",
             )?;
             let candidates = statement
                 .query_map(
                     rusqlite::params![now.to_rfc3339(), requested_job_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             candidates
                 .into_iter()
-                .find(|(_, job_type)| capabilities.iter().any(|item| item == job_type))
-                .map(|(id, _)| id)
+                .find(|(_, job_type, input_json)| {
+                    capabilities.iter().any(|item| item == job_type)
+                        && deferred_model_job_ready(&transaction, input_json).unwrap_or(false)
+                })
+                .map(|(id, _, _)| id)
         };
         let Some(job_id) = selected_id else {
             transaction.commit()?;
@@ -1735,12 +1913,26 @@ impl EventStore {
     /// realtime fact pipeline still make a session fail closed.
     pub fn has_failed_non_summary_job(&self, session_id: &str) -> Result<bool> {
         let connection = self.lock()?;
-        let count: u64 = connection.query_row(
-            "SELECT COUNT(*) FROM model_jobs WHERE session_id = ?1 AND status = 'failed' AND job_type <> 'summarize'",
-            [session_id],
-            |row| row.get(0),
+        let mut statement = connection.prepare(
+            "SELECT job_type, input_json FROM model_jobs WHERE session_id = ?1 AND status = 'failed'",
         )?;
-        Ok(count > 0)
+        let rows = statement.query_map([session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (job_type, input_json) = row?;
+            if job_type == "summarize" {
+                continue;
+            }
+            let input: Value = serde_json::from_str(&input_json)?;
+            if job_type == "explain"
+                && input.get("deferred_material").and_then(Value::as_bool) == Some(true)
+            {
+                continue;
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Count queued or leased work of selected kinds while excluding the job whose
@@ -2751,6 +2943,55 @@ fn map_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventEnvelope> {
     })
 }
 
+fn deferred_model_job_ready(
+    transaction: &rusqlite::Transaction<'_>,
+    input_json: &str,
+) -> Result<bool> {
+    let input: Value = serde_json::from_str(input_json)?;
+    if input.get("deferred_material").and_then(Value::as_bool) != Some(true) {
+        return Ok(true);
+    }
+    let Some(dependencies) = input.get("depends_on_job_ids").and_then(Value::as_array) else {
+        return Ok(false);
+    };
+    if dependencies.is_empty()
+        || input
+            .get("segments")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    {
+        return Ok(false);
+    }
+    for dependency in dependencies.iter().filter_map(Value::as_str) {
+        let status: Option<String> = transaction
+            .query_row(
+                "SELECT status FROM model_jobs WHERE id = ?1",
+                [dependency],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if status.as_deref() != Some("completed") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn append_unique_json_string(input: &mut Value, key: &str, value: &str) {
+    let Some(object) = input.as_object_mut() else {
+        return;
+    };
+    let values = object
+        .entry(key.to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(values) = values.as_array_mut() else {
+        return;
+    };
+    if !values.iter().any(|item| item.as_str() == Some(value)) {
+        values.push(Value::String(value.to_owned()));
+    }
+}
+
 fn map_model_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelJobRecord> {
     let input: String = row.get(5)?;
     let result: Option<String> = row.get(7)?;
@@ -3080,6 +3321,149 @@ mod tests {
             .unwrap();
         assert_eq!(first.id, second.id);
         assert_eq!(store.model_queue_counts(None).unwrap().queued, 1);
+    }
+
+    #[test]
+    fn confirmed_material_explanation_waits_until_dependencies_are_activated() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        store.create_session(&test_session()).unwrap();
+        let parse = store
+            .enqueue_model_job(&NewModelJob {
+                id: "job-asset-parse".to_owned(),
+                session_id: "session_test".to_owned(),
+                job_type: "asset_parse".to_owned(),
+                priority: 60,
+                input: json!({"asset_id": "asset-1"}),
+                input_object_hash: None,
+                idempotency_key: "asset_parse:asset-1".to_owned(),
+            })
+            .unwrap();
+        let explanation = store
+            .enqueue_model_job(&NewModelJob {
+                id: "job-material-explain".to_owned(),
+                session_id: "session_test".to_owned(),
+                job_type: "explain".to_owned(),
+                priority: 40,
+                input: json!({
+                    "deferred_material": true,
+                    "depends_on_job_ids": [parse.id],
+                    "segments": [],
+                    "asset_ids": ["asset-1"]
+                }),
+                input_object_hash: None,
+                idempotency_key: "explain:material:session_test".to_owned(),
+            })
+            .unwrap();
+
+        assert!(
+            store
+                .lease_model_job_for(
+                    "explain-worker",
+                    &["explain".to_owned()],
+                    60,
+                    Some(&explanation.id)
+                )
+                .unwrap()
+                .is_none()
+        );
+        let leased_parse = store
+            .lease_model_job_for(
+                "asset-worker",
+                &["asset_parse".to_owned()],
+                60,
+                Some(&parse.id),
+            )
+            .unwrap()
+            .unwrap();
+        store
+            .complete_model_job(
+                &leased_parse.id,
+                "asset-worker",
+                &json!({"pages": [{"page_id": "page-1"}]}),
+            )
+            .unwrap();
+        assert!(
+            store
+                .lease_model_job_for(
+                    "explain-worker",
+                    &["explain".to_owned()],
+                    60,
+                    Some(&explanation.id)
+                )
+                .unwrap()
+                .is_none()
+        );
+
+        let mut activated_input = explanation.input.clone();
+        activated_input["segments"] = json!([{"id": "paragraph-1", "text": "stable"}]);
+        activated_input["asset_pages"] = json!([{"id": "page-1", "text": "material"}]);
+        assert!(
+            store
+                .activate_model_job(&explanation.id, &activated_input)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .lease_model_job_for(
+                    "explain-worker",
+                    &["explain".to_owned()],
+                    60,
+                    Some(&explanation.id)
+                )
+                .unwrap()
+                .unwrap()
+                .id,
+            explanation.id
+        );
+    }
+
+    #[test]
+    fn failed_material_dependency_closes_its_waiting_explanation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        store.create_session(&test_session()).unwrap();
+        store
+            .enqueue_model_job(&NewModelJob {
+                id: "job-asset-parse-failed".to_owned(),
+                session_id: "session_test".to_owned(),
+                job_type: "asset_parse".to_owned(),
+                priority: 60,
+                input: json!({"asset_id": "asset-failed"}),
+                input_object_hash: None,
+                idempotency_key: "asset_parse:failed".to_owned(),
+            })
+            .unwrap();
+        let explanation = store
+            .enqueue_model_job(&NewModelJob {
+                id: "job-material-explain-failed".to_owned(),
+                session_id: "session_test".to_owned(),
+                job_type: "explain".to_owned(),
+                priority: 40,
+                input: json!({
+                    "deferred_material": true,
+                    "depends_on_job_ids": ["job-asset-parse-failed"],
+                    "segments": [],
+                    "asset_ids": ["asset-failed"]
+                }),
+                input_object_hash: None,
+                idempotency_key: "explain:material:failed".to_owned(),
+            })
+            .unwrap();
+
+        let failed = store
+            .fail_deferred_explanations_for_dependency(
+                "job-asset-parse-failed",
+                "material_parse_failed",
+            )
+            .unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].id, explanation.id);
+        assert_eq!(failed[0].status, "failed");
+        assert_eq!(
+            failed[0].last_error_kind.as_deref(),
+            Some("material_parse_failed")
+        );
     }
 
     #[test]

@@ -447,11 +447,17 @@ pub async fn purge_entity(
                 | aialra_core_domain::SessionState::Stopping
                 | aialra_core_domain::SessionState::Processing
         ) {
-            return Err(ApiError::conflict("请先停止录音并等待处理队列排空"));
+            return Err(ApiError::conflict_with_code(
+                "请先停止录音并等待处理队列排空",
+                "workspace_trash_blocked_active_session",
+            ));
         }
         let counts = state.store.model_queue_counts(Some(&item.entity_id))?;
         if counts.queued + counts.leased > 0 {
-            return Err(ApiError::conflict("请先等待课程处理队列排空"));
+            return Err(ApiError::conflict_with_code(
+                "请先等待课程处理队列排空",
+                "workspace_trash_blocked_active_session",
+            ));
         }
     }
     crate::readweave::purge_workspace_objects(&state, &records).await?;
@@ -858,7 +864,10 @@ fn ensure_sessions_can_move_to_trash(
                 | aialra_core_domain::SessionState::Stopping
                 | aialra_core_domain::SessionState::Processing
         ) {
-            return Err(ApiError::conflict("请先停止录音并等待处理完成"));
+            return Err(ApiError::conflict_with_code(
+                "请先停止录音并等待处理完成",
+                "workspace_trash_blocked_active_session",
+            ));
         }
     }
     Ok(())

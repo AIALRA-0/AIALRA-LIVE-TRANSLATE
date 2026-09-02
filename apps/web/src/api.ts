@@ -49,7 +49,11 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
       not_found: "目标内容不存在，可能已被移动或删除",
       conflict: "当前操作与另一台设备或后台处理冲突，请稍后重试",
       recording_lease_conflict: "这个项目当前由另一台设备录音，请等待停止或租约到期后重试",
+      recording_lease_expired: "本机录音租约已到期，未确认音频仍保留；请重新检查状态后继续",
       recording_capacity_unavailable: "GPU 正在处理已有课程，新项目暂时不能开始录音，请稍后重试",
+      recording_session_processing: "本次课程仍有后台任务处理中，请等待队列排空后再继续收音",
+      recording_session_unavailable: "本次课程当前不能继续录音，请先查看课程状态",
+      workspace_trash_blocked_active_session: "课程仍在录音或处理中，请先停止录音并等待处理完成",
       service_unavailable: "后台服务暂时不可用，请稍后重试",
       upstream_provider_failed: "外部服务暂时不可用，本地课程流程仍可继续",
       json_operation_failed: "后台结果暂时无法读取，请稍后重试",
@@ -173,10 +177,11 @@ export const api = {
         body: JSON.stringify({ project_id: projectId, device_id: deviceId, lease_token: leaseToken }),
       }),
     ),
-  uploadAsset: (sessionId: string, file: File) => {
+  uploadAsset: (sessionId: string, file: File, queueExplanation = true) => {
     const form = new FormData();
     form.append("file", file);
-    return checked<{ asset_id: string; job_id: string; page_ids: string[] }>(
+    form.append("queue_explanation", queueExplanation ? "true" : "false");
+    return checked<{ asset_id: string; job_id: string; page_ids: string[]; explain_job_id?: string; explain_status?: string }>(
       fetch(`/api/v1/sessions/${sessionId}/assets`, { method: "POST", body: form }),
     );
   },
@@ -186,7 +191,7 @@ export function subscribeWorkspace(onUpdate: (update: WorkspaceUpdate) => void, 
   const source = new EventSource("/api/v1/workspace/stream");
   source.onopen = () => onConnection(true);
   source.onerror = () => onConnection(false);
-  ["workspace.folder.created", "workspace.folder.updated", "workspace.folder.moved", "workspace.folder.archived", "workspace.project.created", "workspace.project.updated", "workspace.project.placed", "workspace.session.created", "workspace.session.updated", "workspace.trash.moved", "workspace.trash.restored", "workspace.trash.purged"].forEach((eventName) => {
+  ["workspace.folder.created", "workspace.folder.updated", "workspace.folder.moved", "workspace.folder.archived", "workspace.project.created", "workspace.project.updated", "workspace.project.placed", "workspace.entity.moved", "workspace.session.created", "workspace.session.updated", "workspace.session.state.changed", "workspace.recording.changed", "workspace.trash.moved", "workspace.trash.restored", "workspace.trash.purged"].forEach((eventName) => {
     source.addEventListener(eventName, (message) => onUpdate(JSON.parse((message as MessageEvent).data) as WorkspaceUpdate));
   });
   return () => source.close();

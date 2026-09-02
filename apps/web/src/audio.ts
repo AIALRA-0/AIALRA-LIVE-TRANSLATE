@@ -12,6 +12,7 @@ export type CapturePhase =
   | "connecting"
   | "recording"
   | "blocked"
+  | "recoverable"
   | "stopping"
   | "processing"
   | "error";
@@ -272,7 +273,7 @@ export class BrowserCapture {
     private readonly onStatus: (message: string) => void,
     private readonly mode: CaptureMode = "microphone",
     private readonly deviceId?: string,
-    private readonly onRevoked?: () => void,
+    private readonly onRevoked?: (message?: string) => void,
   ) {}
 
   // Prepare the browser input before asking Core for a recording lease.  This
@@ -419,8 +420,9 @@ export class BrowserCapture {
     this.socket?.close();
     this.activated = false;
     if (notify && wasActivated) {
-      this.onStatus(message ?? `录音权限已由另一台设备接管，${this.pending.size} 个未确认音频块保留在本机`);
-      this.onRevoked?.();
+      const notice = message ?? `录音权限已由另一台设备接管，${this.pending.size} 个未确认音频块保留在本机`;
+      this.onStatus(notice);
+      this.onRevoked?.(notice);
     }
   }
 
@@ -576,8 +578,13 @@ export class BrowserCapture {
       return;
     }
     if (response.ok) return;
-    this.onStatus("录音权限已由另一台设备接管，本机停止采集，未确认块仍保留");
-    this.revoke();
+    const body = await response.json().catch(() => ({})) as { code?: string };
+    const notice = body.code === "recording_lease_conflict"
+      ? "录音权限已由另一台设备接管，本机停止采集，未确认块仍保留"
+      : body.code === "recording_lease_expired"
+        ? "本机录音租约已到期，本机停止采集，未确认块仍保留；状态确认后可以继续本次课程"
+        : "录音权限已失效，本机停止采集，未确认块仍保留；请重新检查录音状态";
+    this.revoke(notice);
   }
 }
 
