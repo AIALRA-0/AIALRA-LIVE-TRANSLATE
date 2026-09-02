@@ -409,6 +409,7 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 .recording-lease-status span, .recording-capacity-status span { color: var(--muted); font-size: 9px; line-height: 1.45; }
 
 @media (max-width: 560px) {
+  .workspace-dialog-backdrop:has(.runtime-settings-dialog) { padding: 0; place-items: stretch; }
   .runtime-settings-dialog { width: 100vw; height: 100dvh; max-height: none; border: 0; border-radius: 0; }
   .runtime-settings-dialog > header, .runtime-settings-dialog > footer, .runtime-settings-body { padding-inline: 16px; }
   .runtime-settings-grid { grid-template-columns: 1fr; }
