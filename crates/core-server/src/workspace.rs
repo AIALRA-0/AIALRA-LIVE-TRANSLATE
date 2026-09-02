@@ -87,6 +87,15 @@ pub struct PurgeRequest {
     confirmation: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MoveWorkspaceRequest {
+    entity_type: String,
+    entity_id: String,
+    intent: String,
+    target_type: Option<String>,
+    target_id: Option<String>,
+}
+
 pub async fn workspace_snapshot(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
@@ -126,6 +135,226 @@ pub async fn list_trash(
     Ok(Json(
         json!({"items": state.store.list_workspace_trash(&user.0)?}),
     ))
+}
+
+pub async fn move_workspace_entity(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(request): Json<MoveWorkspaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if !matches!(
+        request.intent.as_str(),
+        "before" | "inside" | "after" | "root"
+    ) {
+        return Err(ApiError::bad_request("invalid workspace move intent"));
+    }
+    match request.entity_type.as_str() {
+        "folder" => {
+            let source = owned_folder(&state, &user.0, &request.entity_id)?;
+            let (parent_id, target_id, insert_after) = match request.intent.as_str() {
+                "root" => (None, None, false),
+                "inside" => {
+                    if request.target_type.as_deref() != Some("folder") {
+                        return Err(ApiError::bad_request(
+                            "folders can only be placed inside folders",
+                        ));
+                    }
+                    let target_id = request
+                        .target_id
+                        .as_deref()
+                        .ok_or_else(|| ApiError::bad_request("move target is required"))?;
+                    owned_folder(&state, &user.0, target_id)?;
+                    (Some(target_id.to_owned()), None, false)
+                }
+                "before" | "after" => {
+                    if request.target_type.as_deref() != Some("folder") {
+                        return Err(ApiError::bad_request(
+                            "folder ordering requires a folder target",
+                        ));
+                    }
+                    let target_id = request
+                        .target_id
+                        .as_deref()
+                        .ok_or_else(|| ApiError::bad_request("move target is required"))?;
+                    let target = owned_folder(&state, &user.0, target_id)?;
+                    (
+                        target.parent_id,
+                        Some(target_id.to_owned()),
+                        request.intent == "after",
+                    )
+                }
+                _ => unreachable!(),
+            };
+            validate_parent(&state, &user.0, Some(&source.id), parent_id.as_deref())?;
+            let mut ordered = state
+                .store
+                .list_workspace_folders(&user.0)?
+                .into_iter()
+                .filter(|item| {
+                    item.archived_at.is_none()
+                        && item.parent_id == parent_id
+                        && item.id != source.id
+                })
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+            let index = target_id
+                .as_ref()
+                .map(|target| {
+                    ordered
+                        .iter()
+                        .position(|id| id == target)
+                        .map(|position| position + usize::from(insert_after))
+                        .ok_or_else(|| {
+                            ApiError::bad_request("folder move target is not in the destination")
+                        })
+                })
+                .transpose()?
+                .unwrap_or(ordered.len());
+            ordered.insert(index, source.id.clone());
+            state.store.move_workspace_folder_atomic(
+                &source.id,
+                &user.0,
+                parent_id.as_deref(),
+                &ordered,
+            )?;
+        }
+        "project" => {
+            let source = owned_project(&state, &user.0, &request.entity_id)?;
+            let (folder_id, target_id, insert_after) = match request.intent.as_str() {
+                "root" => (None, None, false),
+                "inside" => {
+                    if request.target_type.as_deref() != Some("folder") {
+                        return Err(ApiError::bad_request(
+                            "projects can only be placed inside folders",
+                        ));
+                    }
+                    let target_id = request
+                        .target_id
+                        .as_deref()
+                        .ok_or_else(|| ApiError::bad_request("move target is required"))?;
+                    owned_folder(&state, &user.0, target_id)?;
+                    (Some(target_id.to_owned()), None, false)
+                }
+                "before" | "after" => {
+                    if request.target_type.as_deref() != Some("project") {
+                        return Err(ApiError::bad_request(
+                            "project ordering requires a project target",
+                        ));
+                    }
+                    let target_id = request
+                        .target_id
+                        .as_deref()
+                        .ok_or_else(|| ApiError::bad_request("move target is required"))?;
+                    owned_project(&state, &user.0, target_id)?;
+                    let placement = state
+                        .store
+                        .get_workspace_project_placement(target_id)?
+                        .ok_or_else(|| ApiError::not_found("project placement not found"))?;
+                    (
+                        placement.folder_id,
+                        Some(target_id.to_owned()),
+                        request.intent == "after",
+                    )
+                }
+                _ => unreachable!(),
+            };
+            if let Some(folder_id) = folder_id.as_deref() {
+                owned_folder(&state, &user.0, folder_id)?;
+            }
+            let mut ordered = state
+                .store
+                .list_workspace_project_placements(&user.0)?
+                .into_iter()
+                .filter(|item| {
+                    item.archived_at.is_none()
+                        && item.folder_id == folder_id
+                        && item.project_id != source.id
+                })
+                .map(|item| item.project_id)
+                .collect::<Vec<_>>();
+            let index = target_id
+                .as_ref()
+                .map(|target| {
+                    ordered
+                        .iter()
+                        .position(|id| id == target)
+                        .map(|position| position + usize::from(insert_after))
+                        .ok_or_else(|| {
+                            ApiError::bad_request("project move target is not in the destination")
+                        })
+                })
+                .transpose()?
+                .unwrap_or(ordered.len());
+            ordered.insert(index, source.id.clone());
+            state.store.move_workspace_project_atomic(
+                &source.id,
+                &user.0,
+                folder_id.as_deref(),
+                &ordered,
+            )?;
+            crate::readweave::enqueue_manual_reconcile(&state, &source.id)?;
+        }
+        "session" => {
+            if !matches!(request.intent.as_str(), "before" | "after")
+                || request.target_type.as_deref() != Some("session")
+            {
+                return Err(ApiError::bad_request(
+                    "course sessions can only be reordered within one project",
+                ));
+            }
+            let source_project = state
+                .store
+                .project_for_session(&request.entity_id)?
+                .filter(|project| project.owner_subject == user.0)
+                .ok_or_else(|| ApiError::not_found("session not found"))?;
+            let target_id = request
+                .target_id
+                .as_deref()
+                .ok_or_else(|| ApiError::bad_request("move target is required"))?;
+            let target_project = state
+                .store
+                .project_for_session(target_id)?
+                .filter(|project| project.owner_subject == user.0)
+                .ok_or_else(|| ApiError::not_found("session not found"))?;
+            if source_project.id != target_project.id {
+                return Err(ApiError::bad_request(
+                    "course sessions cannot move across projects",
+                ));
+            }
+            let metadata = state.store.list_workspace_session_metadata(&user.0)?;
+            let sort_order = metadata
+                .iter()
+                .map(|item| (item.session_id.as_str(), item.sort_order))
+                .collect::<HashMap<_, _>>();
+            let mut ordered = state.store.list_project_sessions(&source_project.id)?;
+            ordered.sort_by_key(|item| sort_order.get(item.id.as_str()).copied().unwrap_or(0));
+            let mut ordered = ordered
+                .into_iter()
+                .map(|item| item.id)
+                .filter(|id| id != &request.entity_id)
+                .collect::<Vec<_>>();
+            let target_index = ordered
+                .iter()
+                .position(|id| id == target_id)
+                .ok_or_else(|| {
+                    ApiError::bad_request("session move target is not in the destination")
+                })?;
+            ordered.insert(
+                target_index + usize::from(request.intent == "after"),
+                request.entity_id.clone(),
+            );
+            state
+                .store
+                .reorder_workspace_sessions_atomic(&source_project.id, &user.0, &ordered)?;
+        }
+        _ => return Err(ApiError::bad_request("invalid workspace entity type")),
+    }
+    state.record_workspace_update(
+        &user.0,
+        "workspace.entity.moved",
+        json!({"entity_type": request.entity_type, "entity_id": request.entity_id, "intent": request.intent}),
+    )?;
+    Ok(Json(json!({"accepted": true})))
 }
 
 pub async fn trash_entity(

@@ -185,6 +185,24 @@ impl AppState {
                 "session.event",
                 serde_json::to_value(event)?,
             )?;
+            if matches!(
+                event.event_type.as_str(),
+                "session.ready"
+                    | "session.recording.started"
+                    | "session.processing"
+                    | "session.completed"
+                    | "session.failed"
+            ) {
+                self.record_workspace_update(
+                    &project.owner_subject,
+                    "workspace.session.state.changed",
+                    serde_json::json!({
+                        "project_id": project.id,
+                        "session_id": event.session_id,
+                        "event_type": event.event_type
+                    }),
+                )?;
+            }
         }
         if matches!(
             event.event_type.as_str(),
@@ -246,6 +264,14 @@ impl ApiError {
         }
     }
 
+    pub fn unavailable_with_code(message: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+            code,
+        }
+    }
+
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -275,6 +301,14 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             message: message.into(),
             code: "conflict",
+        }
+    }
+
+    pub fn conflict_with_code(message: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+            code,
         }
     }
 

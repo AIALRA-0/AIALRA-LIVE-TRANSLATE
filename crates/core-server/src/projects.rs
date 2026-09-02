@@ -11,7 +11,7 @@ use aialra_event_store::{
 };
 use async_stream::stream;
 use axum::Json;
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use base64::Engine;
@@ -36,7 +36,9 @@ pub struct CreateProjectRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateProjectRequest {
-    title: String,
+    title: Option<String>,
+    source_language: Option<String>,
+    target_language: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +46,21 @@ pub struct CreateProjectSessionRequest {
     title: String,
     consent_confirmed: bool,
     device_id: String,
+    source_language: Option<String>,
+    target_language: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecordingStatusQuery {
+    device_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RecordingAdmission {
+    allowed: bool,
+    reason: &'static str,
+    retry_after_seconds: u64,
+    max_asr_backlog_seconds: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +97,7 @@ pub async fn create_project(
     Json(request): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectRecord>, ApiError> {
     validate_title(&request.title)?;
+    validate_language_pair(&request.source_language, &request.target_language)?;
     let record = state.store.create_project(&NewProject {
         id: format!("project_{}", Uuid::now_v7().simple()),
         owner_subject: user.0.clone(),
@@ -118,11 +136,33 @@ pub async fn update_project(
     Path(project_id): Path<String>,
     Json(request): Json<UpdateProjectRequest>,
 ) -> Result<Json<ProjectRecord>, ApiError> {
-    validate_title(&request.title)?;
-    owned_project(&state, &user.0, &project_id)?;
+    if request.title.is_none()
+        && request.source_language.is_none()
+        && request.target_language.is_none()
+    {
+        return Err(ApiError::bad_request("至少需要更新一个项目字段"));
+    }
+    let existing = owned_project(&state, &user.0, &project_id)?;
+    let title = request.title.as_deref().unwrap_or(&existing.title).trim();
+    validate_title(title)?;
+    let source_language = request
+        .source_language
+        .as_deref()
+        .unwrap_or(&existing.source_language);
+    let target_language = request
+        .target_language
+        .as_deref()
+        .unwrap_or(&existing.target_language);
+    validate_language_pair(source_language, target_language)?;
     let record = state
         .store
-        .update_project_title(&project_id, &user.0, request.title.trim())?
+        .update_project(
+            &project_id,
+            &user.0,
+            title,
+            source_language,
+            target_language,
+        )?
         .ok_or_else(|| ApiError::not_found("project not found"))?;
     state.record_project_update(
         &project_id,
@@ -159,12 +199,21 @@ pub async fn create_project_session(
     if !request.consent_confirmed {
         return Err(ApiError::bad_request("recording consent is required"));
     }
+    let source_language = request
+        .source_language
+        .as_deref()
+        .unwrap_or(&project.source_language);
+    let target_language = request
+        .target_language
+        .as_deref()
+        .unwrap_or(&project.target_language);
+    validate_language_pair(source_language, target_language)?;
     let session_id = format!("session_{}", Uuid::now_v7().simple());
     state.store.create_session(&NewSession {
         id: session_id.clone(),
         title: request.title.trim().to_owned(),
-        source_language: project.source_language,
-        target_language: project.target_language,
+        source_language: source_language.to_owned(),
+        target_language: target_language.to_owned(),
         privacy_mode: "local_only".to_owned(),
         consent_confirmed: true,
         demo_mode: false,
@@ -210,14 +259,65 @@ pub async fn create_project_session(
     Ok(Json(ready))
 }
 
+pub async fn recording_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(project_id): Path<String>,
+    Query(query): Query<RecordingStatusQuery>,
+) -> Result<Json<Value>, ApiError> {
+    owned_project(&state, &user.0, &project_id)?;
+    validate_device_id(&query.device_id)?;
+    let now = Utc::now();
+    let lease = if let Some(record) = state
+        .store
+        .get_recording_lease(&project_id)?
+        .filter(|record| record.expires_at > now)
+    {
+        let session_title = state
+            .store
+            .get_session(&record.session_id)?
+            .map(|session| session.title);
+        Some(recording_status_lease(
+            &record,
+            &query.device_id,
+            session_title.as_deref(),
+        ))
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "project_id": project_id,
+        "server_time": now,
+        "lease": lease,
+        "admission": recording_admission(&state)?
+    })))
+}
+
 pub async fn acquire_recording(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
     Path((project_id, session_id)): Path<(String, String)>,
     Json(request): Json<AcquireLeaseRequest>,
 ) -> Result<Json<LeaseResponse>, ApiError> {
-    owned_project_session(&state, &user.0, &project_id, &session_id)?;
+    let session = owned_project_session(&state, &user.0, &project_id, &session_id)?;
     validate_device_id(&request.device_id)?;
+    let now = Utc::now();
+    let has_active_project_lease = state
+        .store
+        .get_recording_lease(&project_id)?
+        .is_some_and(|record| record.expires_at > now);
+    if recording_requires_admission(session.state, has_active_project_lease) {
+        let admission = recording_admission(&state)?;
+        if !admission.allowed {
+            return Err(ApiError::unavailable_with_code(
+                match admission.reason {
+                    "asr_backlog" => "GPU 正在处理已有课程，新项目暂时不能开始录音，请稍后重试",
+                    _ => "GPU 录音处理服务暂时不可用，新项目暂时不能开始录音",
+                },
+                "recording_capacity_unavailable",
+            ));
+        }
+    }
     let token = new_lease_token();
     let hash = hash_token(&token);
     let lease = match state.store.acquire_recording_lease(
@@ -229,15 +329,12 @@ pub async fn acquire_recording(
     )? {
         LeaseAcquireOutcome::Acquired(record) => record,
         LeaseAcquireOutcome::Conflict(_record) => {
-            return Err(ApiError::conflict(
+            return Err(ApiError::conflict_with_code(
                 "另一台设备正在录音，请在该设备停止后重试",
+                "recording_lease_conflict",
             ));
         }
     };
-    let session = state
-        .store
-        .get_session(&session_id)?
-        .ok_or_else(|| ApiError::not_found("session not found"))?;
     if session.state == SessionState::Ready {
         state
             .store
@@ -266,6 +363,11 @@ pub async fn acquire_recording(
             "recording lease committed without notification"
         );
     }
+    let _ = state.record_workspace_update(
+        &user.0,
+        "workspace.recording.changed",
+        json!({"project_id": project_id, "session_id": session_id, "active": true}),
+    );
     Ok(Json(lease_response(lease, token)))
 }
 
@@ -333,6 +435,11 @@ pub async fn stop_recording(
         let _ = state
             .store
             .release_recording_lease(&project_id, &session_id, &hash);
+        let _ = state.record_workspace_update(
+            &user.0,
+            "workspace.recording.changed",
+            json!({"project_id": project_id, "session_id": session_id, "active": false}),
+        );
         finish_session_after_stop(&state, &session_id)?;
         return Ok(Json(
             state.store.get_session(&session_id)?.unwrap_or(current),
@@ -397,6 +504,11 @@ pub async fn stop_recording(
         Some(&session_id),
         "recording.lease.released",
         json!({"generation": lease.generation}),
+    );
+    let _ = state.record_workspace_update(
+        &user.0,
+        "workspace.recording.changed",
+        json!({"project_id": project_id, "session_id": session_id, "active": false}),
     );
     finish_session_after_stop(&state, &session_id)?;
     Ok(Json(
@@ -591,6 +703,20 @@ fn public_lease(lease: &RecordingLeaseRecord) -> Value {
     json!({"project_id": lease.project_id, "session_id": lease.session_id, "holder_device_id": lease.holder_device_id, "generation": lease.generation, "heartbeat_at": lease.heartbeat_at, "expires_at": lease.expires_at})
 }
 
+fn recording_status_lease(
+    lease: &RecordingLeaseRecord,
+    requesting_device_id: &str,
+    session_title: Option<&str>,
+) -> Value {
+    json!({
+        "session_id": lease.session_id,
+        "session_title": session_title,
+        "holder": if lease.holder_device_id == requesting_device_id { "self" } else { "other" },
+        "generation": lease.generation,
+        "expires_at": lease.expires_at
+    })
+}
+
 pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
@@ -614,6 +740,78 @@ fn validate_device_id(value: &str) -> Result<(), ApiError> {
         .ok_or_else(|| ApiError::bad_request("device_id is invalid"))
 }
 
+const SOURCE_LANGUAGES: &[&str] = &["auto", "zh", "en", "ja", "ko", "es", "fr", "de"];
+const TARGET_LANGUAGES: &[&str] = &["zh-CN", "en", "ja", "ko", "es", "fr", "de"];
+
+fn validate_language_pair(source: &str, target: &str) -> Result<(), ApiError> {
+    if !SOURCE_LANGUAGES.contains(&source) || !TARGET_LANGUAGES.contains(&target) {
+        return Err(ApiError::bad_request("不支持所选讲授语言或翻译语言"));
+    }
+    Ok(())
+}
+
+fn recording_admission(state: &AppState) -> Result<RecordingAdmission, ApiError> {
+    let now = Utc::now();
+    let max_asr_backlog_seconds =
+        std::env::var("AIALRA_RECORDING_ADMISSION_MAX_ASR_BACKLOG_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(15)
+            .clamp(3, 300);
+    let worker = state.store.list_workers()?.into_iter().find(|record| {
+        record.capabilities.iter().any(|item| item == "asr")
+            && (now - record.last_seen_at).num_seconds() <= 30
+    });
+    let Some(worker) = worker else {
+        return Ok(RecordingAdmission {
+            allowed: false,
+            reason: "asr_worker_offline",
+            retry_after_seconds: 5,
+            max_asr_backlog_seconds,
+        });
+    };
+    let provider = worker
+        .model_metadata
+        .get("asr_provider")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let healthy = worker.model_metadata.get("status").and_then(Value::as_str) == Some("ok")
+        && worker
+            .model_metadata
+            .get("asr_available")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && provider.ends_with("@cuda");
+    if !healthy {
+        return Ok(RecordingAdmission {
+            allowed: false,
+            reason: "asr_degraded",
+            retry_after_seconds: 5,
+            max_asr_backlog_seconds,
+        });
+    }
+    if let Some(oldest) = state.store.oldest_active_model_job_at("asr")?
+        && (now - oldest).num_seconds() > max_asr_backlog_seconds
+    {
+        return Ok(RecordingAdmission {
+            allowed: false,
+            reason: "asr_backlog",
+            retry_after_seconds: 5,
+            max_asr_backlog_seconds,
+        });
+    }
+    Ok(RecordingAdmission {
+        allowed: true,
+        reason: "ok",
+        retry_after_seconds: 0,
+        max_asr_backlog_seconds,
+    })
+}
+
+fn recording_requires_admission(state: SessionState, has_active_project_lease: bool) -> bool {
+    !has_active_project_lease && !matches!(state, SessionState::Recording | SessionState::Degraded)
+}
+
 fn default_source_language() -> String {
     "en".to_owned()
 }
@@ -624,6 +822,7 @@ fn default_target_language() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aialra_event_store::WorkerHeartbeat;
 
     #[test]
     fn lease_tokens_are_url_safe_and_hashable() {
@@ -650,5 +849,70 @@ mod tests {
         let value = public_lease(&lease);
         assert!(value.get("lease_token_hash").is_none());
         assert_eq!(value["generation"], 1);
+    }
+
+    #[test]
+    fn course_languages_are_validated_without_changing_old_defaults() {
+        assert!(validate_language_pair("auto", "zh-CN").is_ok());
+        assert!(validate_language_pair("ja", "en").is_ok());
+        assert!(validate_language_pair("unsupported", "en").is_err());
+        assert!(validate_language_pair("en", "auto").is_err());
+        assert_eq!(default_source_language(), "en");
+        assert_eq!(default_target_language(), "zh-CN");
+    }
+
+    #[test]
+    fn recording_status_hides_device_and_secret_fields() {
+        let lease = RecordingLeaseRecord {
+            project_id: "project_test".to_owned(),
+            session_id: "session_test".to_owned(),
+            holder_device_id: "browser-private".to_owned(),
+            lease_token_hash: "private-digest".to_owned(),
+            generation: 2,
+            heartbeat_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::seconds(45),
+        };
+        let value = recording_status_lease(&lease, "browser-other", Some("测试课程"));
+        assert_eq!(value["holder"], "other");
+        assert!(value.get("holder_device_id").is_none());
+        assert!(value.get("lease_token_hash").is_none());
+        assert!(value.get("heartbeat_at").is_none());
+    }
+
+    #[test]
+    fn recording_admission_requires_a_recent_healthy_cuda_asr_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        let offline = recording_admission(&state).unwrap();
+        assert!(!offline.allowed);
+        assert_eq!(offline.reason, "asr_worker_offline");
+
+        state
+            .store
+            .heartbeat_worker(&WorkerHeartbeat {
+                id: "worker_test".to_owned(),
+                capabilities: vec!["asr".to_owned()],
+                model_metadata: json!({
+                    "status": "ok",
+                    "asr_available": true,
+                    "asr_provider": "faster-whisper@cuda"
+                }),
+                active_job_id: None,
+            })
+            .unwrap();
+        let healthy = recording_admission(&state).unwrap();
+        assert!(healthy.allowed);
+        assert_eq!(healthy.reason, "ok");
+    }
+
+    #[test]
+    fn capacity_gate_never_blocks_an_existing_recording() {
+        assert!(!recording_requires_admission(
+            SessionState::Recording,
+            false
+        ));
+        assert!(!recording_requires_admission(SessionState::Degraded, false));
+        assert!(!recording_requires_admission(SessionState::Ready, true));
+        assert!(recording_requires_admission(SessionState::Ready, false));
     }
 }

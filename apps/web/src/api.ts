@@ -1,4 +1,4 @@
-import type { EventEnvelope, LanguageView, Project, ProjectUpdate, ReadWeavePreview, ReadWeaveStatus, RecordingLease, Session, WorkspaceFolder, WorkspaceProjectPlacement, WorkspaceSnapshot, WorkspaceUpdate } from "./types";
+import type { EventEnvelope, LanguageView, Project, ProjectUpdate, ReadWeavePreview, ReadWeaveStatus, RecordingLease, RecordingProjectStatus, Session, WorkspaceFolder, WorkspaceProjectPlacement, WorkspaceSnapshot, WorkspaceUpdate } from "./types";
 
 export interface DingtalkCapabilities {
   configured: boolean;
@@ -48,6 +48,8 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
       bad_request: "请求内容不完整或已失效，请检查后重试",
       not_found: "目标内容不存在，可能已被移动或删除",
       conflict: "当前操作与另一台设备或后台处理冲突，请稍后重试",
+      recording_lease_conflict: "这个项目当前由另一台设备录音，请等待停止或租约到期后重试",
+      recording_capacity_unavailable: "GPU 正在处理已有课程，新项目暂时不能开始录音，请稍后重试",
       service_unavailable: "后台服务暂时不可用，请稍后重试",
       upstream_provider_failed: "外部服务暂时不可用，本地课程流程仍可继续",
       json_operation_failed: "后台结果暂时无法读取，请稍后重试",
@@ -85,8 +87,11 @@ export const api = {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ title, source_language: "en", target_language: "zh-CN" }),
   })),
-  updateProject: (projectId: string, title: string) => checked<Project>(fetch(`/api/v1/projects/${projectId}`, {
-    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }),
+  updateProject: (projectId: string, input: { title?: string; source_language?: string; target_language?: string }) => checked<Project>(fetch(`/api/v1/projects/${projectId}`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+  })),
+  moveWorkspaceEntity: (input: { entity_type: "folder" | "project" | "session"; entity_id: string; intent: "before" | "inside" | "after" | "root"; target_type?: "folder" | "project" | "session"; target_id?: string }) => checked<{ accepted: boolean }>(fetch("/api/v1/workspace/move", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
   })),
   placeProject: (projectId: string, input: { folder_id: string | null; sort_order: number; archived: boolean }) => checked<WorkspaceProjectPlacement>(fetch(`/api/v1/projects/${projectId}/placement`, {
     method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
@@ -95,12 +100,13 @@ export const api = {
   updateSession: (projectId: string, sessionId: string, input: { title?: string; pinned: boolean; sort_order: number; archived: boolean }) => checked(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}`, {
     method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
   })),
-  createProjectSession: (projectId: string, input: { title: string; consent_confirmed: boolean; device_id: string }) =>
+  createProjectSession: (projectId: string, input: { title: string; consent_confirmed: boolean; device_id: string; source_language?: string; target_language?: string }) =>
     checked<Session>(fetch(`/api/v1/projects/${projectId}/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(input),
     })),
+  recordingStatus: (projectId: string, deviceId: string) => checked<RecordingProjectStatus>(fetch(`/api/v1/projects/${projectId}/recording/status?device_id=${encodeURIComponent(deviceId)}`)),
   acquireRecording: (projectId: string, sessionId: string, deviceId: string) =>
     checked<RecordingLease>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/recording/acquire`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }),

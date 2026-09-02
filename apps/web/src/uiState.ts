@@ -8,10 +8,12 @@ export interface WorkspaceDragTarget {
   projectId?: string;
 }
 
-export type WorkspaceDropTarget = WorkspaceDragTarget | { entityType: "root" };
+export type WorkspaceDropTarget =
+  | { entityType: "root"; intent: "root" }
+  | (WorkspaceDragTarget & { intent: "before" | "inside" | "after" });
 
 export function workspaceTargetKey(target: WorkspaceDropTarget): string {
-  return target.entityType === "root" ? "root" : `${target.entityType}:${target.entityId}`;
+  return target.entityType === "root" ? "root:root" : `${target.entityType}:${target.entityId}:${target.intent}`;
 }
 
 export function isFolderDescendant(
@@ -36,13 +38,14 @@ export function canDropWorkspaceTarget(
 ): boolean {
   if (target.entityType === "root") return source.entityType === "folder" || source.entityType === "project";
   if (source.entityType === "folder" && target.entityType === "folder") {
-    return source.entityId !== target.entityId && !isFolderDescendant(target.entityId, source.entityId, parentByFolderId);
+    return source.entityId !== target.entityId
+      && !isFolderDescendant(target.entityId, source.entityId, parentByFolderId);
   }
-  if (source.entityType === "project" && target.entityType === "project") return source.entityId !== target.entityId;
+  if (source.entityType === "project" && target.entityType === "project") return source.entityId !== target.entityId && target.intent !== "inside";
   if (source.entityType === "session" && target.entityType === "session") {
-    return source.entityId !== target.entityId && source.projectId === target.projectId;
+    return source.entityId !== target.entityId && source.projectId === target.projectId && target.intent !== "inside";
   }
-  return (source.entityType === "folder" || source.entityType === "project") && target.entityType === "folder";
+  return source.entityType === "project" && target.entityType === "folder" && target.intent === "inside";
 }
 
 export function formatAudioInputLabel(device: Pick<MediaDeviceInfo, "deviceId" | "label">): string {
