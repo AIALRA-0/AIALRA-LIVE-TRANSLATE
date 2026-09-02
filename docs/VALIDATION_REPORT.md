@@ -2,7 +2,7 @@
 
 状态日期：2026-09-01
 
-## feedback-07 候选快速验证（2026-09-01，尚未部署）
+## feedback-07／feedback-08 快速验证与生产读回（2026-09-01，已部署）
 
 | 范围 | 结果 | 说明 |
 |---|---|---|
@@ -12,7 +12,7 @@
 | Web 生产构建 | 通过 | Vite 生产构建完成 |
 | 差异检查 | 通过 | `git diff --check` |
 | 真实浏览器硬件 | 缺失 | 当前工具环境没有可附着的用户登录标签；部署后的 macOS 设备切换仍需用户在真实浏览器确认 |
-| 发布状态 | 尚未执行 | 不推送、不部署的候选验证；线上继续运行 v25 |
+| 发布状态 | 通过 | PR #9、PR #10 已合并；`quality-v26-20260901-e2acd0` 已从 `main` 运行 SHA `e2acd0190b72f173318afc223cfa231e4933ccda` 部署 |
 
 本候选只涉及 Web UI 和浏览器本地设备选择，不改变音频协议、录音租约、数据库迁移、模型任务或 ReadWeave 数据。未使用本地 Docker／Docker Desktop／WSL。
 
@@ -20,11 +20,11 @@
 
 | 检查 | 结果 | 判定 |
 |---|---|---|
-| 运行代码与发布追溯 | 运行代码提交、`BUILD_ID`、Core `build_id`、OCI revision 均为 `2c43fb82cf672538b5104bbf9211d4a67480eede`；之后 `main` 仅追加脱敏文档 | 通过 |
-| 远端服务 | Core／ReadWeave healthy；Core restart count `0`；公网根路径 `302`；公网 `/internal/` `404` | 通过 |
-| GPU Worker | Worker 在线；ASR 与 Ollama 可用，Provider 为 CUDA；部署后已重启唯一 GPU stack | 通过 |
-| 生产链路冒烟 | 21／21 durable ACK 含 `commit_id`；第二设备 `409`；字幕、译文、材料页、讲解卡、安全停止和会话完成 | 通过 |
-| ReadWeave | 新项目 7 个映射均保留管理／匿名对象标记；读回 2 条结果；活动租约与活动模型任务均为 `0` | 通过 |
+| 运行代码与发布追溯 | 运行代码提交、`BUILD_ID`、Core `build_id`、OCI revision 均为 `e2acd0190b72f173318afc223cfa231e4933ccda`；状态文档随后仅追加脱敏记录 | 通过 |
+| 远端服务 | Core／ReadWeave healthy；Core restart count `0`；公网根路径 `302`；公网 `/internal/` `404`；公网 `/etapi/` `302` 进入登录保护 | 通过 |
+| GPU Worker | GPU Agent 已按既有监督器重启并保持在线；ASR 与 Ollama 可用，Provider 为 CUDA；模型队列 `queued=0`、`leased=0` | 通过 |
+| 生产链路冒烟 | 约 78 秒完成；21／21 durable ACK 含 `commit_id`；第二设备 `409`；6 条稳定字幕、2 条稳定译文、1 页材料、1 张讲解卡、安全停止和会话完成 | 通过 |
+| ReadWeave | 已配置且投影读回 2 条含原文／译文的结果；活动租约与活动模型任务均为 `0` | 通过 |
 | 轻量脱敏审查 | 本批变更无令牌、私有路径、真实会话 ID、录音、模型原文或原始测试数据 | 通过 |
 | 本地容器与扩展门禁 | 未使用本地 Docker／Docker Desktop／WSL；6 小时、24 小时、真机矩阵、Windows 崩溃调查未执行 | 按本轮范围 |
 
@@ -49,9 +49,9 @@
 
 ## 1 结论
 
-线上运行 `quality-v25-20260901-2c43fb8`；v25 已通过相关快速检查、部署追溯核对和 ReadWeave 修复后的生产合成音频链路冒烟，当前判定为 `V25 ONLINE / TECHNICAL SMOKE PASSED`
+线上运行 `quality-v26-20260901-e2acd0`；v26 已通过相关快速检查、部署追溯核对和生产合成音频链路冒烟，当前判定为 `V26 ONLINE / TECHNICAL SMOKE PASSED`。真实 macOS 麦克风设备切换仍待用户在已登录浏览器中确认。
 
-### 0.0 v25 快速上线验证
+### 0.0 v25 快速上线验证（前一运行批次）
 
 - Rust workspace 48 项与 Clippy 零警告通过；新增测试覆盖可选字段兼容、五种失败阶段、诊断标识格式、同一失败报告重试复用标识和生产 `build_id` 格式
 - Python 33 项、Ruff 和 mypy 通过；Web 21 项、类型检查、ESLint 与生产构建通过；`tools/e2e_smoke.mjs` Node 语法和 `git diff --check` 通过
