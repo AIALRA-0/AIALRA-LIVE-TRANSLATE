@@ -153,12 +153,19 @@ material.append(
   new Blob(["Pipeline forwarding reduces some read-after-write stalls."], { type: "text/plain" }),
   "pipeline-notes.txt",
 );
-await checked(fetch(`${API}/sessions/${session.id}/assets`, { method: "POST", body: material }));
+material.append("queue_explanation", "true");
+const uploadedMaterial = await checked(fetch(`${API}/sessions/${session.id}/assets`, { method: "POST", body: material }));
+if (typeof uploadedMaterial.explain_job_id !== "string" || uploadedMaterial.explain_job_id.length === 0) {
+  throw new Error("confirmed material upload did not create the waiting explanation job");
+}
 await waitForEvents(
   session.id,
   (items) => items.some((item) => item.event_type === "asset.page.extracted"),
 );
-await checked(fetch(`${API}/sessions/${session.id}/explain`, { method: "POST" }));
+await waitForEvents(
+  session.id,
+  (items) => items.some((item) => item.event_type === "explanation.card.created"),
+);
 await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
 }));
