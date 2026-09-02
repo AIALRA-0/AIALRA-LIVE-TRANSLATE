@@ -208,6 +208,36 @@ function requestMediaWithTimeout(request: Promise<MediaStream>, timeoutMs = 15_0
   });
 }
 
+// Device labels are intentionally read only after the browser has granted
+// microphone permission.  macOS and Chromium otherwise return blank or
+// generic labels, which makes it look as if device switching is unavailable.
+export async function listAudioInputs(requestPermission = false): Promise<MediaDeviceInfo[]> {
+  const mediaDevices = navigator.mediaDevices;
+  if (!mediaDevices?.enumerateDevices) throw new Error("当前浏览器无法读取麦克风设备列表");
+  let permissionStream: MediaStream | null = null;
+  try {
+    if (requestPermission) {
+      if (!mediaDevices.getUserMedia) throw new Error("当前浏览器不支持麦克风权限请求");
+      permissionStream = await requestMediaWithTimeout(mediaDevices.getUserMedia({ audio: true }));
+    }
+    return (await mediaDevices.enumerateDevices()).filter((device) => device.kind === "audioinput");
+  } catch (error) {
+    throw new Error(mediaInputError(error));
+  } finally {
+    permissionStream?.getTracks().forEach((track) => track.stop());
+  }
+}
+
+export function mediaInputError(error: unknown): string {
+  if (error instanceof Error && error.message.startsWith("麦克风权限请求超时")) return error.message;
+  const name = typeof error === "object" && error !== null && "name" in error ? String((error as { name?: unknown }).name) : "";
+  if (name === "NotAllowedError" || name === "SecurityError") return "麦克风权限被拒绝，请允许当前网站使用麦克风后重试";
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") return "没有找到可用麦克风，请连接麦克风或选择其他输入设备";
+  if (name === "NotReadableError" || name === "TrackStartError") return "麦克风正在被其他应用占用，请关闭占用它的应用后重试";
+  if (name === "OverconstrainedError") return "所选输入设备当前不可用，请重新选择麦克风后重试";
+  return "浏览器无法读取音频输入，请检查麦克风权限和设备状态";
+}
+
 // AudioWorklet keeps capture off the UI thread while IndexedDB survives refreshes and short outages.
 export class BrowserCapture {
   private context: AudioContext | null = null;
@@ -409,12 +439,7 @@ export class BrowserCapture {
   }
 
   private mediaError(error: unknown): string {
-    const name = typeof error === "object" && error !== null && "name" in error ? String((error as { name?: unknown }).name) : "";
-    if (name === "NotAllowedError" || name === "SecurityError") return "麦克风权限被拒绝，请允许当前网站使用麦克风后重试";
-    if (name === "NotFoundError" || name === "DevicesNotFoundError") return "没有找到可用麦克风，请连接麦克风或选择其他输入设备";
-    if (name === "NotReadableError" || name === "TrackStartError") return "麦克风正在被其他应用占用，请关闭占用它的应用后重试";
-    if (name === "OverconstrainedError") return "所选输入设备当前不可用，请重新选择麦克风后重试";
-    return "浏览器无法打开音频输入，请检查麦克风权限和设备状态";
+    return mediaInputError(error).replace("读取音频输入", "打开音频输入");
   }
 
   private acceptSamples(samples: Float32Array): void {

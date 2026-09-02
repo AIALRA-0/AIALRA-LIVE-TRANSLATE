@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeFrame, isDurableAudioAck, nextFramesToSend, recoverNextSequence, resample } from "./audio";
+import { encodeFrame, isDurableAudioAck, mediaInputError, nextFramesToSend, recoverNextSequence, resample } from "./audio";
 
 describe("audio transport", () => {
   it("encodes sequence and capture time as big-endian unsigned integers", () => {
@@ -49,5 +49,12 @@ describe("durable acknowledgement contract", () => {
     expect(isDurableAudioAck({ type: "audio.ack", sequence: 3, commit_id: "commit-3" })).toBe(true);
     expect(isDurableAudioAck({ type: "audio.ack", sequence: 3 })).toBe(false);
     expect(isDurableAudioAck({ type: "audio.ack", sequence: 0, commit_id: "commit-0" })).toBe(false);
+  });
+});
+
+describe("microphone device errors", () => {
+  it("keeps permission and device failures actionable without exposing browser internals", () => {
+    expect(mediaInputError({ name: "NotAllowedError" })).toContain("麦克风权限被拒绝");
+    expect(mediaInputError({ name: "OverconstrainedError" })).toContain("所选输入设备当前不可用");
   });
 });

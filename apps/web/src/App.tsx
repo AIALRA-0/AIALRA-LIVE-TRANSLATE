@@ -1,12 +1,17 @@
 import { FormEvent, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type RuntimeHealth } from "./api";
-import { BrowserCapture, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
+import { BrowserCapture, listAudioInputs, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
 import { applySessionStateEvent } from "./sessionState";
 import { appendEvent } from "./timeline";
 import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
+import { canDropWorkspaceTarget, formatAudioInputLabel, formatLocalTimestamp, isFolderDescendant, isRecordingResumable, resumeSessionLabel, workspaceTargetKey, type WorkspaceDragTarget, type WorkspaceDropTarget } from "./uiState";
 
 const LEASE_STORAGE_KEY = "aialra-active-recording-lease";
 const TIMELINE_PAGE_SIZE = 160;
+
+function audioInputStorageKey(projectId: string): string {
+  return `aialra-selected-audio-input:${projectId}`;
+}
 
 interface TimelineState { events: EventEnvelope[]; items: TimelineItem[] }
 type TimelineAction = { type: "append"; event: EventEnvelope } | { type: "reset" };
@@ -67,7 +72,7 @@ function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: 
   if (phase === "stopping") return "正在停止并保存尾音";
   if (phase === "processing") return "模型处理中";
   if (phase === "error") return "录音需要处理";
-  if (sessionState === "recording" && !hasLease) return "其他设备正在收音";
+  if (sessionState === "recording" && !hasLease) return "需要重新连接本次收音";
   if (sessionState === "processing") return "模型处理中";
   if (sessionState === "completed") return "已完成";
   if (sessionState === "failed") return "处理失败";
@@ -116,7 +121,7 @@ type WorkspaceDialogState =
   | { action: "rename-folder" | "move-folder"; folder: WorkspaceFolder }
   | { action: "rename-project" | "move-project"; project: Project }
   | { action: "rename-session"; project: Project; session: Session };
-type WorkspaceTarget = { entityType: "folder" | "project" | "session"; entityId: string; projectId?: string };
+type WorkspaceTarget = WorkspaceDragTarget;
 type ContextMenuState =
   | { kind: "workspace"; x: number; y: number; target: WorkspaceTarget }
   | { kind: "trash"; x: number; y: number; item: WorkspaceTrashItem };
@@ -150,6 +155,8 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   const [dialogParentId, setDialogParentId] = useState<string>("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragging, setDragging] = useState<WorkspaceTarget | null>(null);
+  const [dropTarget, setDropTarget] = useState<WorkspaceDropTarget | null>(null);
+  const folderParents = Object.fromEntries(snapshot.folders.map((folder) => [folder.id, folder.parent_id]));
   const placements = new Map(snapshot.project_placements.map((item) => [item.project_id, item]));
   const sessionMetadata = new Map(snapshot.session_metadata.map((item) => [item.session_id, item]));
   const trashItems = snapshot.trash ?? [];
@@ -190,6 +197,14 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     if (target.entityType === "folder") return snapshot.folders.find((folder) => folder.id === target.entityId)?.title ?? "文件夹";
     if (target.entityType === "project") return snapshot.projects.find((project) => project.id === target.entityId)?.title ?? "项目";
     return snapshot.sessions.find((session) => session.id === target.entityId)?.title ?? "课程会话";
+  }
+
+  function dropTargetTitle(target: WorkspaceDropTarget): string {
+    return target.entityType === "root" ? "工作区根目录" : targetTitle(target);
+  }
+
+  function isCurrentDropTarget(target: WorkspaceDropTarget): boolean {
+    return dropTarget !== null && workspaceTargetKey(dropTarget) === workspaceTargetKey(target);
   }
 
   function trashTitle(item: WorkspaceTrashItem): string {
@@ -289,7 +304,13 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   function parseDrag(event: React.DragEvent): WorkspaceTarget | null {
     if (dragging) return dragging;
     try {
-      return JSON.parse(event.dataTransfer.getData("application/x-aialra-workspace")) as WorkspaceTarget;
+      const candidate = JSON.parse(event.dataTransfer.getData("application/x-aialra-workspace")) as Partial<WorkspaceTarget>;
+      if (!candidate || typeof candidate.entityId !== "string" || !["folder", "project", "session"].includes(candidate.entityType ?? "")) return null;
+      return {
+        entityType: candidate.entityType as WorkspaceTarget["entityType"],
+        entityId: candidate.entityId,
+        ...(typeof candidate.projectId === "string" ? { projectId: candidate.projectId } : {}),
+      };
     } catch {
       return null;
     }
@@ -297,21 +318,35 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
 
   function beginDrag(event: React.DragEvent, target: WorkspaceTarget): void {
     setDragging(target);
+    setDropTarget(null);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("application/x-aialra-workspace", JSON.stringify(target));
   }
 
-  function allowDrop(event: React.DragEvent): void {
+  function endDrag(): void {
+    setDragging(null);
+    setDropTarget(null);
+  }
+
+  function allowDrop(event: React.DragEvent, target: WorkspaceDropTarget): void {
+    const source = parseDrag(event);
+    if (!source || !canDropWorkspaceTarget(source, target, folderParents)) {
+      event.dataTransfer.dropEffect = "none";
+      setDropTarget(null);
+      return;
+    }
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
+    setDropTarget(target);
   }
 
   function dropOnFolder(event: React.DragEvent, folderId: string | null): void {
     event.preventDefault();
     event.stopPropagation();
     const source = parseDrag(event);
-    setDragging(null);
-    if (!source) return;
+    const target: WorkspaceDropTarget = folderId ? { entityType: "folder", entityId: folderId } : { entityType: "root" };
+    endDrag();
+    if (!source || !canDropWorkspaceTarget(source, target, folderParents)) return;
     if (source.entityType === "folder" && source.entityId !== folderId) {
       const folder = snapshot.folders.find((item) => item.id === source.entityId);
       if (folder) void onUpdateFolder(folder, folder.title, folderId, false, folder.sort_order);
@@ -326,8 +361,9 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     event.preventDefault();
     event.stopPropagation();
     const source = parseDrag(event);
-    setDragging(null);
-    if (!source || source.entityType !== "project" || source.entityId === targetProject.id) return;
+    const target: WorkspaceDropTarget = { entityType: "project", entityId: targetProject.id };
+    endDrag();
+    if (!source || !canDropWorkspaceTarget(source, target, folderParents)) return;
     const sourceProject = snapshot.projects.find((item) => item.id === source.entityId);
     const sourcePlacement = sourceProject ? placements.get(sourceProject.id) : undefined;
     const targetPlacement = placements.get(targetProject.id);
@@ -344,8 +380,9 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     event.preventDefault();
     event.stopPropagation();
     const source = parseDrag(event);
-    setDragging(null);
-    if (!source || source.entityType !== "session" || source.entityId === targetSession.id) return;
+    const target: WorkspaceDropTarget = { entityType: "session", entityId: targetSession.id, projectId: project.id };
+    endDrag();
+    if (!source || !canDropWorkspaceTarget(source, target, folderParents)) return;
     const sourceProject = snapshot.projects.find((item) => item.id === (source.projectId ?? snapshot.session_projects[source.entityId]));
     const sourceSession = snapshot.sessions.find((item) => item.id === source.entityId);
     const sourceMeta = sourceSession ? sessionMetadata.get(sourceSession.id) : undefined;
@@ -359,14 +396,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   }
 
   function isDescendant(folderId: string, ancestorId: string): boolean {
-    let current = snapshot.folders.find((folder) => folder.id === folderId)?.parent_id ?? null;
-    const visited = new Set<string>();
-    while (current && !visited.has(current)) {
-      if (current === ancestorId) return true;
-      visited.add(current);
-      current = snapshot.folders.find((folder) => folder.id === current)?.parent_id ?? null;
-    }
-    return false;
+    return isFolderDescendant(folderId, ancestorId, folderParents);
   }
 
   const dialogNeedsTitle = dialog?.action === "create-folder" || dialog?.action === "create-project" || dialog?.action === "rename-folder" || dialog?.action === "rename-project" || dialog?.action === "rename-session";
@@ -379,15 +409,16 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   const renderProject = (project: Project) => (
     <li key={project.id} className={`tree-project ${dragging?.entityId === project.id ? "dragging" : ""}`}>
       <div
-        className={`tree-item-row ${activeProjectId === project.id && !activeSessionId ? "selected" : ""}`}
+        className={`tree-item-row ${activeProjectId === project.id && !activeSessionId ? "selected" : ""} ${isCurrentDropTarget({ entityType: "project", entityId: project.id }) ? "drop-target" : ""}`}
         draggable
         onDragStart={(event) => beginDrag(event, { entityType: "project", entityId: project.id })}
-        onDragEnd={() => setDragging(null)}
+        onDragEnd={endDrag}
         onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}
-        onDragOver={allowDrop}
+        onDragOver={(event) => allowDrop(event, { entityType: "project", entityId: project.id })}
         onDrop={(event) => dropOnProject(event, project)}
       >
         <button className="tree-item-button" onClick={() => onSelectProject(project)}><span aria-hidden="true">▣</span><span>{project.title}</span></button>
+        {isCurrentDropTarget({ entityType: "project", entityId: project.id }) && <span className="drop-target-hint" aria-hidden="true">放这里</span>}
         <button className="tree-context-hint" aria-label={`右键管理项目 ${project.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}>⋯</button>
       </div>
       {activeProjectId === project.id && (
@@ -395,15 +426,16 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
           {projectSessions(project.id).map((session) => (
             <li key={session.id} className={dragging?.entityId === session.id ? "dragging" : ""}>
               <div
-                className={`tree-item-row ${activeSessionId === session.id ? "selected" : ""}`}
+                className={`tree-item-row ${activeSessionId === session.id ? "selected" : ""} ${isCurrentDropTarget({ entityType: "session", entityId: session.id, projectId: project.id }) ? "drop-target" : ""}`}
                 draggable
                 onDragStart={(event) => beginDrag(event, { entityType: "session", entityId: session.id, projectId: project.id })}
-                onDragEnd={() => setDragging(null)}
+                onDragEnd={endDrag}
                 onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}
-                onDragOver={allowDrop}
+                onDragOver={(event) => allowDrop(event, { entityType: "session", entityId: session.id, projectId: project.id })}
                 onDrop={(event) => dropOnSession(event, project, session)}
               >
                 <button className="tree-item-button" onClick={() => onSelectSession(project, session)}><span aria-hidden="true">◫</span><span>{session.title}</span><i className={`tiny-dot ${stateTone(session.state)}`} aria-label={stateLabel(session.state)} /></button>
+                {isCurrentDropTarget({ entityType: "session", entityId: session.id, projectId: project.id }) && <span className="drop-target-hint" aria-hidden="true">放这里</span>}
                 <button className="tree-context-hint" aria-label={`右键管理课程 ${session.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}>⋯</button>
               </div>
               {activeSessionId === session.id && (
@@ -423,16 +455,17 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   const renderFolder = (folder: WorkspaceFolder, depth: number): React.ReactNode => (
     <li key={folder.id} className={`tree-folder ${dragging?.entityId === folder.id ? "dragging" : ""}`} style={{ "--tree-depth": depth } as React.CSSProperties}>
       <div
-        className={`folder-label ${selectedFolderId === folder.id ? "selected" : ""}`}
+        className={`folder-label ${selectedFolderId === folder.id ? "selected" : ""} ${isCurrentDropTarget({ entityType: "folder", entityId: folder.id }) ? "drop-target" : ""}`}
         draggable
         onDragStart={(event) => beginDrag(event, { entityType: "folder", entityId: folder.id })}
-        onDragEnd={() => setDragging(null)}
+        onDragEnd={endDrag}
         onContextMenu={(event) => showContextMenu(event, { entityType: "folder", entityId: folder.id })}
-        onDragOver={allowDrop}
+        onDragOver={(event) => allowDrop(event, { entityType: "folder", entityId: folder.id })}
         onDrop={(event) => dropOnFolder(event, folder.id)}
       >
         <button className="folder-disclosure" aria-label={`${expandedFolderIds.has(folder.id) ? "折叠" : "展开"}${folder.title}`} aria-expanded={expandedFolderIds.has(folder.id)} onClick={() => toggleFolder(folder.id)}><span aria-hidden="true">{expandedFolderIds.has(folder.id) ? "▾" : "▸"}</span></button>
         <button className="folder-name" onClick={() => selectFolder(folder.id)}>{folder.title}</button>
+        {isCurrentDropTarget({ entityType: "folder", entityId: folder.id }) && <span className="drop-target-hint" aria-hidden="true">放这里</span>}
         <button className="tree-context-hint" aria-label={`右键管理文件夹 ${folder.title}`} onContextMenu={(event) => showContextMenu(event, { entityType: "folder", entityId: folder.id })}>⋯</button>
       </div>
       {expandedFolderIds.has(folder.id) && <ul>
@@ -462,9 +495,11 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
       <div className="workspace-brand"><span>A</span><div><strong>AIALRA</strong><small>课程工作区</small></div><button className="theme-toggle" aria-label={`切换到${theme === "light" ? "黑色" : "白色"}模式`} onClick={onToggleTheme}>{theme === "light" ? "◐ 黑色" : "◑ 白色"}</button><button className="mobile-tree-toggle" aria-expanded={mobileOpen} onClick={() => setMobileOpen((current) => !current)}>{mobileOpen ? "关闭课程树" : "打开课程树"}</button></div>
       <nav className="workspace-tree">
         <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-label="新建文件夹" onClick={() => openDialog({ action: "create-folder" })}>＋文件夹</button><button aria-label="新建项目" onClick={() => openDialog({ action: "create-project" })}>＋项目</button><button aria-label="打开设置和运行状态" onClick={onOpenSettings}>设置</button></div></div>
-        <ul onDragOver={allowDrop} onDrop={(event) => dropOnFolder(event, null)}>
+        {dragging && <div className="drag-status" role="status" aria-live="polite"><strong>正在移动：{targetTitle(dragging)}</strong><span>{dropTarget ? `松开放入“${dropTargetTitle(dropTarget)}”` : "将光标移到高亮位置，再松开鼠标"}</span></div>}
+        <ul className={isCurrentDropTarget({ entityType: "root" }) ? "workspace-root-drop drop-target" : "workspace-root-drop"} onDragOver={(event) => allowDrop(event, { entityType: "root" })} onDrop={(event) => dropOnFolder(event, null)}>
           {snapshot.folders.filter((folder) => !folder.archived_at && folder.parent_id === null).map((folder) => renderFolder(folder, 0))}
           {projectsInFolder(null).map(renderProject)}
+          {dragging && dragging.entityType !== "session" && <li className="root-drop-hint" aria-hidden="true">放到这里：工作区根目录</li>}
         </ul>
       </nav>
       <section className="workspace-trash" aria-label="回收站">
@@ -490,6 +525,9 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const resumableSession = [...sessions]
+    .filter((session) => isRecordingResumable(session.state))
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0];
   async function create(event: FormEvent): Promise<void> {
     event.preventDefault(); setBusy(true); setError("");
     try { onCreated(await api.createProjectSession(project.id, { title, consent_confirmed: consent, device_id: recorderDeviceId() })); }
@@ -500,15 +538,22 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
     <main className="project-overview">
       <header><p className="eyebrow">课程项目</p><h1>{project.title}</h1><p>会话、材料、转写与 ReadWeave 笔记都保存在这个项目中</p></header>
       <div className="project-overview-grid">
-        <section className="overview-card"><h2>最近课程</h2>{sessions.length ? sessions.map((session) => <button key={session.id} onClick={() => navigate(project.id, session.id)}><span>{session.title}</span><StatusBadge tone={stateTone(session.state)}>{stateLabel(session.state)}</StatusBadge></button>) : <p>还没有课程会话</p>}</section>
+        <section className="overview-card">
+          <h2>最近课程</h2>
+          {resumableSession && <div className="resume-session-card">
+            <div><p>继续已有课程会话</p><strong>{resumableSession.title}</strong><small>最近活动：{formatLocalTimestamp(resumableSession.updated_at)} · 已确认历史会按时间戳继续保留</small></div>
+            <button className="primary-button" onClick={() => navigate(project.id, resumableSession.id)}>{resumeSessionLabel(resumableSession.state)}</button>
+          </div>}
+          {sessions.length ? sessions.map((session) => <button className="recent-session-row" key={session.id} onClick={() => navigate(project.id, session.id)}><span><strong>{session.title}</strong><small>最近活动：{formatLocalTimestamp(session.updated_at)}</small></span><StatusBadge tone={stateTone(session.state)}>{stateLabel(session.state)}</StatusBadge></button>) : <p>还没有课程会话</p>}
+        </section>
         <form className="overview-card new-session" onSubmit={create}>
-          <h2>新建课程会话</h2>
+          <h2>新建独立课程会话</h2>
           <label>课程名称<input value={title} placeholder="例如：机器学习导论" onChange={(event) => setTitle(event.target.value)} required /></label>
           <div className="language-pair"><span>英文讲授</span><span>→</span><span>简体中文</span></div>
           <label className="check-row"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span>我已获得课程录音许可</span></label>
           {error && <p className="error-message" role="alert">{error}</p>}
-          <button className="primary-button" disabled={busy || !consent} aria-describedby="create-session-help">{busy ? "正在创建课程会话" : "创建课程并进入录音台"}</button>
-          <p id="create-session-help" className="form-help">创建后会直接进入当前项目的录音工作台</p>
+          <button className="primary-button" disabled={busy || !consent} aria-describedby="create-session-help">{busy ? "正在创建课程会话" : "创建独立课程并进入录音台"}</button>
+          <p id="create-session-help" className="form-help">重复进入已有课程请使用左侧历史或上方“继续本次收音”；新建按钮只用于另开一节独立课程。</p>
         </form>
       </div>
     </main>
@@ -587,6 +632,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [session, setSession] = useState(initial);
   const [timeline, dispatch] = useReducer(timelineReducer, { events: [], items: [] });
   const [streamConnected, setStreamConnected] = useState(false);
+  const [lastActivityAt, setLastActivityAt] = useState(initial.updated_at);
   const [captureStatus, setCaptureStatus] = useState("尚未连接麦克风");
   const [capturePhase, setCapturePhase] = useState<CapturePhase>("idle");
   const [captureNotice, setCaptureNotice] = useState("");
@@ -596,7 +642,9 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [captureActive, setCaptureActive] = useState(false);
   const [captureMode, setCaptureMode] = useState<CaptureMode>("microphone");
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
-  const [selectedAudioInput, setSelectedAudioInput] = useState("");
+  const [selectedAudioInput, setSelectedAudioInput] = useState(() => window.localStorage.getItem(audioInputStorageKey(project.id)) ?? "");
+  const [audioInputsReady, setAudioInputsReady] = useState(false);
+  const [audioDeviceNotice, setAudioDeviceNotice] = useState("");
   const [micProgress, setMicProgress] = useState<MicrophoneTestProgress | null>(null);
   const [micResult, setMicResult] = useState<MicrophoneTestResult | null>(null);
   const [micTesting, setMicTesting] = useState(false);
@@ -608,6 +656,31 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [visibleItemLimit, setVisibleItemLimit] = useState(TIMELINE_PAGE_SIZE);
   const capture = useRef<BrowserCapture | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
+
+  const refreshAudioInputs = useCallback(async (requestPermission = false): Promise<MediaDeviceInfo[]> => {
+    try {
+      const devices = await listAudioInputs(requestPermission);
+      const hasNamedInputs = devices.some((device) => device.label.trim().length > 0);
+      setAudioInputs(devices);
+      setAudioInputsReady(hasNamedInputs);
+      // Before permission, browsers may expose only a generic `default`
+      // device. Preserve a previously selected concrete device until the
+      // permissioned enumeration can confirm whether it is still present.
+      if (requestPermission || hasNamedInputs) {
+        setSelectedAudioInput((current) => current && devices.some((device) => device.deviceId === current && device.deviceId !== "default" && device.deviceId !== "communications") ? current : "");
+      }
+      if (requestPermission) {
+        setAudioDeviceNotice(hasNamedInputs
+          ? "已取得麦克风权限，设备名称已刷新；切换选择会在下一次录音连接时生效"
+          : "权限已取得，但浏览器没有返回设备名称，请检查系统麦克风权限后重试");
+      }
+      return devices;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "无法读取麦克风设备，请检查浏览器和系统权限";
+      setAudioDeviceNotice(message);
+      throw caught;
+    }
+  }, []);
 
   function reportCaptureStatus(message: string): void {
     setCaptureStatus(message);
@@ -627,10 +700,15 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     return subscribeEvents(initial.id, (event) => {
       dispatch({ type: "append", event });
       setSession((current) => applySessionStateEvent(current, event.event_type));
+      const eventTime = event.ingested_at || event.captured_at_wall;
+      if (eventTime) setLastActivityAt((current) => new Date(eventTime).getTime() >= new Date(current).getTime() ? eventTime : current);
     }, setStreamConnected);
   }, [initial.id]);
 
   useEffect(() => subscribeProject(project.id, (update) => {
+    if (update.session_id === initial.id && ["recording.lease.acquired", "recording.lease.renewed"].includes(update.update_type)) {
+      setLastActivityAt((current) => new Date(update.created_at).getTime() >= new Date(current).getTime() ? update.created_at : current);
+    }
     if (update.session_id === initial.id && update.update_type === "recording.lease.acquired" && update.payload.holder_device_id !== recorderDeviceId()) {
       capture.current?.revoke(); capture.current = null; setLease(null); saveLocalLease(null); setCaptureActive(false); setCapturePhase("error"); setCaptureNotice("另一台设备已经接管录音，本机已停止收音");
     }
@@ -640,14 +718,26 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   useEffect(() => {
     void api.readWeaveStatus(project.id).then(setReadWeave).catch(() => setReadWeave(null));
     void api.readWeavePreview(project.id).then(setReadWeavePreview).catch(() => setReadWeavePreview(null));
-    if (navigator.mediaDevices?.enumerateDevices) void navigator.mediaDevices.enumerateDevices().then((devices) => setAudioInputs(devices.filter((device) => device.kind === "audioinput")));
+    const initialDeviceRefresh = window.setTimeout(() => void refreshAudioInputs(false).catch(() => undefined), 0);
+    const onDeviceChange = () => void refreshAudioInputs(false).catch(() => undefined);
+    navigator.mediaDevices?.addEventListener("devicechange", onDeviceChange);
     const restored = restoredLocalLease(project.id, initial.id);
     if (restored) void api.renewRecording(project.id, initial.id, recorderDeviceId(), restored.lease_token).then(() => {
       setLease(restored);
       setCapturePhase("connecting");
       setCaptureStatus("录音租约已恢复，可继续收音");
     }).catch(() => saveLocalLease(null));
-  }, [project.id, initial.id]);
+    return () => {
+      window.clearTimeout(initialDeviceRefresh);
+      navigator.mediaDevices?.removeEventListener("devicechange", onDeviceChange);
+    };
+  }, [project.id, initial.id, refreshAudioInputs]);
+
+  useEffect(() => {
+    const key = audioInputStorageKey(project.id);
+    if (selectedAudioInput) window.localStorage.setItem(key, selectedAudioInput);
+    else window.localStorage.removeItem(key);
+  }, [project.id, selectedAudioInput]);
 
   useEffect(() => {
     let active = true;
@@ -666,7 +756,12 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
 
   async function runMicTest(): Promise<void> {
     setMicTesting(true); setMicResult(null); setCaptureNotice("");
-    try { setMicResult(await testMicrophone(selectedAudioInput || undefined, setMicProgress)); }
+    try {
+      const devices = await refreshAudioInputs(true);
+      const requestedDeviceId = selectedAudioInput && devices.some((device) => device.deviceId === selectedAudioInput && device.deviceId !== "default" && device.deviceId !== "communications") ? selectedAudioInput : undefined;
+      if (!requestedDeviceId && selectedAudioInput) setSelectedAudioInput("");
+      setMicResult(await testMicrophone(requestedDeviceId, setMicProgress));
+    }
     catch (caught) { setCaptureNotice(caught instanceof Error ? caught.message : "麦克风测试失败"); }
     finally { setMicTesting(false); setMicProgress(null); }
   }
@@ -717,6 +812,11 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     let acquired: RecordingLease | null = null;
     let preparedCapture: BrowserCapture | null = null;
     try {
+      const availableInputs = captureMode === "microphone" ? await refreshAudioInputs(true) : [];
+      const requestedDeviceId = selectedAudioInput && availableInputs.some((device) => device.deviceId === selectedAudioInput && device.deviceId !== "default" && device.deviceId !== "communications")
+        ? selectedAudioInput
+        : undefined;
+      if (selectedAudioInput && !requestedDeviceId) setSelectedAudioInput("");
       // Request the browser input while the click still carries user intent.
       // The server lease is created only after this local step succeeds.
       preparedCapture = new BrowserCapture(
@@ -725,7 +825,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         recorderDeviceId(),
         (message) => reportCaptureStatus(message),
         captureMode,
-        selectedAudioInput || undefined,
+        requestedDeviceId,
         () => {
           setCaptureActive(false);
           setCapturePhase("error");
@@ -734,10 +834,12 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       );
       capture.current = preparedCapture;
       await preparedCapture.prepare();
+      if (captureMode === "microphone") await refreshAudioInputs(false);
       setCapturePhase("acquiring-lease");
       acquired = await api.acquireRecording(project.id, session.id, recorderDeviceId());
       setLease(acquired);
       saveLocalLease(acquired);
+      setLastActivityAt(new Date().toISOString());
       setSession((current) => ({ ...current, state: "recording" }));
       await startCapture(acquired, preparedCapture);
     } catch (caught) {
@@ -793,6 +895,17 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     : session.state === "completed" ? "录音和模型处理均已完成" : captureStatus;
   const captureTone = capturePhaseTone(capturePhase, session.state, Boolean(lease));
   const captureLabel = capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode);
+  const defaultAudioInput = audioInputs.find((device) => device.deviceId === "default");
+  const selectedAudioDevice = audioInputs.find((device) => device.deviceId === selectedAudioInput);
+  const defaultAudioLabel = defaultAudioInput?.label.trim()
+    ? `系统默认 · ${formatAudioInputLabel(defaultAudioInput)}`
+    : "系统默认麦克风（允许权限后显示具体型号）";
+  const selectedAudioLabel = selectedAudioDevice ? formatAudioInputLabel(selectedAudioDevice) : defaultAudioLabel;
+  const sessionContinuity = session.state === "recording" || session.state === "degraded"
+    ? "这是同一课程会话；刷新或再次进入会沿用已确认历史，本设备保留租约后可继续收音，新的片段会按时间戳追加。"
+    : session.state === "ready"
+      ? "这是同一课程会话；开始后再次进入会回到这里，不会覆盖已有历史。"
+      : "录音已进入收尾或完成阶段；历史内容按时间戳保留，不能重新打开并覆盖本次会话。";
   const readWeaveTone = !readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : readWeave.syncing > 0 || readWeave.queued > 0 ? "yellow" : "green";
   const latestSummaryEvent = [...timeline.events].reverse().find((event) => event.event_type === "session.summary.created" || event.event_type === "session.summary.failed");
   const summaryRetryable = latestSummaryEvent?.event_type === "session.summary.failed";
@@ -814,7 +927,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   return (
     <div className="session-workspace">
       <header className="session-header">
-        <div><p className="eyebrow">{project.title}</p><h1>{session.title}</h1></div>
+        <div><p className="eyebrow">{project.title}</p><h1>{session.title}</h1><div className="session-meta"><span>建立：{formatLocalTimestamp(session.created_at)}</span><span>最近活动：{formatLocalTimestamp(lastActivityAt)}</span></div></div>
         <div className="header-status"><StatusBadge tone={streamConnected ? "green" : "yellow"}>{streamConnected ? "多端已同步" : "正在恢复同步"}</StatusBadge><StatusBadge tone={stateTone(session.state)}>{stateLabel(session.state)}</StatusBadge></div>
       </header>
       <main className="session-layout">
@@ -840,10 +953,15 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           </div>
         </section>
         <aside className="session-sidebar">
-          <section className="side-card capture-card">
-            <div className="card-heading"><h3>录音</h3><StatusBadge tone={captureTone}>{captureLabel}</StatusBadge></div>
-            <label>音频来源<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as CaptureMode)} disabled={isRecording}><option value="microphone">麦克风</option><option value="screen">浏览器标签或共享音频</option></select></label>
-            {captureMode === "microphone" && <label>输入设备<select value={selectedAudioInput} onChange={(event) => { setSelectedAudioInput(event.target.value); setMicResult(null); }} disabled={isRecording}><option value="">系统默认麦克风</option>{audioInputs.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `麦克风 ${device.deviceId.slice(0, 6)}`}</option>)}</select></label>}
+           <section className="side-card capture-card">
+             <div className="card-heading"><h3>录音</h3><StatusBadge tone={captureTone}>{captureLabel}</StatusBadge></div>
+             <div className="session-continuity"><strong>{isRecordingResumable(session.state) ? "可继续本次课程" : "本次课程历史"}</strong><span>{sessionContinuity}</span></div>
+             <label>音频来源<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as CaptureMode)} disabled={isRecording}><option value="microphone">麦克风</option><option value="screen">浏览器标签或共享音频</option></select></label>
+             {captureMode === "microphone" && <>
+               <label>输入设备<select value={selectedAudioInput} onChange={(event) => { setSelectedAudioInput(event.target.value); setMicResult(null); }} disabled={isRecording}><option value="">{defaultAudioLabel}</option>{audioInputs.filter((device) => device.deviceId !== "default" && device.deviceId !== "communications").map((device) => <option key={device.deviceId} value={device.deviceId}>{formatAudioInputLabel(device)}</option>)}</select></label>
+               <div className="audio-device-row"><span><strong>当前设备</strong><small>{selectedAudioLabel}</small></span><button className="text-link-button" type="button" disabled={isRecording || micTesting} onClick={() => void refreshAudioInputs(true).catch(() => undefined)}>{audioInputsReady ? "刷新设备" : "允许权限并刷新设备"}</button></div>
+               {audioDeviceNotice && <small className="audio-device-notice" role="status">{audioDeviceNotice}</small>}
+             </>}
             <div className="mic-test">
               <div className="mic-meter"><span style={{ width: `${Math.max(2, Math.min(100, ((micProgress?.levelDbfs ?? -96) + 96) / 0.96))}%` }} /></div>
               <StatusBadge tone={micTesting ? "yellow" : micResult?.passed ? "green" : micResult ? "red" : "yellow"}>{micTesting ? micProgress?.phase === "quiet" ? "请保持安静" : "请朗读一句话" : micResult?.message ?? "麦克风尚未测试"}</StatusBadge>
@@ -860,7 +978,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             ) : lease ? (
               <button className="primary-button" disabled={busy} onClick={() => void continueCapture()}>继续连接收音</button>
             ) : (
-              <p className="other-recorder-notice">另一台设备正在录音，请在录音设备停止</p>
+              <button className="primary-button" disabled={busy} onClick={() => void begin()}>继续本次课程</button>
             )}
           </section>
           <GpuPanel runtime={runtime} />
