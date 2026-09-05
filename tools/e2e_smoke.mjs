@@ -117,6 +117,33 @@ async function waitForReadWeave(projectId, sessionId, timeoutMs = 120_000) {
   throw new Error(`ReadWeave did not become readable within ${timeoutMs} ms`);
 }
 
+// The browser renews its 45-second recording lease while asynchronous model
+// work is running.  Keep the production smoke equivalent so a slow but valid
+// explanation cannot turn the final stop into a false lease-expired failure.
+function startLeaseRenewal(projectId, sessionId, deviceId, leaseToken) {
+  let stopped = false;
+  let pending = Promise.resolve();
+  let renewalError = null;
+  const renew = async () => {
+    if (stopped) return;
+    pending = checked(fetch(`${API}/projects/${projectId}/sessions/${sessionId}/recording/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId, lease_token: leaseToken }),
+    })).catch((error) => {
+      renewalError = error;
+    });
+    await pending;
+  };
+  const timer = setInterval(() => void renew(), 10_000);
+  return async () => {
+    stopped = true;
+    clearInterval(timer);
+    await pending;
+    if (renewalError) throw renewalError;
+  };
+}
+
 // One real session covers consent, audio durability, ASR, translation, asset parsing, explanation, and stop.
 const startedAt = Date.now();
 let project;
@@ -136,6 +163,7 @@ const session = await checked(fetch(`${API}/projects/${project.id}/sessions`, {
 const lease = await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }),
 }));
+const stopLeaseRenewal = startLeaseRenewal(project.id, session.id, deviceId, lease.lease_token);
 const contention = await fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
   method: "POST",
   headers: { "content-type": "application/json" },
@@ -173,6 +201,7 @@ await waitForEvents(
   session.id,
   (items) => items.some((item) => item.event_type === "explanation.card.created"),
 );
+await stopLeaseRenewal();
 await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
 }));
