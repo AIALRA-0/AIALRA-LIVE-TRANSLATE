@@ -84,7 +84,7 @@ function currentLocalLease(): RecordingLease | null {
 }
 
 function stateLabel(state: string): string {
-  return ({ ready: "已就绪", recording: "录音中", degraded: "降级录音中", stopping: "正在停止", processing: "模型处理中", completed: "已完成", failed: "失败", archived: "已归档" } as Record<string, string>)[state] ?? state;
+  return ({ ready: "已就绪", recording: "录音中", degraded: "降级录音中", stopping: "正在停止", processing: "后台收尾中", completed: "已完成", failed: "失败", archived: "已归档" } as Record<string, string>)[state] ?? state;
 }
 
 function stateTone(state: string): "green" | "yellow" | "red" | "gray" {
@@ -111,10 +111,10 @@ function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: 
   if (phase === "blocked") return "项目录音已被其他设备占用";
   if (phase === "recoverable") return "本次课程可恢复";
   if (phase === "stopping") return "正在停止并保存尾音";
-  if (phase === "processing") return "模型处理中";
+  if (phase === "processing") return "后台生成结果";
   if (phase === "error") return "录音需要处理";
   if (sessionState === "recording" && !hasLease) return "需要重新连接本次收音";
-  if (sessionState === "processing") return "模型处理中";
+  if (sessionState === "processing") return "后台生成结果";
   if (sessionState === "completed") return "已完成";
   if (sessionState === "failed") return "处理失败";
   if (sessionState === "ready") return "可以开始录音";
@@ -137,7 +137,7 @@ function captureActionLabel(phase: CapturePhase, hasLease: boolean, mode: Captur
   if (phase === "acquiring-lease") return "正在获取录音权限";
   if (phase === "connecting") return "正在连接服务器";
   if (phase === "stopping") return "正在保存尾音";
-  if (phase === "processing") return "模型处理中";
+  if (phase === "processing") return "后台生成结果";
   if (phase === "blocked") return "重新检查录音状态";
   if (phase === "recoverable") return "确认后继续本次课程";
   return hasLease ? "继续连接收音" : "开始录音";
@@ -767,8 +767,13 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [visibleItemLimit, setVisibleItemLimit] = useState(TIMELINE_PAGE_SIZE);
   const [pendingUpload, setPendingUpload] = useState<File | null>(null);
   const [uploadDropActive, setUploadDropActive] = useState(false);
+  const [wakeLockNotice, setWakeLockNotice] = useState("");
   const capture = useRef<BrowserCapture | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const documentRef = useRef<HTMLDivElement | null>(null);
+  const followDocumentRef = useRef(true);
+  const [newItemsPending, setNewItemsPending] = useState(false);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   const refreshRecordingStatus = useCallback(async (): Promise<RecordingProjectStatus | null> => {
     try {
@@ -910,11 +915,43 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     return () => { active = false; window.clearInterval(timer); };
   }, []);
 
+  const requestWakeLock = useCallback(async (): Promise<void> => {
+    if (document.hidden) return;
+    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> } }).wakeLock;
+    if (!wakeLock) {
+      setWakeLockNotice("当前浏览器不支持屏幕常亮；请保持设备接通电源并避免锁屏");
+      return;
+    }
+    try {
+      const sentinel = await wakeLock.request("screen");
+      wakeLockRef.current = sentinel;
+      setWakeLockNotice("录音期间屏幕保持唤醒");
+      sentinel.addEventListener("release", () => {
+        if (wakeLockRef.current === sentinel) {
+          wakeLockRef.current = null;
+          if (captureActive && !document.hidden) setWakeLockNotice("屏幕常亮已被系统释放，正在重新申请");
+        }
+      });
+    } catch {
+      setWakeLockNotice("系统未允许屏幕常亮；录音仍会继续，但请留意设备是否锁屏");
+    }
+  }, [captureActive]);
+
   useEffect(() => {
-    const visibility = () => { if (document.hidden && captureActive) setCaptureNotice("页面已进入后台，iOS 浏览器可能暂停收音，请尽快返回前台"); };
+    const visibility = () => {
+      if (document.hidden && captureActive) setCaptureNotice("页面已进入后台，当前浏览器可能暂停收音，请尽快返回前台");
+      if (!document.hidden && captureActive && !wakeLockRef.current) void requestWakeLock();
+    };
     document.addEventListener("visibilitychange", visibility);
     return () => document.removeEventListener("visibilitychange", visibility);
-  }, [captureActive]);
+  }, [captureActive, requestWakeLock]);
+
+  useEffect(() => {
+    if (captureActive) return;
+    const sentinel = wakeLockRef.current;
+    wakeLockRef.current = null;
+    if (sentinel) void sentinel.release().catch(() => undefined);
+  }, [captureActive, requestWakeLock]);
 
   useEffect(() => {
     if (!captureActive) return;
@@ -926,7 +963,15 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
   }, [captureActive]);
 
-  useEffect(() => () => capture.current?.dispose(), []);
+  useEffect(
+    () => () => {
+      capture.current?.dispose();
+      const sentinel = wakeLockRef.current;
+      wakeLockRef.current = null;
+      if (sentinel) void sentinel.release().catch(() => undefined);
+    },
+    [],
+  );
 
   async function runMicTest(): Promise<void> {
     setMicTesting(true); setMicResult(null); setCaptureNotice("");
@@ -960,6 +1005,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     try {
       await next.activate(acquired.lease_token, acquired.generation);
       setCaptureActive(true);
+      void requestWakeLock();
     } catch (error) {
       next.dispose();
       if (capture.current === next) capture.current = null;
@@ -1119,9 +1165,14 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }
 
   const isRecording = ["recording", "degraded"].includes(session.state);
+  const latestSummaryEvent = [...timeline.events].reverse().find((event) => event.event_type === "session.summary.created" || event.event_type === "session.summary.failed");
+  const summaryRetryable = latestSummaryEvent?.event_type === "session.summary.failed";
+  const latestCompletedEvent = [...timeline.events].reverse().find((event) => event.event_type === "session.completed");
+  const summaryPending = latestCompletedEvent?.payload.summary_pending === true;
   const visibleCaptureStatus = session.state === "processing"
-    ? "录音已停止，真实模型仍在处理"
-    : session.state === "completed" ? "录音和模型处理均已完成" : captureStatus;
+    ? "录音已停止，音频已保存，后台正在生成结果"
+    : session.state === "completed" && summaryPending ? "录音已完成，课程总结正在后台生成"
+      : session.state === "completed" ? "录音和模型处理均已完成" : captureStatus;
   const captureTone = capturePhaseTone(capturePhase, session.state, Boolean(lease));
   const captureLabel = capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode);
   const currentRecordingStatus = recordingStatus?.sessions?.find((item) => item.session_id === initial.id);
@@ -1147,8 +1198,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       ? "这是同一课程会话；开始后再次进入会回到这里，不会覆盖已有历史。"
       : "录音已进入收尾或完成阶段；历史内容按时间戳保留，不能重新打开并覆盖本次会话。";
   const readWeaveTone = !readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : readWeave.syncing > 0 || readWeave.queued > 0 ? "yellow" : "green";
-  const latestSummaryEvent = [...timeline.events].reverse().find((event) => event.event_type === "session.summary.created" || event.event_type === "session.summary.failed");
-  const summaryRetryable = latestSummaryEvent?.event_type === "session.summary.failed";
   const modelQueueDepth = runtime?.model_queue?.queued ?? 0;
   const modelStatusTone = summaryRetryable ? "red" : modelQueueDepth > 0 ? "yellow" : "green";
   const section = routeSelection().section;
@@ -1163,6 +1212,17 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   });
   const renderedItems = visibleItems.slice(-visibleItemLimit);
   const hiddenItemCount = visibleItems.length - renderedItems.length;
+
+  useEffect(() => {
+    const element = documentRef.current;
+    if (!element || renderedItems.length === 0) return;
+    if (followDocumentRef.current) {
+      element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+      setNewItemsPending(false);
+    } else {
+      setNewItemsPending(true);
+    }
+  }, [renderedItems.length, section]);
 
   return (
     <div className="session-workspace">
@@ -1180,7 +1240,17 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             </div>
             <div className="view-switch" role="group" aria-label="语言显示模式">{(["bilingual", "source", "translation"] as LanguageView[]).map((view) => <button key={view} aria-pressed={languageView === view} className={languageView === view ? "active" : ""} onClick={() => onLanguageView(view)}>{view === "bilingual" ? "双语" : view === "source" ? "原文" : "译文"}</button>)}</div>
           </div>
-          <div className="course-document" aria-live="polite">
+          <div
+            ref={documentRef}
+            className="course-document"
+            aria-live="polite"
+            onScroll={(event) => {
+              const element = event.currentTarget;
+              followDocumentRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+              if (followDocumentRef.current) setNewItemsPending(false);
+            }}
+          >
+            {newItemsPending && <button className="new-items-button" type="button" onClick={() => { followDocumentRef.current = true; setNewItemsPending(false); const element = documentRef.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: "smooth" }); }}>有新内容，回到底部</button>}
             {hiddenItemCount > 0 && (
               <button
                 className="load-earlier-button"
@@ -1229,6 +1299,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="secondary-button" disabled={micTesting || isRecording || captureMode !== "microphone"} onClick={() => void runMicTest()}>{micTesting ? "测试中 4 秒" : "测试麦克风"}</button>
             </div>
             <p className="capture-help">音频在确认写入后才会从本机发送队列中移除；浏览器端不需要额外配对设备。</p>
+            {captureActive && wakeLockNotice && <small className="wake-lock-notice" role="status">{wakeLockNotice}</small>}
             {conflictingLeaseSeconds !== null && <div className="recording-lease-status" role="status"><strong>其他设备正在录制本项目</strong><span>{recordingStatus?.lease?.session_title ? `课程“${recordingStatus.lease.session_title}”` : "当前课程会话"} · 租约约 {conflictingLeaseSeconds} 秒后到期</span></div>}
             {capacityBlocked && <div className="recording-capacity-status" role="status"><strong>暂不接纳新的项目录音</strong><span>原因：{recordingStatus?.admission.reason === "asr_backlog" ? "ASR 队列积压" : recordingStatus?.admission.reason === "asr_degraded" ? "ASR/CUDA 状态降级" : "ASR Worker 暂时离线"} · 约 {recordingStatus?.admission.retry_after_seconds ?? 5} 秒后自动复查</span></div>}
             {currentRecordingStatus?.recoverable && !lease && <div className="recording-recovery-status" role="status"><strong>发现可继续的历史收音</strong><span>服务端确认没有活动租约或排队任务；点击下方按钮并确认后，会在原课程中按时间戳追加。</span></div>}

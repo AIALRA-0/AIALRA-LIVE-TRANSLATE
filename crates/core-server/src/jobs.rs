@@ -638,9 +638,18 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
         .iter()
         .any(|event| event.event_type == "session.summary.created");
     let failed_non_summary = state.store.has_failed_non_summary_job(session_id)?;
+    let mut summary_pending = false;
     if !failed_non_summary && counts.failed == 0 && has_segments && !has_summary {
-        enqueue_summary(state, session_id, "recording_stopped")?;
-        return Ok(());
+        // The recording facts are complete as soon as non-summary work drains.
+        // Summary remains an explicitly asynchronous projection so a cold 14B
+        // load cannot make a safely stopped course look stuck.
+        match enqueue_summary(state, session_id, "recording_stopped") {
+            Ok(_) => summary_pending = true,
+            Err(_error) => tracing::warn!(
+                error_kind = "summary_enqueue_failed_after_stop",
+                "course completed without a queued summary"
+            ),
+        }
     }
     let (next, event_type, payload) = if failed_non_summary {
         (
@@ -655,7 +664,8 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
             json!({
                 "model_queue_drained": true,
                 "summary_available": has_summary,
-                "summary_retryable": !has_summary && counts.failed > 0,
+                "summary_pending": summary_pending,
+                "summary_retryable": !has_summary && !summary_pending,
             }),
         )
     };

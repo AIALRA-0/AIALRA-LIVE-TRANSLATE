@@ -74,6 +74,12 @@ describe("timeline mapping", () => {
     expect(item.body).toContain("最终总结暂未完成");
   });
 
+  it("shows that realtime facts are complete while the summary remains pending", () => {
+    const [item] = buildCourseDocument([event("session.completed", { summary_pending: true })]);
+    expect(item.title).toBe("实时结果已完成，课程总结生成中");
+    expect(item.body).toContain("字幕和译文已经保存");
+  });
+
   it("shows a material parse failure without pretending explanation ran", () => {
     const [item] = buildCourseDocument([event("model.job.failed", {
       job_type: "asset_parse",

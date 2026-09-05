@@ -25,6 +25,7 @@ from workers.model_worker.main import (
     _parse_asset_sync,
     _parse_model_json,
     _restore_realtime_translation_model,
+    _translation_contract_ok,
     _uses_requested_explanation_language,
 )
 
@@ -102,6 +103,32 @@ def test_translation_shape_requires_clean_source_and_target_text() -> None:
     assert _has_nonempty_string(valid, "translation")
     assert not _has_nonempty_string({"translation": "翻译结果"}, "source_text")
     assert not _has_nonempty_string({"source_text": "  "}, "source_text")
+
+
+def test_translation_contract_rejects_source_language_drift_and_same_language_copy() -> None:
+    assert _translation_contract_ok(
+        {"source_text": "Attention uses context.", "translation": "注意力使用上下文"},
+        "en",
+        "zh-CN",
+    )
+    assert not _translation_contract_ok(
+        {"source_text": "注意力使用上下文", "translation": "注意力使用上下文"},
+        "en",
+        "zh-CN",
+    )
+    assert not _translation_contract_ok(
+        {"source_text": "Attention uses context.", "translation": "Attention uses context."},
+        "en",
+        "zh-CN",
+    )
+
+
+def test_translation_contract_allows_configured_same_language_output() -> None:
+    assert _translation_contract_ok(
+        {"source_text": "Attention uses context.", "translation": "Attention uses context."},
+        "en",
+        "en",
+    )
 
 
 def test_explanation_shape_requires_every_managed_section() -> None:

@@ -63,7 +63,22 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       });
       strings(result.possible_asr_errors).forEach((body) => sections.push({ label: "疑似听写", text: body, tone: "warning" }));
       strings(result.review_questions).forEach((body) => sections.push({ label: "复习问题", text: body, tone: "question" }));
+      if (typeof result.confidence === "number" && Number.isFinite(result.confidence)) {
+        sections.push({ label: "模型置信度", text: `${Math.round(Math.max(0, Math.min(1, result.confidence)) * 100)}%` });
+      }
       if (sections.length) items.push({ id: cardId, kind: "insight", title: "知识补充", body: "", sections, evidenceIds: sharedEvidence, occurredAt: event.captured_at_wall, provider });
+      continue;
+    }
+
+    if (event.event_type === "session.completed" && payload.summary_pending === true) {
+      items.push({
+        id: event.event_id,
+        kind: "status",
+        title: "实时结果已完成，课程总结生成中",
+        body: "录音、字幕和译文已经保存；总结完成后会自动出现在这里。",
+        evidenceIds: [],
+        occurredAt: event.captured_at_wall,
+      });
       continue;
     }
 

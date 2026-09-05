@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import threading
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
@@ -73,6 +74,8 @@ ASR_MODEL_NAME = os.getenv("AIALRA_ASR_MODEL", "small")
 ASR_DEVICE = os.getenv("AIALRA_ASR_DEVICE", "cuda")
 ASR_COMPUTE_TYPE = os.getenv("AIALRA_ASR_COMPUTE_TYPE", "float16")
 ASR_CPU_THREADS = max(0, min(32, int(os.getenv("AIALRA_ASR_CPU_THREADS", "12"))))
+ASR_BEAM_SIZE = max(1, min(5, int(os.getenv("AIALRA_ASR_BEAM_SIZE", "3"))))
+ASR_BEST_OF = max(1, min(5, int(os.getenv("AIALRA_ASR_BEST_OF", str(ASR_BEAM_SIZE)))))
 LLM_DEVICE = os.getenv("AIALRA_LLM_DEVICE", "cuda")
 
 _asr_model: Any | None = None
@@ -304,8 +307,9 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
         model=TRANSLATION_MODEL,
         timeout_seconds=45.0,
         attempts=2,
-        accept=lambda payload: _has_nonempty_string(payload, "source_text")
-        and _has_nonempty_string(payload, "translation"),
+        accept=lambda payload: _translation_contract_ok(
+            payload, request.source_language, request.target_language
+        ),
     )
     if isinstance(result, dict):
         return TranslationResponse(
@@ -314,6 +318,58 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
             provider=f"ollama:{TRANSLATION_MODEL}@{LLM_DEVICE}",
         )
     raise HTTPException(status_code=503, detail="local Ollama translation is unavailable")
+
+
+def _script_counts(value: str) -> dict[str, int]:
+    counts = {"latin": 0, "cjk": 0, "hangul": 0, "kana": 0, "other": 0}
+    for character in value:
+        if character.isspace() or unicodedata.category(character).startswith("P"):
+            continue
+        codepoint = ord(character)
+        if "A" <= character.upper() <= "Z":
+            counts["latin"] += 1
+        elif 0x4E00 <= codepoint <= 0x9FFF:
+            counts["cjk"] += 1
+        elif 0xAC00 <= codepoint <= 0xD7AF:
+            counts["hangul"] += 1
+        elif 0x3040 <= codepoint <= 0x30FF:
+            counts["kana"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def _language_matches(text: str, language: str) -> bool:
+    counts = _script_counts(text)
+    significant = sum(counts.values())
+    if significant == 0:
+        return False
+    normalized = language.casefold()
+    if normalized in {"auto", "mixed", "zh-en"}:
+        return True
+    if normalized.startswith("zh"):
+        return counts["cjk"] >= max(1, significant // 5)
+    if normalized.startswith("ko"):
+        return counts["hangul"] >= max(1, significant // 5)
+    if normalized.startswith("ja"):
+        return counts["kana"] > 0 or counts["cjk"] >= max(1, significant // 3)
+    if normalized in {"en", "es", "fr", "de"}:
+        return counts["latin"] >= max(1, significant // 2) and counts["cjk"] < counts["latin"]
+    return True
+
+
+def _translation_contract_ok(payload: dict[str, Any], source_language: str, target_language: str) -> bool:
+    source = payload.get("source_text")
+    translation = payload.get("translation")
+    if not isinstance(source, str) or not source.strip() or not isinstance(translation, str) or not translation.strip():
+        return False
+    if source_language not in {"auto", "mixed", "zh-en"} and not _language_matches(source, source_language):
+        return False
+    if source_language != target_language and source.casefold().strip() == translation.casefold().strip():
+        return False
+    if source_language != target_language and not _language_matches(translation, target_language):
+        return False
+    return True
 
 
 @app.post("/v1/explain", response_model=ExplanationResponse)
@@ -609,10 +665,10 @@ def _transcribe_sync(audio: npt.NDArray[np.float32], request: AsrRequest) -> Asr
         audio,
         language=language,
         initial_prompt=request.initial_prompt or None,
-        beam_size=1,
-        best_of=1,
+        beam_size=ASR_BEAM_SIZE,
+        best_of=ASR_BEST_OF,
         vad_filter=True,
-        condition_on_previous_text=False,
+        condition_on_previous_text=True,
     )
     realized = list(segments)
     text = " ".join(segment.text.strip() for segment in realized).strip()
