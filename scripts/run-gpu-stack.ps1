@@ -13,7 +13,8 @@ $visionModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_VISION_MODEL)) { "qw
 # intentionally longer than realtime lanes and never create a fallback result.
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_TIMEOUT_SECONDS)) { $env:AIALRA_SUMMARY_TIMEOUT_SECONDS = "120" }
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS)) { $env:AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS = "150" }
-if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MAX_TOKENS)) { $env:AIALRA_SUMMARY_MAX_TOKENS = "320" }
+if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MAX_TOKENS)) { $env:AIALRA_SUMMARY_MAX_TOKENS = "420" }
+if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_CONTEXT_TOKENS)) { $env:AIALRA_SUMMARY_CONTEXT_TOKENS = "3072" }
 $requiredModels = @($ollamaModel, $explanationModel, $summaryModel, $visionModel) | Select-Object -Unique
 
 function Test-OllamaReady {

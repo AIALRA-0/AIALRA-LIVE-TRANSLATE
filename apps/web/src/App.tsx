@@ -678,21 +678,21 @@ function DocumentItem({ item, languageView }: { item: TimelineItem; languageView
   const time = new Date(item.occurredAt).toLocaleTimeString("zh-CN", { hour12: false });
   if (item.kind === "paragraph") {
     return (
-      <article className="course-paragraph" data-testid="course-paragraph">
+      <article id={`evidence-${item.id}`} className="course-paragraph" data-testid="course-paragraph">
         <header><time>{time}</time><span>{item.sourceProvider || "等待 Provider"}</span></header>
         {languageView !== "translation" && <p className="source-text">{item.original}</p>}
-        {languageView !== "source" && <p className="translation-text">{item.translation || "等待真实模型翻译"}</p>}
+        {languageView !== "source" && <p className="translation-text">{item.translationMode === "same_language" ? "原文，无需翻译" : item.translation || "等待真实模型翻译"}</p>}
         {item.translationProvider && <small>{item.translationProvider}</small>}
       </article>
     );
   }
   return (
-    <aside className={`insight-block ${item.kind}`} data-testid={`insight-${item.kind}`}>
+    <aside id={`evidence-${item.id}`} className={`insight-block ${item.kind}`} data-testid={`insight-${item.kind}`}>
       <header><strong>{item.title}</strong><time>{time}</time></header>
       {item.imageUrl && <img src={item.imageUrl} alt={item.title} />}
       {item.sections?.length ? <div className="insight-sections">{item.sections.map((section, index) => <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p></section>)}</div> : <p>{item.body || "正在解析内容"}</p>}
       {item.provider && <small>{item.provider}</small>}
-      {item.evidenceIds.length > 0 && <footer>{item.evidenceIds.slice(0, 6).map((id) => <code key={id} title={id}>证据 · {id.slice(-6)}</code>)}</footer>}
+      {item.evidenceIds.length > 0 && <footer>{item.evidenceIds.slice(0, 6).map((id) => <button key={id} className="evidence-link" type="button" title={`回到证据 ${id}`} onClick={() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}>证据 · {id.slice(-6)}</button>)}</footer>}
     </aside>
   );
 }

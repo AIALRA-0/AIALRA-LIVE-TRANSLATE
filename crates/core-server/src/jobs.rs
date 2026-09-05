@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const LEASE_SECONDS: i64 = 60;
@@ -51,7 +51,56 @@ pub struct CompleteRequest {
     idempotency_key: String,
     result: Value,
     elapsed_ms: u64,
+    #[serde(default)]
+    timings: CompletionTimings,
     runtime_proof: RuntimeProof,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompletionTimings {
+    #[serde(default)]
+    lease_wait_ms: Option<u64>,
+    #[serde(default)]
+    input_fetch_ms: Option<u64>,
+    #[serde(default)]
+    inference_ms: Option<u64>,
+    #[serde(default)]
+    execution_ms: Option<u64>,
+}
+
+impl CompletionTimings {
+    fn validate(&self) -> Result<(), ApiError> {
+        let values = [
+            self.lease_wait_ms,
+            self.input_fetch_ms,
+            self.inference_ms,
+            self.execution_ms,
+        ];
+        if values.into_iter().flatten().any(|value| value > 900_000) {
+            return Err(ApiError::bad_request("model timing is out of bounds"));
+        }
+        Ok(())
+    }
+
+    fn as_json(&self, commit_ms: u64, attempt: i64) -> Value {
+        let mut value = json!({
+            "commit_ms": commit_ms,
+            "attempt": attempt,
+        });
+        if let Some(item) = self.lease_wait_ms {
+            value["lease_wait_ms"] = json!(item);
+        }
+        if let Some(item) = self.input_fetch_ms {
+            value["input_fetch_ms"] = json!(item);
+        }
+        if let Some(item) = self.inference_ms {
+            value["inference_ms"] = json!(item);
+        }
+        if let Some(item) = self.execution_ms {
+            value["execution_ms"] = json!(item);
+        }
+        value
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,12 +257,14 @@ pub async fn complete_job(
             "model result idempotency key does not match the leased job",
         ));
     }
+    request.timings.validate()?;
     validate_runtime_proof(
         &job,
         &request.worker_id,
         &request.result,
         &request.runtime_proof,
     )?;
+    let commit_started = Instant::now();
     apply_result(&state, &job, &request.result, request.elapsed_ms)?;
     if !state
         .store
@@ -221,6 +272,10 @@ pub async fn complete_job(
     {
         return Err(ApiError::conflict("model job completion lost its lease"));
     }
+    let commit_ms = commit_started
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
     let _ = state.emit_idempotent(
         &format!("{job_id}:completed"),
         &job.session_id,
@@ -236,7 +291,8 @@ pub async fn complete_job(
             "provider": request.runtime_proof.provider,
             "execution_device": request.runtime_proof.execution_device,
             "model": request.runtime_proof.model,
-            "runtime_proof_at_unix_ms": request.runtime_proof.observed_at_unix_ms
+            "runtime_proof_at_unix_ms": request.runtime_proof.observed_at_unix_ms,
+            "timings": request.timings.as_json(commit_ms, i64::from(job.attempts))
         }),
     );
     if let Err(_error) = crate::explanation::activate_deferred_explanation(&state, &job.session_id)
@@ -698,6 +754,7 @@ pub fn enqueue_asr(
         .store
         .get_session(session_id)?
         .context("session not found")?;
+    let initial_prompt = asr_initial_prompt(state, session_id)?;
     state.enqueue_job(NewModelJob {
         id: format!("job_{}", Uuid::now_v7().simple()),
         session_id: session_id.to_owned(),
@@ -708,7 +765,7 @@ pub fn enqueue_asr(
             "captured_at_ms": captured_at_ms,
             "sample_rate": 16_000,
             "language": session.source_language,
-            "initial_prompt": ""
+            "initial_prompt": initial_prompt
         }),
         input_object_hash: Some(stored.hash.clone()),
         idempotency_key: format!(
@@ -717,6 +774,31 @@ pub fn enqueue_asr(
         ),
     })?;
     Ok(())
+}
+
+fn asr_initial_prompt(state: &AppState, session_id: &str) -> anyhow::Result<String> {
+    const MAX_PROMPT_CHARS: usize = 600;
+    let events = state.store.list_events(session_id)?;
+    let mut fragments = events
+        .iter()
+        .rev()
+        .filter(|event| {
+            matches!(
+                event.event_type.as_str(),
+                "paragraph.finalized" | "segment.finalized"
+            )
+        })
+        .filter_map(|event| event.payload.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .take(2)
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    fragments.reverse();
+    let mut prompt = join_caption_fragments(fragments.into_iter());
+    if prompt.chars().count() > MAX_PROMPT_CHARS {
+        prompt = prompt.chars().take(MAX_PROMPT_CHARS).collect();
+    }
+    Ok(prompt)
 }
 
 pub fn finish_session_after_stop(state: &AppState, session_id: &str) -> Result<(), ApiError> {
@@ -760,7 +842,7 @@ pub fn enqueue_summary(
             }))
         })
         .collect::<Vec<_>>();
-    let segments = evenly_sample(&all_segments, 64);
+    let segments = sample_with_boundaries(&all_segments, 64, 8);
     if segments.is_empty() {
         return Err(ApiError::bad_request(
             "stable transcript is required before summary",
@@ -779,7 +861,7 @@ pub fn enqueue_summary(
             }))
         })
         .collect::<Vec<_>>();
-    let pages = evenly_sample(&all_pages, 24);
+    let pages = sample_with_boundaries(&all_pages, 24, 4);
     let all_rolling_summaries = events
         .iter()
         .filter(|event| event.event_type == "explanation.card.created")
@@ -792,7 +874,7 @@ pub fn enqueue_summary(
                 .map(str::to_owned)
         })
         .collect::<Vec<_>>();
-    let rolling_summaries = evenly_sample(&all_rolling_summaries, 24);
+    let rolling_summaries = sample_with_boundaries(&all_rolling_summaries, 24, 4);
     let evidence_key = segments
         .iter()
         .filter_map(|item| item.get("id").and_then(Value::as_str))
@@ -909,6 +991,13 @@ fn maybe_finalize_paragraph(
             "assembly": "coherent-v1"
         }),
     )?;
+    let same_language =
+        languages_match_for_translation(&session.source_language, &session.target_language);
+    let paragraph_text = paragraph
+        .payload
+        .get("text")
+        .cloned()
+        .unwrap_or(Value::Null);
     let context = events
         .iter()
         .rev()
@@ -920,23 +1009,56 @@ fn maybe_finalize_paragraph(
         .into_iter()
         .rev()
         .collect::<Vec<_>>();
-    state.enqueue_job(NewModelJob {
-        id: format!("job_{}", Uuid::now_v7().simple()),
-        session_id: session_id.to_owned(),
-        job_type: "translate".to_owned(),
-        priority: 70,
-        input: json!({
-            "text": paragraph.payload.get("text").cloned().unwrap_or(Value::Null),
-            "paragraph_id": paragraph_id.clone(),
-            "source_language": session.source_language,
-            "target_language": session.target_language,
-            "glossary": [],
-            "context": context
-        }),
-        input_object_hash: None,
-        idempotency_key: format!("translate:{paragraph_id}"),
-    })?;
+    if same_language {
+        // A same-language pair is a display decision, not a model translation.
+        // Preserve the source text as an append-only fact and make the reason
+        // explicit so the UI never presents Chinese-as-Chinese as a translation.
+        state.emit_idempotent(
+            &format!("translate:{paragraph_id}:same_language"),
+            session_id,
+            "core_translation",
+            "translation.finalized",
+            last.captured_at_monotonic_ns,
+            &paragraph_id,
+            None,
+            json!({
+                "paragraph_id": paragraph_id,
+                "segment_id": paragraph_id,
+                "translation_id": format!("tr_{paragraph_id}"),
+                "source_text": paragraph_text,
+                "text": paragraph_text,
+                "translation_mode": "same_language"
+            }),
+        )?;
+        maybe_enqueue_coherent_explanation(state, session_id, &paragraph_id)?;
+    } else {
+        state.enqueue_job(NewModelJob {
+            id: format!("job_{}", Uuid::now_v7().simple()),
+            session_id: session_id.to_owned(),
+            job_type: "translate".to_owned(),
+            priority: 70,
+            input: json!({
+                "text": paragraph_text,
+                "paragraph_id": paragraph_id.clone(),
+                "source_language": session.source_language,
+                "target_language": session.target_language,
+                "glossary": [],
+                "context": context
+            }),
+            input_object_hash: None,
+            idempotency_key: format!("translate:{paragraph_id}"),
+        })?;
+    }
     Ok(Some(paragraph))
+}
+
+fn language_base(value: &str) -> &str {
+    value.split(['-', '_']).next().unwrap_or(value)
+}
+
+fn languages_match_for_translation(source: &str, target: &str) -> bool {
+    let source = language_base(source);
+    !matches!(source, "auto" | "mixed" | "zh-en") && source == language_base(target)
 }
 
 fn maybe_enqueue_coherent_explanation(
@@ -1044,6 +1166,19 @@ fn evenly_sample<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
             items[source_index].clone()
         })
         .collect()
+}
+
+fn sample_with_boundaries<T: Clone>(items: &[T], limit: usize, boundary: usize) -> Vec<T> {
+    if items.len() <= limit || boundary == 0 || limit <= boundary * 2 {
+        return evenly_sample(items, limit);
+    }
+    let edge = boundary.min(items.len() / 2);
+    let middle_limit = limit - edge * 2;
+    let mut output = items[..edge].to_vec();
+    let middle = evenly_sample(&items[edge..items.len() - edge], middle_limit);
+    output.extend(middle);
+    output.extend_from_slice(&items[items.len() - edge..]);
+    output
 }
 
 fn authorize(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -1209,9 +1344,10 @@ use axum::response::IntoResponse;
 #[cfg(test)]
 mod tests {
     use super::{
-        PARAGRAPH_HARD_SEGMENTS, enqueue_summary, evenly_sample, join_caption_fragments,
+        PARAGRAPH_HARD_SEGMENTS, asr_initial_prompt, enqueue_summary, evenly_sample,
+        join_caption_fragments, languages_match_for_translation,
         maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, require_provider,
-        validate_diagnostic_id, validate_error_stage,
+        sample_with_boundaries, validate_diagnostic_id, validate_error_stage,
     };
     use crate::app::AppState;
     use aialra_event_store::NewSession;
@@ -1262,6 +1398,18 @@ mod tests {
         let sampled = evenly_sample(&(0..100).collect::<Vec<_>>(), 5);
         assert_eq!(sampled, vec![0, 24, 49, 74, 99]);
         assert_eq!(evenly_sample(&[3, 5, 8], 5), vec![3, 5, 8]);
+        assert_eq!(
+            sample_with_boundaries(&(0..100).collect::<Vec<_>>(), 10, 2),
+            vec![0, 1, 2, 21, 40, 59, 78, 97, 98, 99]
+        );
+    }
+
+    #[test]
+    fn language_pair_comparison_handles_region_suffixes() {
+        assert!(languages_match_for_translation("zh", "zh-CN"));
+        assert!(languages_match_for_translation("en-US", "en"));
+        assert!(!languages_match_for_translation("auto", "zh-CN"));
+        assert!(!languages_match_for_translation("en", "zh-CN"));
     }
 
     #[test]
@@ -1310,6 +1458,92 @@ mod tests {
             "A model uses evidence."
         );
         assert_eq!(PARAGRAPH_HARD_SEGMENTS, 4);
+    }
+
+    #[test]
+    fn asr_prompt_uses_only_recent_stable_text_and_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_asr_prompt".to_owned(),
+                title: "ASR prompt".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for (index, text) in [(1, "first stable phrase"), (2, "second stable phrase")] {
+            state
+                .emit_idempotent(
+                    &format!("asr-prompt-{index}"),
+                    "session_asr_prompt",
+                    "gpu_asr",
+                    "segment.finalized",
+                    index,
+                    &format!("segment-{index}"),
+                    None,
+                    json!({"segment_id": format!("seg-{index}"), "text": text}),
+                )
+                .unwrap();
+        }
+        let prompt = asr_initial_prompt(&state, "session_asr_prompt").unwrap();
+        assert_eq!(prompt, "first stable phrase second stable phrase");
+        assert!(prompt.chars().count() <= 600);
+    }
+
+    #[test]
+    fn same_language_paragraph_skips_model_translation_and_explains_why() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_same_language".to_owned(),
+                title: "Same language".to_owned(),
+                source_language: "zh".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for index in 1..=4 {
+            state
+                .emit_idempotent(
+                    &format!("same-language-segment-{index}"),
+                    "session_same_language",
+                    "gpu_asr",
+                    "segment.finalized",
+                    index,
+                    &format!("segment-{index}"),
+                    None,
+                    json!({"segment_id": format!("seg-{index}"), "text": format!("中文段落 {index}。"), "provider": "faster-whisper:small@cuda"}),
+                )
+                .unwrap();
+        }
+        assert!(
+            maybe_finalize_paragraph(&state, "session_same_language", false)
+                .unwrap()
+                .is_some()
+        );
+        let events = state.store.list_events("session_same_language").unwrap();
+        let translation = events
+            .iter()
+            .find(|event| event.event_type == "translation.finalized")
+            .unwrap();
+        assert_eq!(translation.payload["translation_mode"], "same_language");
+        assert_eq!(
+            state
+                .store
+                .model_queue_counts(Some("session_same_language"))
+                .unwrap()
+                .queued,
+            0
+        );
     }
 
     #[test]

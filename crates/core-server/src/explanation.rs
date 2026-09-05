@@ -153,7 +153,7 @@ fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, V
                 "text": event.payload.get("text")?.as_str()?
             }))
         })
-        .take(6)
+        .take(10)
         .collect::<Vec<_>>();
     segments.reverse();
     let mut pages = events
@@ -169,7 +169,7 @@ fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, V
                 "text": event.payload.get("text")?.as_str()?
             }))
         })
-        .take(8)
+        .take(12)
         .collect::<Vec<_>>();
     pages.reverse();
     Ok((segments, pages))

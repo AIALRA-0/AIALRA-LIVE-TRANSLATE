@@ -64,10 +64,10 @@ SUMMARY_TIMEOUT_SECONDS = max(
     30.0, min(float(os.getenv("AIALRA_SUMMARY_TIMEOUT_SECONDS", "120")), 120.0)
 )
 SUMMARY_CONTEXT_TOKENS = max(
-    512, min(int(os.getenv("AIALRA_SUMMARY_CONTEXT_TOKENS", "2048")), 8192)
+    512, min(int(os.getenv("AIALRA_SUMMARY_CONTEXT_TOKENS", "3072")), 8192)
 )
 SUMMARY_MAX_TOKENS = max(
-    160, min(int(os.getenv("AIALRA_SUMMARY_MAX_TOKENS", "320")), 600)
+    160, min(int(os.getenv("AIALRA_SUMMARY_MAX_TOKENS", "420")), 600)
 )
 VISION_MODEL = os.getenv("AIALRA_VISION_MODEL", "qwen3-vl:8b-instruct")
 ASR_MODEL_NAME = os.getenv("AIALRA_ASR_MODEL", "small")
@@ -326,7 +326,9 @@ def _script_counts(value: str) -> dict[str, int]:
         if character.isspace() or unicodedata.category(character).startswith("P"):
             continue
         codepoint = ord(character)
-        if "A" <= character.upper() <= "Z":
+        if (character.isascii() and character.isalpha()) or "LATIN" in unicodedata.name(
+            character, ""
+        ):
             counts["latin"] += 1
         elif 0x4E00 <= codepoint <= 0x9FFF:
             counts["cjk"] += 1
@@ -344,30 +346,48 @@ def _language_matches(text: str, language: str) -> bool:
     significant = sum(counts.values())
     if significant == 0:
         return False
-    normalized = language.casefold()
+    normalized = language.casefold().replace("_", "-")
+    base_language = normalized.split("-", 1)[0]
     if normalized in {"auto", "mixed", "zh-en"}:
         return True
-    if normalized.startswith("zh"):
+    if base_language == "zh":
         return counts["cjk"] >= max(1, significant // 5)
-    if normalized.startswith("ko"):
+    if base_language == "ko":
         return counts["hangul"] >= max(1, significant // 5)
-    if normalized.startswith("ja"):
+    if base_language == "ja":
         return counts["kana"] > 0 or counts["cjk"] >= max(1, significant // 3)
-    if normalized in {"en", "es", "fr", "de"}:
+    if base_language in {"en", "es", "fr", "de"}:
         return counts["latin"] >= max(1, significant // 2) and counts["cjk"] < counts["latin"]
     return True
 
 
-def _translation_contract_ok(payload: dict[str, Any], source_language: str, target_language: str) -> bool:
+def _translation_contract_ok(
+    payload: dict[str, Any], source_language: str, target_language: str
+) -> bool:
     source = payload.get("source_text")
     translation = payload.get("translation")
-    if not isinstance(source, str) or not source.strip() or not isinstance(translation, str) or not translation.strip():
+    if (
+        not isinstance(source, str)
+        or not source.strip()
+        or not isinstance(translation, str)
+        or not translation.strip()
+    ):
         return False
-    if source_language not in {"auto", "mixed", "zh-en"} and not _language_matches(source, source_language):
+    source_normalized = source_language.casefold().replace("_", "-")
+    target_normalized = target_language.casefold().replace("_", "-")
+    same_language = (
+        source_normalized.split("-", 1)[0] == target_normalized.split("-", 1)[0]
+        and source_normalized not in {"auto", "mixed", "zh-en"}
+    )
+    if (
+        not same_language
+        and source_normalized not in {"auto", "mixed", "zh-en"}
+        and not _language_matches(source, source_language)
+    ):
         return False
-    if source_language != target_language and source.casefold().strip() == translation.casefold().strip():
+    if not same_language and source.casefold().strip() == translation.casefold().strip():
         return False
-    if source_language != target_language and not _language_matches(translation, target_language):
+    if not same_language and not _language_matches(translation, target_language):
         return False
     return True
 
@@ -384,10 +404,12 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
         "You are a lecture comprehension assistant. Return compact JSON in the requested language. "
         "When target_language starts with zh, write every natural-language field "
         "in Simplified Chinese. "
-        "Separate course statements from background knowledge. Do not repeat identifiers. "
-        "Write a one-sentence summary. Return at most two missing-context items, three rare terms, "
-        "two possible ASR errors, and two review questions. Explain each rare term in one sentence "
-        "and keep every item concise."
+        "Separate course statements from background knowledge and label uncertainty plainly. "
+        "Do not repeat identifiers or turn unsupported background into a course fact. "
+        "Write a one-sentence summary. Return at most three missing-context items, "
+        "four rare terms, three possible ASR errors, and three review questions. "
+        "Explain each rare term in one sentence "
+        "and keep every item concise and tied to the supplied evidence."
     )
     language_instruction = (
         "All natural-language output fields must use Simplified Chinese.\n"
@@ -422,12 +444,12 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
                 "summary": {"type": "string", "maxLength": 300},
                 "missing_context": {
                     "type": "array",
-                    "maxItems": 2,
+                    "maxItems": 3,
                     "items": {"type": "string", "maxLength": 240},
                 },
                 "rare_terms": {
                     "type": "array",
-                    "maxItems": 3,
+                    "maxItems": 4,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -440,12 +462,12 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
                 },
                 "possible_asr_errors": {
                     "type": "array",
-                    "maxItems": 2,
+                    "maxItems": 3,
                     "items": {"type": "string", "maxLength": 200},
                 },
                 "review_questions": {
                     "type": "array",
-                    "maxItems": 2,
+                    "maxItems": 3,
                     "items": {"type": "string", "maxLength": 200},
                 },
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -460,7 +482,7 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
             ],
             "additionalProperties": False,
             },
-            max_tokens=512,
+            max_tokens=640,
             model=EXPLANATION_MODEL,
             timeout_seconds=75.0,
             attempts=2,
@@ -517,9 +539,10 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
     system = (
         "You summarize a completed lecture using only supplied evidence. Return compact JSON. "
         "Do not invent facts, citations, or identifiers. Prefer the rolling summaries for the "
-        "overall structure and use the sampled segments to verify details. Keep the overview "
-        "under 300 characters, and return at most five key points, five terms, and three open "
-        "questions."
+        "overall structure, then use the beginning, middle, and end of the supplied segments "
+        "to verify details. Make the overview specific to this lecture, retain important caveats, "
+        "and keep every key point traceable to supplied evidence. Keep the overview under 500 "
+        "characters, and return at most eight key points, eight terms, and four open questions."
     )
     if request.target_language.lower().startswith("zh"):
         system += " Write every natural-language field in Simplified Chinese."
@@ -541,16 +564,16 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
             {
             "type": "object",
             "properties": {
-                "overview": {"type": "string", "maxLength": 300},
+                "overview": {"type": "string", "maxLength": 500},
                 "key_points": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": 5,
+                    "maxItems": 8,
                     "items": {"type": "string", "maxLength": 180},
                 },
                 "terminology": {
                     "type": "array",
-                    "maxItems": 5,
+                    "maxItems": 8,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -563,7 +586,7 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
                 },
                 "open_questions": {
                     "type": "array",
-                    "maxItems": 3,
+                    "maxItems": 4,
                     "items": {"type": "string", "maxLength": 180},
                 },
             },

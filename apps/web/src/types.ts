@@ -201,6 +201,7 @@ export interface TimelineItem {
   imageUrl?: string;
   original?: string;
   translation?: string;
+  translationMode?: "same_language";
   sourceProvider?: string;
   translationProvider?: string;
   sections?: Array<{ label: string; text: string; tone?: "neutral" | "warning" | "question" }>;

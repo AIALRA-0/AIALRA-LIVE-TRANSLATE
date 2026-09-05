@@ -35,6 +35,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       items.push({
         id: segmentId, kind: "paragraph", title: "课程段落", body: original,
         original, translation: translation ? text(translation.payload.text) : undefined,
+        translationMode: translation?.payload.translation_mode === "same_language" ? "same_language" : undefined,
         sourceProvider: text(payload.provider), translationProvider: translation ? text(translation.payload.provider) : undefined,
         evidenceIds: [segmentId], occurredAt: event.captured_at_wall,
       });

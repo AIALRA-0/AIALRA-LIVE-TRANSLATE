@@ -131,6 +131,19 @@ def test_translation_contract_allows_configured_same_language_output() -> None:
     )
 
 
+def test_translation_contract_normalizes_region_codes_and_unicode_latin() -> None:
+    assert _translation_contract_ok(
+        {"source_text": "Café déjà vu.", "translation": "咖啡似曾相识。"},
+        "en-US",
+        "zh-CN",
+    )
+    assert not _translation_contract_ok(
+        {"source_text": "中文内容", "translation": "中文内容"},
+        "en-US",
+        "zh-CN",
+    )
+
+
 def test_explanation_shape_requires_every_managed_section() -> None:
     valid = {
         "summary": "简短总结",

@@ -437,6 +437,7 @@ async def execute_job(
     job: dict[str, Any],
     scheduler: GpuScheduler,
     worker_id: str,
+    timings: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     job_id = job.get("id")
     job_type = job.get("job_type")
@@ -454,10 +455,14 @@ async def execute_job(
     model_input = dict(model_input_value)
     if job_type == "asr":
         try:
-            binary = await gateway.get(
-                f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/input",
-                headers={"X-Aialra-Worker-ID": worker_id},
-                timeout=30,
+            binary = await _timed_request(
+                timings,
+                "input_fetch_ms",
+                lambda: gateway.get(
+                    f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/input",
+                    headers={"X-Aialra-Worker-ID": worker_id},
+                    timeout=30,
+                ),
             )
         except httpx.HTTPError as error:
             raise JobExecutionError(
@@ -474,48 +479,68 @@ async def execute_job(
             )
         model_input["pcm_s16le_base64"] = base64.b64encode(binary.content).decode("ascii")
         try:
-            response = await scheduler.run_asr(
-                lambda: model.post(
-                    f"{MODEL_WORKER_URL}/v1/asr/transcribe", json=model_input, timeout=180
-                )
+            response = await _timed_request(
+                timings,
+                "inference_ms",
+                lambda: scheduler.run_asr(
+                    lambda: model.post(
+                        f"{MODEL_WORKER_URL}/v1/asr/transcribe", json=model_input, timeout=180
+                    )
+                ),
             )
         except httpx.HTTPError as error:
             raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "translate":
         try:
-            response = await scheduler.run_translation(
-                lambda: model.post(
-                    f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=120
-                )
+            response = await _timed_request(
+                timings,
+                "inference_ms",
+                lambda: scheduler.run_translation(
+                    lambda: model.post(
+                        f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=120
+                    )
+                ),
             )
         except httpx.HTTPError as error:
             raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "explain":
         try:
-            response = await scheduler.run_llm(
-                lambda: model.post(
-                    f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=180
-                )
+            response = await _timed_request(
+                timings,
+                "inference_ms",
+                lambda: scheduler.run_llm(
+                    lambda: model.post(
+                        f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=180
+                    )
+                ),
             )
         except httpx.HTTPError as error:
             raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "summarize":
         try:
-            response = await scheduler.run_exclusive(
-                lambda: model.post(
-                    f"{MODEL_WORKER_URL}/v1/summarize",
-                    json=model_input,
-                    timeout=SUMMARY_HTTP_TIMEOUT_SECONDS,
-                )
+            response = await _timed_request(
+                timings,
+                "inference_ms",
+                lambda: scheduler.run_exclusive(
+                    lambda: model.post(
+                        f"{MODEL_WORKER_URL}/v1/summarize",
+                        json=model_input,
+                        timeout=SUMMARY_HTTP_TIMEOUT_SECONDS,
+                    )
+                ),
             )
         except httpx.HTTPError as error:
             raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "asset_parse":
         try:
-            binary = await gateway.get(
-                f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/input",
-                headers={"X-Aialra-Worker-ID": worker_id},
-                timeout=60,
+            binary = await _timed_request(
+                timings,
+                "input_fetch_ms",
+                lambda: gateway.get(
+                    f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/input",
+                    headers={"X-Aialra-Worker-ID": worker_id},
+                    timeout=60,
+                ),
             )
         except httpx.HTTPError as error:
             raise JobExecutionError(
@@ -541,9 +566,11 @@ async def execute_job(
 
         try:
             if str(model_input.get("media_type", "")).startswith("image/"):
-                response = await scheduler.run_exclusive(request_asset_parse)
+                response = await _timed_request(
+                    timings, "inference_ms", lambda: scheduler.run_exclusive(request_asset_parse)
+                )
             else:
-                response = await request_asset_parse()
+                response = await _timed_request(timings, "inference_ms", request_asset_parse)
         except httpx.HTTPError as error:
             raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     if response.status_code >= 400:
@@ -568,6 +595,18 @@ async def execute_job(
     return result
 
 
+async def _timed_request(
+    timings: dict[str, int] | None,
+    name: str,
+    request: Callable[[], Awaitable[httpx.Response]],
+) -> httpx.Response:
+    started = time.monotonic()
+    response = await request()
+    if timings is not None:
+        timings[name] = max(0, int((time.monotonic() - started) * 1_000))
+    return response
+
+
 async def complete_job(
     gateway: httpx.AsyncClient,
     lane: Lane,
@@ -575,6 +614,7 @@ async def complete_job(
     job_id: str,
     result: dict[str, Any],
     elapsed_ms: int,
+    timings: dict[str, int] | None = None,
 ) -> None:
     provider = str(result.get("provider") or result.get("parser") or "")
     if "@" in provider:
@@ -591,6 +631,13 @@ async def complete_job(
             "idempotency_key": str(job["idempotency_key"]),
             "result": result,
             "elapsed_ms": elapsed_ms,
+            "timings": {
+                key: value
+                for key, value in (timings or {}).items()
+                if key in {"lease_wait_ms", "input_fetch_ms", "inference_ms", "execution_ms"}
+                and isinstance(value, int)
+                and 0 <= value <= 900_000
+            },
             "runtime_proof": {
                 "worker_id": lane.worker_id,
                 "provider": provider,
@@ -650,6 +697,7 @@ async def lane_loop(
     failures = 0
     while True:
         try:
+            lease_started = time.monotonic()
             response = await gateway.post(
                 f"{GATEWAY_URL}/internal/v1/jobs/lease",
                 json={"worker_id": lane.worker_id, "capabilities": list(lane.capabilities)},
@@ -663,10 +711,17 @@ async def lane_loop(
             job_id = str(job["id"])
             active[lane.suffix] = job_id
             started = time.monotonic()
+            timings = {"lease_wait_ms": max(0, int((started - lease_started) * 1_000))}
             diagnostic_id = new_diagnostic_id()
             renew = asyncio.create_task(renew_loop(gateway, lane, job_id))
             try:
-                result = await execute_job(gateway, model, job, scheduler, lane.worker_id)
+                execution_started = time.monotonic()
+                result = await execute_job(
+                    gateway, model, job, scheduler, lane.worker_id, timings
+                )
+                timings["execution_ms"] = max(
+                    0, int((time.monotonic() - execution_started) * 1_000)
+                )
                 try:
                     await complete_job(
                         gateway,
@@ -675,6 +730,7 @@ async def lane_loop(
                         job_id,
                         result,
                         int((time.monotonic() - started) * 1_000),
+                        timings,
                     )
                 except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as error:
                     # The result was produced locally, but the completion write
