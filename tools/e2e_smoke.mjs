@@ -63,7 +63,14 @@ async function sendPcm(sessionId, leaseToken, pcm) {
     const socket = new WebSocket(
       `${WS_BASE}/api/v1/sessions/${sessionId}/sources/smoke/audio`,
       ["aialra.audio.v1", `lease.${leaseToken}`],
-      TEST_SUBJECT ? { headers: { "X-authentik-uid": TEST_SUBJECT } } : undefined,
+      TEST_SUBJECT
+        ? {
+            headers: {
+              "X-authentik-uid": TEST_SUBJECT,
+              ...(PROXY_MARKER ? { "X-aialra-auth-proxy": "1" } : {}),
+            },
+          }
+        : undefined,
     );
     const acknowledgements = new Set();
     const acknowledgementCommitIds = new Set();

@@ -1,14 +1,16 @@
 # AIALRA-LIVE-TRANSLATE 验证报告
 
-## 2026-09-05 本地体验收敛候选
+## 2026-09-05 体验收敛修复与生产冒烟
 
-状态：通过本地快速检查，未部署。
+状态：已提交、已远端部署并通过最小生产冒烟。
 
-本次候选验证结果：Rust workspace 测试 63 项通过；Model Worker 测试 16 项通过；Web Vitest 28 项通过；Web typecheck、ESLint、生产构建通过；Python `compileall`、Rust `cargo fmt --check` 和 `git diff --check` 通过。未启动本地 Docker、Docker Desktop 或 WSL。
+本次候选验证结果：运行代码 SHA 为 `90a5b1ce04cc1ae28d9c8b94dda0a3b0ea5ab6b7`，远端发布为 `quality-v29-20260905-90a5b1c`。Rust workspace 测试 63 项通过；Model Worker 测试 16 项通过；Web Vitest 28 项通过；Web typecheck、ESLint、生产构建通过；Python `compileall`、Rust `cargo fmt --check` 和 `git diff --check` 通过。未启动本地 Docker、Docker Desktop 或 WSL。
 
 覆盖的代码行为包括：总结任务不再阻塞停止后的会话完成；翻译源/目标语言契约和原文照搬检查；有界 ASR 解码参数；课程文档跟随底部与新内容提示；桌面滚动边界；录音屏幕唤醒锁的申请、恢复和释放；总结后台状态的时间线提示。
 
-尚未证明：远端生产部署、真实 GPU 推理延迟、真实录音识别率、带参考答案的翻译/总结质量、各浏览器屏幕常亮效果以及本次课程审计中所有体验问题的最终用户验收。线上版本、远端冒烟和部署 SHA 需在提交后单独记录，不能使用本地候选结果代替。
+远端健康门通过：Core healthy、restart count `0`、GPU Worker 在线、ASR/LLM provider 为 CUDA、活动租约 `0`、模型队列 `queued=0/leased=0`；发布目录 `BUILD_ID`、Core `build_id`、OCI revision 和 GitHub `main` 均为同一 SHA。生产合成冒烟通过：21/21 音频块收到带 `commit_id` 的 durable ACK；同项目第二设备 `409`；产生稳定字幕和译文；材料解析、自动讲解、ReadWeave 读回、安全停止和测试对象归档通过。
+
+尚未证明：真实录音识别率、带参考答案的翻译/总结质量、各浏览器屏幕常亮效果以及本次课程审计中所有体验问题的最终用户验收。6 小时、24 小时、Android 真机矩阵和 Windows 崩溃调查仍未执行，不由本次快速上线结果替代。
 
 状态日期：2026-09-05
 
