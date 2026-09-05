@@ -1,6 +1,14 @@
 # 变更记录
 
-## 2026-09-05 发布收敛：v29 构建后回滚，v28 保持在线
+## 2026-09-05 v29 最小收尾上线
+
+- 直接在 `main` 修复部署器回滚环境变量污染：回滚 v28 时显式清除候选 `AIALRA_BUILD_ID`，避免旧镜像继承新版本 build id。
+- 从运行代码 SHA `5e72c836ca8f189122e3f5436e9eacf9fda1ea45` 远端构建并部署 `quality-v29-20260905-5e72c83`；发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 三方一致。
+- 健康门通过：Core healthy、restart count `0`、GPU Worker 在线、ASR/LLM provider 为 CUDA、模型队列 `queued=0`/`leased=0`；v28 回滚资源保留。
+- 生产快速冒烟通过：同项目第二设备 `409`、双项目并行租约、21/21 durable ACK 含 `commit_id`、字幕、译文、材料自动讲解、ReadWeave 读回、安全停止、重复停止和未认证边界检查均通过。
+- 本次未执行 6 小时/24 小时门禁、Android 真机矩阵、MacBook 物理麦克风确认或 Windows 崩溃调查；这些不能由本次快速上线结果替代。
+
+## 2026-09-05 历史部署记录：v29 首次候选回滚
 
 - 远端构建了 `quality-v29-20260905-501143a` 候选镜像；Web 构建与 Rust Core 编译通过，但切换后的健康请求超时，部署器自动回滚，未进入 v29 生产冒烟。
 - 回滚后的线上版本为 `quality-v28-20260901-1849013`，Core healthy、restart count 为 0，GPU Worker 在线且 ASR／LLM provider 为 CUDA，模型队列排空。

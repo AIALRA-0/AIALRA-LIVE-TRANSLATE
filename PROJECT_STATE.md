@@ -1,14 +1,14 @@
 # AIALRA-LIVE-TRANSLATE 项目状态
 
-## 0.0.3 2026-09-05 发布收敛状态（v29 已回滚，v28 保持在线）
+## 0.0.4 2026-09-05 v29 最小收尾状态（已上线）
 
-- 本地 `main`、`origin/main` 和 GitHub `main` 当前一致，运行候选 SHA 为 `501143ae4439f666f7b5ed25a7acb87f39c08b2c`；工作树保持干净，未启动本地 Docker、Docker Desktop 或 WSL。
-- GPU Worker 已通过现有生产路径恢复并确认在线；ASR 与 LLM provider 均为 CUDA，Core 健康响应中的 `queued=0`、`leased=0`，本次没有新增最终模型失败。
-- 当前线上已恢复为 `quality-v28-20260901-1849013`，发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 均为 `1849013ce2e04dd8f098df6652b4e57462c0974c`；Core healthy，restart count 为 `0`。
-- v28 最小翻译复核通过租约、同项目第二设备 `409`、浏览器式 durable ACK（含 `commit_id`）、安全停止和归档；现有 v28 测试工具在材料阶段使用了 v29 专属自动讲解断言，因此该次工具退出不能解释为 v28 翻译链路失败。
-- v29 远端镜像构建成功，但首次健康请求超时，部署器按设计自动回滚。回滚后曾发现子进程继承候选 `AIALRA_BUILD_ID` 的追溯缺陷，已通过清除继承变量并按 v28 `.env` 重建 Core 恢复一致性；该恢复没有修改业务代码或数据库。
-- v29 没有通过部署后健康门，也没有运行 v29 生产冒烟；不能把 v29 标记为上线。当前唯一下一步是定位并修复 v29 启动/健康超时路径，再从新的已合并 `main` SHA 重新部署。
-- 6 小时、24 小时、Android 真机矩阵、MacBook 硬件确认和 Windows 崩溃调查仍未执行；本阶段不扩张到这些范围。
+- 运行代码 SHA 为 `5e72c836ca8f189122e3f5436e9eacf9fda1ea45`；该修复已直接提交并快进推送到 GitHub `main`，工作树在文档同步前保持干净，未启动本地 Docker、Docker Desktop 或 WSL。
+- 当前线上为 `quality-v29-20260905-5e72c83`。发布目录 `BUILD_ID`、Core `build_id`、容器 OCI revision 和 GitHub `main` 运行代码 SHA 均为 `5e72c836ca8f189122e3f5436e9eacf9fda1ea45`。
+- v29 Core 为 `running/healthy`，restart count 为 `0`；GPU Worker 连续探针在线，ASR 与 LLM provider 均为 CUDA，队列 `queued=0`、`leased=0`。
+- v29 生产快速冒烟通过：租约、同项目第二设备 `409`、双项目并行租约、21/21 durable ACK（均含 `commit_id`）、稳定字幕、稳定译文、材料解析、确认后自动讲解、ReadWeave 读回、安全停止、重复停止和测试对象归档均通过。
+- v29 首次部署健康超时已触发自动回滚；现场确认的最小代码修复是回滚时清除继承的候选 `AIALRA_BUILD_ID`，避免 v28 镜像与 v29 环境变量污染。修复后重新远端构建、切换和健康核对均通过；v28 release、镜像和备份仍保留为回滚目标。
+- 公网边界快速核对通过：未认证健康接口返回 `401`，公网 `/internal/` 返回 `404`；数据库可读，活动租约为 `0`，Core 无新增重启。
+- 6 小时、24 小时、Android 真机矩阵、MacBook 物理麦克风确认和 Windows 崩溃调查未执行；本次上线判定仅基于快速技术冒烟，不宣称长时稳定性或真实硬件验收完成。
 
 ## 1 当前结论
 

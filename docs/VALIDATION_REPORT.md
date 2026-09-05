@@ -6,17 +6,16 @@
 
 | 阶段 | 结果 | 说明 |
 |---|---|---|
-| 发布前断点复核 | 通过 | `main`、`origin/main` 与 GitHub `main` 一致，工作树干净，无本地容器构建 |
-| GPU Worker | 通过 | Worker 在线；ASR 与 LLM provider 为 CUDA；队列 `queued=0`、`leased=0` |
-| v28 最小翻译冒烟 | 通过 | 租约成功、同项目第二设备 `409`、浏览器式 durable ACK 含 `commit_id`、安全停止和归档通过；本次工具的 v29 专属材料断言不作为 v28 翻译失败证据 |
-| v29 远端构建 | 通过 | Web 生产构建与 Rust Core release 编译完成 |
-| v29 部署健康门 | 阻断 | 切换后首次健康请求超时，部署器自动回滚；v29 未进入生产冒烟 |
-| 回滚后 v28 | 通过 | 发布目录、容器环境和 Core 健康 `build_id` 均恢复为 `1849013ce2e04dd8f098df6652b4e57462c0974c`；Core healthy、restart count `0` |
-| v29 生产冒烟 | 未执行 | 因部署健康门失败按计划停止 |
+| 发布前断点复核 | 通过 | 运行代码 `main` SHA `5e72c836ca8f189122e3f5436e9eacf9fda1ea45`，无本地容器构建 |
+| GPU Worker | 通过 | 连续探针在线；ASR 与 LLM provider 为 CUDA；队列 `queued=0`、`leased=0` |
+| v29 远端构建 | 通过 | 远端 Web 生产构建与 Rust Core release 编译完成 |
+| v29 部署健康门 | 通过 | current、`BUILD_ID`、Core `build_id`、OCI revision 均为 `5e72c836ca8f189122e3f5436e9eacf9fda1ea45`；Core healthy、restart count `0` |
+| v29 生产冒烟 | 通过 | 21/21 durable ACK 含 `commit_id`、同项目第二设备 `409`、双项目并行租约、字幕、译文、材料自动讲解、ReadWeave 读回、安全停止、重复停止通过 |
+| 公网边界 | 通过 | 未认证健康接口 `401`，公网 `/internal/` `404`；数据库可读，活动租约 `0` |
 
 ### 当前判定
 
-当前线上仍为 `quality-v28-20260901-1849013`。v29 代码已在 GitHub `main`，但没有通过部署健康门，不能宣称 v29 上线或完成自动材料讲解验收。唯一下一步是定位 v29 健康超时的最小根因，并保持 v28 在线；不做功能扩张、不启动长时门禁。
+当前线上为 `quality-v29-20260905-5e72c83`，运行代码 SHA、发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 一致，v29 已通过本批快速上线判定。v28 仍保留为回滚目标。6 小时/24 小时门禁、真实 macOS 麦克风、Android 真机矩阵和 Windows 崩溃调查未执行，不由本报告宣称通过。
 
 历史验证记录如下。
 
