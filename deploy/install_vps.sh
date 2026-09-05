@@ -135,8 +135,8 @@ rollback() {
       docker image tag "$previous_image_archive_ref" "$previous_image_ref" >/dev/null 2>&1 || true
     fi
     ln -sfn "$previous_release" "$current_link"
-    docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" up -d --force-recreate --no-build >/dev/null 2>&1 || true
-    rolled_back_container="$(docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" ps -q core 2>/dev/null || true)"
+    env -u AIALRA_BUILD_ID docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" up -d --force-recreate --no-build >/dev/null 2>&1 || true
+    rolled_back_container="$(env -u AIALRA_BUILD_ID docker compose --env-file "$env_file" -f "$previous_release/deploy/compose.yaml" ps -q core 2>/dev/null || true)"
     rolled_back_image_id="$(docker inspect --format '{{.Image}}' "$rolled_back_container" 2>/dev/null || true)"
     if [[ -z "$rolled_back_container" || "$rolled_back_image_id" != "$previous_image_id" ]]; then
       printf 'rollback failed to restore previous image: expected=%s actual=%s\n' "$previous_image_id" "$rolled_back_image_id" >&2
