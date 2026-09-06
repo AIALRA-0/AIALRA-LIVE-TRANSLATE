@@ -117,6 +117,19 @@ async function waitForReadWeave(projectId, sessionId, timeoutMs = 120_000) {
   throw new Error(`ReadWeave did not become readable within ${timeoutMs} ms`);
 }
 
+// Summary/explanation work is intentionally asynchronous after session completion.
+// Wait for the queue to settle instead of treating a short-lived leased summary
+// as a failed recording or a failed deployment.
+async function waitForQueueDrain(timeoutMs = 180_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const health = await checked(fetch(`${API}/health`));
+    if (health.model_queue?.queued === 0 && health.model_queue?.leased === 0) return health;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error(`model queue did not drain within ${timeoutMs} ms`);
+}
+
 // The browser renews its 45-second recording lease while asynchronous model
 // work is running.  Keep the production smoke equivalent so a slow but valid
 // explanation cannot turn the final stop into a false lease-expired failure.
@@ -216,10 +229,7 @@ if (events.some((item) => item.event_type === "model.job.failed")) {
   throw new Error("session contains a final model.job.failed event");
 }
 const readWeave = await waitForReadWeave(project.id, session.id);
-const health = await checked(fetch(`${API}/health`));
-if (health.model_queue?.queued !== 0 || health.model_queue?.leased !== 0) {
-  throw new Error("model queue did not drain after smoke session completion");
-}
+const health = await waitForQueueDrain();
 
 // Machine-readable output is stored by the caller and can be compared across model changes.
 const count = (eventType) => events.filter((item) => item.event_type === eventType).length;
