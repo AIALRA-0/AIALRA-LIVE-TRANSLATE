@@ -475,7 +475,11 @@ fn apply_asr_result(
     elapsed_ms: u64,
 ) -> Result<(), ApiError> {
     let asr: AsrResponse = serde_json::from_value(result.clone())?;
-    require_provider(&asr.provider, "faster-whisper:", &["@cpu", "@cuda"])?;
+    require_provider_prefixes(
+        &asr.provider,
+        &["faster-whisper:", "qwen3-asr:"],
+        &["@cpu", "@cuda"],
+    )?;
     if asr.text.trim().is_empty() {
         state.emit_idempotent(
             &format!("{}:asr_no_speech", job.id),
@@ -535,7 +539,11 @@ fn apply_translation_result(
     elapsed_ms: u64,
 ) -> Result<(), ApiError> {
     let translation: TranslationResponse = serde_json::from_value(result.clone())?;
-    require_provider(&translation.provider, "ollama:", &["@cuda"])?;
+    if translation.provider.starts_with("identity:") {
+        require_provider(&translation.provider, "identity:", &["@cpu"])?;
+    } else {
+        require_provider_prefixes(&translation.provider, &["ollama:", "hy-mt:"], &["@cuda"])?;
+    }
     let paragraph_id = job
         .input
         .get("paragraph_id")
@@ -1331,7 +1339,17 @@ fn allowed_capabilities(values: Vec<String>) -> Vec<String> {
 }
 
 fn require_provider(provider: &str, prefix: &str, devices: &[&str]) -> Result<(), ApiError> {
-    if provider.starts_with(prefix) && devices.iter().any(|device| provider.ends_with(device)) {
+    require_provider_prefixes(provider, &[prefix], devices)
+}
+
+fn require_provider_prefixes(
+    provider: &str,
+    prefixes: &[&str],
+    devices: &[&str],
+) -> Result<(), ApiError> {
+    if prefixes.iter().any(|prefix| provider.starts_with(prefix))
+        && devices.iter().any(|device| provider.ends_with(device))
+    {
         Ok(())
     } else {
         Err(ApiError::bad_request(
@@ -1404,7 +1422,8 @@ mod tests {
         PARAGRAPH_HARD_SEGMENTS, asr_initial_prompt, enqueue_summary, evenly_sample,
         join_caption_fragments, languages_match_for_translation,
         maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, require_provider,
-        sample_with_boundaries, validate_diagnostic_id, validate_error_stage, validate_model_stage,
+        require_provider_prefixes, sample_with_boundaries, validate_diagnostic_id,
+        validate_error_stage, validate_model_stage,
     };
     use crate::app::AppState;
     use aialra_event_store::NewSession;
@@ -1422,6 +1441,35 @@ mod tests {
         );
         assert!(require_provider("ollama:qwen2.5:3b-instruct@cuda", "ollama:", &["@cuda"]).is_ok());
         assert!(require_provider("ollama:qwen2.5:3b-instruct@cpu", "ollama:", &["@cuda"]).is_err());
+    }
+
+    #[test]
+    fn provider_gate_accepts_dedicated_asr_translation_and_identity_results() {
+        assert!(
+            require_provider_prefixes(
+                "qwen3-asr:Qwen/Qwen3-ASR-1.7B@cuda",
+                &["faster-whisper:", "qwen3-asr:"],
+                &["@cpu", "@cuda"],
+            )
+            .is_ok()
+        );
+        assert!(
+            require_provider_prefixes(
+                "hy-mt:tencent/HY-MT1.5-1.8B@cuda",
+                &["ollama:", "hy-mt:"],
+                &["@cuda"],
+            )
+            .is_ok()
+        );
+        assert!(require_provider("identity:en@cpu", "identity:", &["@cpu"]).is_ok());
+        assert!(
+            require_provider_prefixes(
+                "hy-mt:tencent/HY-MT1.5-1.8B@cpu",
+                &["ollama:", "hy-mt:"],
+                &["@cuda"],
+            )
+            .is_err()
+        );
     }
 
     #[test]
