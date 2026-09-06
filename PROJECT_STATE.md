@@ -1,18 +1,18 @@
 # AIALRA-LIVE-TRANSLATE 项目状态
 
-## 0.0.7 2026-09-05 v29 阶段可观测性与生产冒烟（当前线上）
+## 0.0.8 2026-09-06 v31 专用实时模型接入与最小生产冒烟（当前线上）
 
-当前唯一有效线上快照：运行代码 SHA、GitHub `main` 的运行代码基线、发布目录 `BUILD_ID`、Core `build_id` 和容器 OCI revision 均为 `364405198770bf2130fc93b1d80fe3eac9b2b5a4`；线上发布为 `quality-v29-20260905-3644051`。本次运行代码直接提交到 `main`，未创建分支或 PR；未启动本地 Docker、Docker Desktop 或 WSL。
+当前唯一有效线上快照：运行代码 SHA、GitHub `main`、发布目录 `BUILD_ID`、Core `build_id` 和容器 OCI revision 均为 `7e7df161934537fcbfddd04e7cb5f971481dbef9`；线上发布为 `quality-v31-20260906-7e7df16`。本次没有创建分支或 PR，也没有启动本地 Docker、Docker Desktop 或 WSL。
 
-本次运行代码增加模型任务阶段事件（准备、推理、重试、提交），前端将排队和执行中的模型任务合并显示，并在租约到期时主动刷新录音状态，避免把后台处理或过期冲突显示成笼统的“另一台设备冲突”。模型阶段信息只使用受限字段，不记录模型正文、转写、音频、令牌、完整载荷或真实会话标识。
+实时模型组合已切换为 `Qwen/Qwen3-ASR-1.7B@cuda` 和 `tencent/HY-MT1.5-1.8B@cuda`。讲解和总结继续使用既有的本机 CUDA Ollama 路径。专用模型的首次加载会明显增加首个请求耗时，加载完成后进入热运行；GPU 不可用时不会静默回退到 CPU。
 
-本地快速验证通过：Rust workspace 66 项测试、Clippy、格式检查、Python Worker 34 项测试、Ruff、mypy、Web 28 项测试、TypeScript、ESLint、生产构建、Python 编译检查、Node 语法检查和 `git diff --check`。全仓库 Ruff 的既有工具脚本规则问题和全仓库 pytest 的环境插件缺失仍未扩大处理。测试工具随后增加了有界的队列排空等待，以覆盖总结任务异步收尾；超时仍会失败，不跳过队列门。
+本次先发现一个真实兼容问题：专用 Worker 已经完成 CUDA 推理，但 Core 结果门仍只接受旧的 `faster-whisper:` 和 `ollama:` provider，导致第一次生产冒烟的 ASR 结果被 Core 拒收。已在 `main` 只修正 provider 兼容门，保留旧 provider、同语言 identity 和现有队列／音频协议；Rust provider 回归测试、workspace 测试、Clippy、格式检查和 `git diff --check` 均通过。
 
-远端发布与健康核对通过：Core `running/healthy`，restart count `0`；GPU Worker 在线，ASR provider 为 `faster-whisper:small@cuda`，LLM provider 为 `ollama:qwen2.5:7b-instruct@cuda`；活动租约 `0`，模型队列 `queued=0`、`leased=0`，累计失败仍为历史值 `98`，本次未增加。v28 发布、镜像、数据库和配置备份继续保留为回滚目标。
+修复后的生产合成冒烟通过（约 163 秒，包含首次模型热身）：21/21 音频块收到带 `commit_id` 的 durable ACK；同项目第二设备返回 `409`；产生 5 条稳定字幕、2 条稳定译文、1 页材料抽取、1 张自动讲解卡；安全停止、ReadWeave 读回、队列排空和测试对象归档通过。成功冒烟没有新增最终模型失败。
 
-第二次 v29 生产合成冒烟通过（约 80 秒）：21/21 音频块收到 durable ACK 且均含 `commit_id`；同项目第二设备返回 `409`；产生 6 条稳定字幕、2 条稳定译文、1 页材料抽取、1 张自动讲解卡；安全停止、ReadWeave 读回、队列排空和测试对象归档通过。第一次冒烟曾因总结任务短暂处于 `leased` 而被旧的立即检查误判，任务随后自然完成；已将该测试工具修为有界等待，并以第二次完整通过结果为准。
+远端健康核对通过：Core `running/healthy`，restart count `0`；GPU Worker 在线；ASR provider 为 `qwen3-asr:Qwen/Qwen3-ASR-1.7B@cuda`，实时翻译 provider 为 `hy-mt:tencent/HY-MT1.5-1.8B@cuda`，讲解 provider 为 `ollama:qwen2.5:7b-instruct@cuda`；活动租约 `0`，模型队列 `queued=0`、`leased=0`。前一次失败冒烟产生的累计失败计数属于测试失败历史，不作为当前运行任务判断。
 
-当前判断：v29 已完成本批技术上线，可交给用户真实使用。该冒烟不证明真实课程的词错率、翻译逻辑、总结质量、屏幕常亮、macOS 物理麦克风切换或长期稳定性；6 小时/24 小时门禁、Android 真机矩阵和 Windows 崩溃调查仍未执行。后续只处理真实复现的 P0/P1，停止未经反馈的功能扩张。
+当前判断：v31 已完成“专用实时模型接入＋技术冒烟”并交给用户体验。此前私有困难语音集没有达到原先的 99% 硬指标，本轮按用户决定先以真实体感判断，不把该指标伪装成已通过。真实课程的识别漏词、翻译逻辑、延迟、总结质量、屏幕常亮、macOS 物理麦克风切换和长期稳定性仍需用户确认；后续只处理真实复现的 P0/P1，停止未经反馈的功能扩张。
 
 ## 0.0.6 2026-09-05 v29 体验收敛修复（上一线上快照）
 

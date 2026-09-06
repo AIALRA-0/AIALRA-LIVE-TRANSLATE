@@ -1,5 +1,13 @@
 # 已知问题
 
+## 2026-09-06 当前线上边界
+
+- 当前运行版本为 `quality-v31-20260906-7e7df16`；运行代码 SHA、发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 均为 `7e7df161934537fcbfddd04e7cb5f971481dbef9`。Core healthy、restart count 为 `0`，GPU Worker 在线，活动租约和模型队列均为 `0`。
+- 当前实时模型为 `qwen3-asr:Qwen/Qwen3-ASR-1.7B@cuda` 与 `hy-mt:tencent/HY-MT1.5-1.8B@cuda`；讲解和总结仍使用既有 CUDA Ollama 路径。
+- 修复后的生产合成冒烟已证明音频 durable ACK、同项目冲突、字幕、译文、材料自动讲解、安全停止、ReadWeave 读回和队列排空可以运行。前一次冒烟暴露的 provider 兼容问题已在本版本修复。
+- 私有困难语音集没有达到原先的 99% 词准确硬门；本轮按用户决定先进入真实体验，因此真实课程的识别漏词、翻译逻辑和端到端延迟仍是待体验项。不能把技术冒烟的合成音频结果解释成真实课程质量通过。
+- 讲解质量、总结质量、屏幕唤醒、macOS 物理麦克风切换和长时间稳定性仍没有由本次短冒烟证明。后续只处理真实复现的 P0/P1，不继续扩张模型或功能范围。
+
 ## 2026-09-05 当前线上边界（最新）
 
 - 当前运行版本为 `quality-v29-20260905-3644051`；运行代码 SHA、发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 均为 `364405198770bf2130fc93b1d80fe3eac9b2b5a4`。Core healthy、restart count 为 `0`，GPU Worker 在线且 ASR/LLM provider 为 CUDA，活动租约和模型队列均为 `0`。
