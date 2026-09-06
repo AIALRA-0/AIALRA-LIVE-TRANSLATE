@@ -9,6 +9,7 @@ param(
     [string]$TranslationProvider = "ollama",
     [string]$HymtModel = "tencent/HY-MT1.5-1.8B",
     [string]$HymtDevice = "cuda",
+    [bool]$AllowAsrLlmOverlap = $false,
     [string]$ExplanationModel = "qwen2.5:7b-instruct",
     [string]$SummaryModel = "qwen2.5:14b-instruct",
     [string]$VisionModel = "qwen3-vl:8b-instruct"
@@ -44,6 +45,8 @@ $settings = New-ScheduledTaskSettingsSet -RestartCount 6 -RestartInterval (New-T
 [Environment]::SetEnvironmentVariable("AIALRA_TRANSLATION_PROVIDER", $TranslationProvider, "User") # Persist the selected translation provider.
 [Environment]::SetEnvironmentVariable("AIALRA_HYMT_MODEL", $HymtModel, "User") # Persist the dedicated translation checkpoint name.
 [Environment]::SetEnvironmentVariable("AIALRA_HYMT_DEVICE", $HymtDevice, "User") # Require the selected translation execution device at startup.
+$overlapValue = if ($AllowAsrLlmOverlap) { "true" } else { "false" }
+[Environment]::SetEnvironmentVariable("AIALRA_ALLOW_ASR_LLM_OVERLAP", $overlapValue, "User") # GPU overlap remains an explicit opt-in on the shared 16 GB card.
 [Environment]::SetEnvironmentVariable("AIALRA_EXPLANATION_MODEL", $ExplanationModel, "User") # Keep rolling explanations on the measured real-time tier.
 [Environment]::SetEnvironmentVariable("AIALRA_SUMMARY_MODEL", $SummaryModel, "User") # Preserve the measured final summary tier.
 [Environment]::SetEnvironmentVariable("AIALRA_VISION_MODEL", $VisionModel, "User") # Preserve the local image understanding tier.
@@ -57,6 +60,7 @@ $env:AIALRA_ASR_DEVICE = $AsrDevice
 $env:AIALRA_TRANSLATION_PROVIDER = $TranslationProvider
 $env:AIALRA_HYMT_MODEL = $HymtModel
 $env:AIALRA_HYMT_DEVICE = $HymtDevice
+$env:AIALRA_ALLOW_ASR_LLM_OVERLAP = $overlapValue
 $env:AIALRA_EXPLANATION_MODEL = $ExplanationModel
 $env:AIALRA_SUMMARY_MODEL = $SummaryModel
 $env:AIALRA_VISION_MODEL = $VisionModel

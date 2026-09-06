@@ -46,6 +46,18 @@ describe("timeline mapping", () => {
     expect(paragraph.translation).toBe("注意力使用上下文");
   });
 
+  it("removes provider language headers from an older translation event", () => {
+    const source = event("paragraph.finalized", { paragraph_id: "para-1", text: "Attention uses context." });
+    const translation = event("translation.finalized", {
+      paragraph_id: "para-1",
+      source_text: "源语言：en\n目标语言：zh-CN\nAttention uses context.",
+      text: "源语言：en\n目标语言：zh-CN\n注意力使用上下文。",
+    });
+    const [paragraph] = buildCourseDocument([source, translation]);
+    expect(paragraph.original).toBe("Attention uses context.");
+    expect(paragraph.translation).toBe("注意力使用上下文。");
+  });
+
   it("keeps raw acoustic fragments internal and shows one coherent paragraph", () => {
     const fragment = event("segment.finalized", { segment_id: "seg-1", text: "attention", display_mode: "internal_fragment" });
     const paragraph = { ...event("paragraph.finalized", { paragraph_id: "para-1", segment_ids: ["seg-1"], text: "Attention uses context.", provider: "asr" }), event_id: "evt-paragraph" };
@@ -57,10 +69,11 @@ describe("timeline mapping", () => {
   it("keeps one teaching block instead of bursting into many cards", () => {
     const [item] = buildCourseDocument([event("explanation.card.created", {
       card_id: "card-2",
-      result: { summary: "要点", missing_context: [{ text: "背景" }], rare_terms: [{ term: "token", one_line: "词元" }], review_questions: ["为什么"], evidence_segment_ids: ["para-1"] },
+      result: { paragraph_summary: "要点", terms: [{ term: "token", explanation: "词元" }], evidence_segment_ids: ["para-1"] },
     })]);
     expect(item.kind).toBe("insight");
-    expect(item.sections).toHaveLength(4);
+    expect(item.sections).toHaveLength(2);
+    expect(item.sections?.map((section) => section.label)).toEqual(["本段要点", "知识补充 · token"]);
   });
 
   it("shows a retryable summary failure without inventing summary text", () => {
@@ -123,6 +136,19 @@ describe("timeline mapping", () => {
     })]);
     expect(item.kind).toBe("session-summary");
     expect(item.body).toContain("术语：attention — 根据上下文分配权重");
+  });
+
+  it("does not expose legacy review questions in the course summary", () => {
+    const [item] = buildCourseDocument([event("session.summary.created", {
+      summary_id: "summary-2",
+      result: {
+        overview: "课程概览",
+        key_points: [],
+        terminology: [],
+        open_questions: ["不应出现在用户页面"],
+      },
+    })]);
+    expect(item.body).not.toContain("不应出现在用户页面");
   });
 
   it("deduplicates a replayed event by event ID", () => {

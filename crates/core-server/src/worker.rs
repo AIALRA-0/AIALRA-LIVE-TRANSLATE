@@ -16,25 +16,29 @@ pub struct TranslationResponse {
     pub source_text: Option<String>,
     pub text: String,
     pub provider: String,
+    #[serde(default)]
+    pub source_language: Option<String>,
+    #[serde(default)]
+    pub target_language: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ExplanationResponse {
-    pub summary: String,
-    pub missing_context: Vec<MissingContext>,
-    pub rare_terms: Vec<RareTerm>,
-    pub possible_asr_errors: Vec<String>,
-    pub review_questions: Vec<String>,
+    #[serde(alias = "summary")]
+    pub paragraph_summary: String,
+    #[serde(default)]
+    pub terms: Vec<ExplanationTerm>,
     pub evidence_segment_ids: Vec<String>,
     pub asset_page_ids: Vec<String>,
-    pub confidence: f32,
     pub provider: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct MissingContext {
-    pub text: String,
+pub struct ExplanationTerm {
+    pub term: String,
+    pub explanation: String,
     pub evidence_segment_ids: Vec<String>,
+    pub asset_page_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -50,6 +54,7 @@ pub struct SummaryResponse {
     pub overview: String,
     pub key_points: Vec<String>,
     pub terminology: Vec<RareTerm>,
+    #[serde(default)]
     pub open_questions: Vec<String>,
     pub evidence_segment_ids: Vec<String>,
     pub asset_page_ids: Vec<String>,

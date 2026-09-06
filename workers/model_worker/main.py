@@ -149,6 +149,8 @@ class TranslationResponse(BaseModel):
     source_text: str
     text: str
     provider: str
+    source_language: str
+    target_language: str
 
 
 class EvidenceSegment(BaseModel):
@@ -174,34 +176,32 @@ class ExplanationRequest(BaseModel):
     target_language: str
 
 
-class MissingContext(BaseModel):
-    """Background additions retain the segment IDs that made them relevant."""
-
-    text: str
-    evidence_segment_ids: list[str]
-
-
-class RareTerm(BaseModel):
+class ExplanationTerm(BaseModel):
     """A rare term receives one short explanation and traceable evidence."""
 
     term: str
-    one_line: str
+    explanation: str
     evidence_segment_ids: list[str]
     asset_page_ids: list[str]
 
 
 class ExplanationResponse(BaseModel):
-    """Structured cards can be validated before entering the append-only timeline."""
+    """Paragraph summaries and term definitions are separate, bounded projections."""
 
-    summary: str
-    missing_context: list[MissingContext]
-    rare_terms: list[RareTerm]
-    possible_asr_errors: list[str]
-    review_questions: list[str]
+    paragraph_summary: str
+    terms: list[ExplanationTerm]
     evidence_segment_ids: list[str]
     asset_page_ids: list[str]
-    confidence: float = Field(ge=0, le=1)
     provider: str
+
+
+class RareTerm(BaseModel):
+    """Course summaries retain their separate terminology shape."""
+
+    term: str
+    one_line: str
+    evidence_segment_ids: list[str]
+    asset_page_ids: list[str]
 
 
 class SummaryRequest(BaseModel):
@@ -219,7 +219,7 @@ class SummaryResponse(BaseModel):
     overview: str
     key_points: list[str]
     terminology: list[RareTerm]
-    open_questions: list[str]
+    open_questions: list[str] = Field(default_factory=list)
     evidence_segment_ids: list[str]
     asset_page_ids: list[str]
     provider: str
@@ -295,6 +295,8 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
             source_text=request.text,
             text=request.text,
             provider=f"identity:{source_language}@cpu",
+            source_language=source_language,
+            target_language=target_language,
         )
 
     if TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"}:
@@ -316,6 +318,8 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
             source_text=request.text,
             text=translation_text,
             provider=_translation_provider_name(),
+            source_language=source_language,
+            target_language=target_language,
         )
 
     glossary_lines = [
@@ -374,9 +378,11 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
     )
     if isinstance(result, dict):
         return TranslationResponse(
-            source_text=str(result["source_text"]).strip(),
-            text=str(result["translation"]).strip(),
+            source_text=_clean_translation_output(str(result["source_text"])),
+            text=_clean_translation_output(str(result["translation"])),
             provider=_translation_provider_name(),
+            source_language=source_language,
+            target_language=target_language,
         )
     raise HTTPException(status_code=503, detail="local Ollama translation is unavailable")
 
@@ -434,6 +440,8 @@ def _translation_contract_ok(
         or not translation.strip()
     ):
         return False
+    source = _clean_translation_output(source)
+    translation = _clean_translation_output(translation)
     source_normalized = source_language.casefold().replace("_", "-")
     target_normalized = target_language.casefold().replace("_", "-")
     same_language = (
@@ -447,6 +455,8 @@ def _translation_contract_ok(
     ):
         return False
     if not same_language and source.casefold().strip() == translation.casefold().strip():
+        return False
+    if _contains_translation_metadata(source) or _contains_translation_metadata(translation):
         return False
     if not same_language and not _language_matches(translation, target_language):
         return False
@@ -465,12 +475,12 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
         "You are a lecture comprehension assistant. Return compact JSON in the requested language. "
         "When target_language starts with zh, write every natural-language field "
         "in Simplified Chinese. "
-        "Separate course statements from background knowledge and label uncertainty plainly. "
-        "Do not repeat identifiers or turn unsupported background into a course fact. "
-        "Write a one-sentence summary. Return at most three missing-context items, "
-        "four rare terms, three possible ASR errors, and three review questions. "
-        "Explain each rare term in one sentence "
-        "and keep every item concise and tied to the supplied evidence."
+        "Return only a paragraph_summary and a terms list. "
+        "The paragraph_summary must describe only the supplied paragraph in one or two sentences. "
+        "terms must contain only professional terms or abbreviations that visibly occur in the "
+        "supplied paragraph or course material. Explain each term in exactly one short sentence. "
+        "Do not produce ASR guesses, review questions, confidence scores, identifiers, citations, "
+        "unsupported background, or any text outside the JSON object."
     )
     language_instruction = (
         "All natural-language output fields must use Simplified Chinese.\n"
@@ -485,12 +495,8 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
                 {"title": page.title, "text": page.text} for page in request.asset_pages
             ],
             "required_shape": {
-                "summary": "string",
-                "missing_context": ["string"],
-                "rare_terms": [{"term": "string", "one_line": "string"}],
-                "possible_asr_errors": ["string"],
-                "review_questions": ["string"],
-                "confidence": 0.0,
+                "paragraph_summary": "string",
+                "terms": [{"term": "string", "explanation": "string"}],
             },
         },
         ensure_ascii=False,
@@ -502,45 +508,22 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
             {
             "type": "object",
             "properties": {
-                "summary": {"type": "string", "maxLength": 300},
-                "missing_context": {
+                "paragraph_summary": {"type": "string", "maxLength": 300},
+                "terms": {
                     "type": "array",
-                    "maxItems": 3,
-                    "items": {"type": "string", "maxLength": 240},
-                },
-                "rare_terms": {
-                    "type": "array",
-                    "maxItems": 4,
+                    "maxItems": 12,
                     "items": {
                         "type": "object",
                         "properties": {
                             "term": {"type": "string", "maxLength": 80},
-                            "one_line": {"type": "string", "maxLength": 240},
+                            "explanation": {"type": "string", "maxLength": 240},
                         },
-                        "required": ["term", "one_line"],
+                        "required": ["term", "explanation"],
                         "additionalProperties": False,
                     },
                 },
-                "possible_asr_errors": {
-                    "type": "array",
-                    "maxItems": 3,
-                    "items": {"type": "string", "maxLength": 200},
-                },
-                "review_questions": {
-                    "type": "array",
-                    "maxItems": 3,
-                    "items": {"type": "string", "maxLength": 200},
-                },
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             },
-            "required": [
-                "summary",
-                "missing_context",
-                "rare_terms",
-                "possible_asr_errors",
-                "review_questions",
-                "confidence",
-            ],
+            "required": ["paragraph_summary", "terms"],
             "additionalProperties": False,
             },
             max_tokens=640,
@@ -554,20 +537,15 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
         await _restore_realtime_translation_model(EXPLANATION_MODEL)
     if isinstance(result, dict):
         compact = {
-            **result,
-            "missing_context": [
-                {"text": item, "evidence_segment_ids": segment_ids[-2:]}
-                for item in result.get("missing_context", [])
-                if isinstance(item, str)
-            ],
-            "rare_terms": [
+            "paragraph_summary": result.get("paragraph_summary", result.get("summary", "")),
+            "terms": [
                 {
                     "term": item.get("term", ""),
-                    "one_line": item.get("one_line", ""),
+                    "explanation": item.get("explanation", item.get("one_line", "")),
                     "evidence_segment_ids": segment_ids[-2:],
                     "asset_page_ids": page_ids,
                 }
-                for item in result.get("rare_terms", [])
+                for item in result.get("terms", result.get("rare_terms", []))
                 if isinstance(item, dict)
             ],
             "evidence_segment_ids": segment_ids,
@@ -603,7 +581,8 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
         "overall structure, then use the beginning, middle, and end of the supplied segments "
         "to verify details. Make the overview specific to this lecture, retain important caveats, "
         "and keep every key point traceable to supplied evidence. Keep the overview under 500 "
-        "characters, and return at most eight key points, eight terms, and four open questions."
+        "characters, and return at most eight key points and eight terms. Do not generate review "
+        "questions or study prompts."
     )
     if request.target_language.lower().startswith("zh"):
         system += " Write every natural-language field in Simplified Chinese."
@@ -645,13 +624,8 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
                         "additionalProperties": False,
                     },
                 },
-                "open_questions": {
-                    "type": "array",
-                    "maxItems": 4,
-                    "items": {"type": "string", "maxLength": 180},
-                },
             },
-            "required": ["overview", "key_points", "terminology", "open_questions"],
+            "required": ["overview", "key_points", "terminology"],
             "additionalProperties": False,
             },
             max_tokens=SUMMARY_MAX_TOKENS,
@@ -690,7 +664,7 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
         overview=str(result.get("overview", "")),
         key_points=_dedupe_text_items(result.get("key_points", [])),
         terminology=terminology,
-        open_questions=_dedupe_text_items(result.get("open_questions", [])),
+        open_questions=[],
         evidence_segment_ids=segment_ids,
         asset_page_ids=page_ids,
         provider=f"ollama:{SUMMARY_MODEL}@{LLM_DEVICE}",
@@ -899,7 +873,7 @@ def _get_hymt_runtime() -> tuple[Any, Any]:
 
             if HYMT_DEVICE.casefold() == "cuda" and not torch.cuda.is_available():
                 raise RuntimeError("HY-MT CUDA is unavailable")
-            _hymt_tokenizer = AutoTokenizer.from_pretrained(HYMT_MODEL)  # type: ignore[no-untyped-call]
+            _hymt_tokenizer = AutoTokenizer.from_pretrained(HYMT_MODEL)
             _hymt_model = AutoModelForCausalLM.from_pretrained(
                 HYMT_MODEL,
                 dtype=torch.bfloat16 if HYMT_DEVICE.casefold() == "cuda" else torch.float32,
@@ -965,19 +939,53 @@ def _translate_hymt_sync(request: TranslationRequest) -> str:
     for prefix in ("Translation:", "翻译：", "翻译:"):
         if output.startswith(prefix):
             output = output[len(prefix) :].strip()
-    return output
+    return _clean_translation_output(output)
 
 
 def _translation_text_contract_ok(text: str, source_language: str, target_language: str) -> bool:
-    if not text.strip():
+    text = _clean_translation_output(text)
+    if not text or _contains_translation_metadata(text):
         return False
     source_normalized = source_language.casefold().replace("_", "-")
     target_normalized = target_language.casefold().replace("_", "-")
     if source_normalized in {"auto", "mixed", "zh-en"}:
-        return True
+        return _language_matches(text, target_language)
     if source_normalized.split("-", 1)[0] == target_normalized.split("-", 1)[0]:
         return True
     return _language_matches(text, target_language)
+
+
+def _contains_translation_metadata(text: str) -> bool:
+    """Reject provider labels that leaked into the user-facing translation field."""
+
+    labels = (
+        "source language:", "source_language:", "target language:", "target_language:",
+        "terminology:", "glossary:", "text to translate:", "translation:",
+        "源语言：", "源语言:", "目标语言：", "目标语言:", "术语：", "术语:",
+        "译文：", "译文:",
+    )
+    return any(
+        line.strip().casefold().startswith(label)
+        for line in text.splitlines()
+        for label in labels
+    )
+
+
+def _clean_translation_output(text: str) -> str:
+    """Remove a bounded provider header without touching the translated body."""
+
+    labels = (
+        "source language:", "source_language:", "target language:", "target_language:",
+        "terminology:", "glossary:", "text to translate:", "translation:",
+        "源语言：", "源语言:", "目标语言：", "目标语言:", "术语：", "术语:",
+        "译文：", "译文:",
+    )
+    lines = text.strip().splitlines()
+    cleaned = [
+        line for index, line in enumerate(lines)
+        if index >= 8 or not any(line.strip().casefold().startswith(label) for label in labels)
+    ]
+    return "\n".join(cleaned).strip()
 
 
 async def _ollama_available() -> bool:
@@ -1318,19 +1326,23 @@ def _dedupe_text_items(value: Any) -> list[str]:
 
 
 def _has_explanation_shape(payload: dict[str, Any]) -> bool:
-    """Require a real summary while allowing trusted normalization of omitted optional sections."""
+    """Require only the two user-facing explanation sections."""
 
-    if not _has_nonempty_string(payload, "summary"):
-        return False
-    for field in (
-        "missing_context",
-        "rare_terms",
-        "possible_asr_errors",
-        "review_questions",
+    if not _has_nonempty_string(payload, "paragraph_summary") and not _has_nonempty_string(
+        payload, "summary"
     ):
-        if field in payload and not isinstance(payload[field], list):
-            return False
-    return "confidence" not in payload or isinstance(payload["confidence"], int | float)
+        return False
+    terms = payload.get("terms", payload.get("rare_terms", []))
+    if not isinstance(terms, list):
+        return False
+    return all(
+        isinstance(item, dict)
+        and isinstance(item.get("term"), str)
+        and bool(item["term"].strip())
+        and isinstance(item.get("explanation", item.get("one_line")), str)
+        and bool(item.get("explanation", item.get("one_line", "")).strip())
+        for item in terms
+    )
 
 
 def _uses_requested_explanation_language(
@@ -1340,7 +1352,7 @@ def _uses_requested_explanation_language(
 
     if not target_language.lower().startswith("zh"):
         return True
-    summary = payload.get("summary")
+    summary = payload.get("paragraph_summary", payload.get("summary"))
     return isinstance(summary, str) and any("\u4e00" <= char <= "\u9fff" for char in summary)
 
 
@@ -1350,14 +1362,10 @@ def _normalize_explanation(
     """Pydantic validates structure while local allowlists remove fabricated evidence IDs."""
 
     normalized = {
-        "summary": raw.get("summary", ""),
-        "missing_context": raw.get("missing_context", []),
-        "rare_terms": raw.get("rare_terms", []),
-        "possible_asr_errors": raw.get("possible_asr_errors", []),
-        "review_questions": raw.get("review_questions", []),
+        "paragraph_summary": raw.get("paragraph_summary", raw.get("summary", "")),
+        "terms": raw.get("terms", raw.get("rare_terms", [])),
         "evidence_segment_ids": raw.get("evidence_segment_ids", segment_ids),
         "asset_page_ids": raw.get("asset_page_ids", page_ids),
-        "confidence": raw.get("confidence", 0.5),
         "provider": "pending",
     }
     try:
@@ -1370,11 +1378,7 @@ def _normalize_explanation(
         item for item in candidate.evidence_segment_ids if item in allowed_segments
     ]
     candidate.asset_page_ids = [item for item in candidate.asset_page_ids if item in allowed_pages]
-    for context_item in candidate.missing_context:
-        context_item.evidence_segment_ids = [
-            value for value in context_item.evidence_segment_ids if value in allowed_segments
-        ]
-    for term_item in candidate.rare_terms:
+    for term_item in candidate.terms:
         term_item.evidence_segment_ids = [
             value for value in term_item.evidence_segment_ids if value in allowed_segments
         ]

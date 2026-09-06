@@ -16,6 +16,12 @@ function evidence(value: unknown): string[] {
   return strings(value).filter(Boolean);
 }
 
+function cleanTranslationDisplay(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const labels = ["source language:", "source_language:", "target language:", "target_language:", "terminology:", "glossary:", "text to translate:", "translation:", "源语言：", "源语言:", "目标语言：", "目标语言:", "术语：", "术语:", "译文：", "译文:"];
+  return value.trim().split(/\r?\n/).filter((line, index) => index >= 8 || !labels.some((label) => line.trim().toLocaleLowerCase().startsWith(label))).join("\n").trim();
+}
+
 // A course document pairs stable source segments with translations and expands structured teaching output.
 export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
   const translations = new Map<string, EventEnvelope>();
@@ -47,10 +53,10 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
     if (event.event_type === "paragraph.finalized" || (event.event_type === "segment.finalized" && !hasParagraphs && !usesInternalFragments)) {
       const segmentId = text(payload.paragraph_id) || text(payload.segment_id) || event.event_id;
       const translation = translations.get(segmentId);
-      const original = text(translation?.payload.source_text) || text(payload.text);
+      const original = cleanTranslationDisplay(translation?.payload.source_text) || cleanTranslationDisplay(payload.text);
       items.push({
         id: segmentId, kind: "paragraph", title: "课程段落", body: original,
-        original, translation: translation ? text(translation.payload.text) : undefined,
+        original, translation: translation ? cleanTranslationDisplay(translation.payload.text) : undefined,
         translationMode: translation?.payload.translation_mode === "same_language" ? "same_language" : undefined,
         sourceProvider: text(payload.provider), translationProvider: translation ? text(translation.payload.provider) : undefined,
         evidenceIds: [segmentId], occurredAt: event.captured_at_wall,
@@ -66,23 +72,13 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       const sharedEvidence = [...evidence(result.evidence_segment_ids), ...evidence(result.asset_page_ids)];
       const provider = text(result.provider);
       const sections: NonNullable<TimelineItem["sections"]> = [];
-      const summary = text(result.summary);
+      const summary = text(result.paragraph_summary) || text(result.summary);
       if (summary) sections.push({ label: "本段要点", text: summary });
-      const contexts = Array.isArray(result.missing_context) ? result.missing_context : [];
-      contexts.forEach((entry) => {
-        const value = object(entry); const body = text(value.text);
-        if (body) sections.push({ label: "背景补充", text: body });
-      });
-      const terms = Array.isArray(result.rare_terms) ? result.rare_terms : [];
+      const terms = Array.isArray(result.terms) ? result.terms : Array.isArray(result.rare_terms) ? result.rare_terms : [];
       terms.forEach((entry) => {
-        const value = object(entry); const term = text(value.term); const oneLine = text(value.one_line);
-        if (term || oneLine) sections.push({ label: term ? `术语 · ${term}` : "术语解释", text: oneLine });
+        const value = object(entry); const term = text(value.term); const explanation = text(value.explanation) || text(value.one_line);
+        if (term || explanation) sections.push({ label: term ? `知识补充 · ${term}` : "知识补充", text: explanation });
       });
-      strings(result.possible_asr_errors).forEach((body) => sections.push({ label: "疑似听写", text: body, tone: "warning" }));
-      strings(result.review_questions).forEach((body) => sections.push({ label: "复习问题", text: body, tone: "question" }));
-      if (typeof result.confidence === "number" && Number.isFinite(result.confidence)) {
-        sections.push({ label: "模型置信度", text: `${Math.round(Math.max(0, Math.min(1, result.confidence)) * 100)}%` });
-      }
       if (sections.length) items.push({ id: cardId, kind: "insight", title: "知识补充", body: "", sections, evidenceIds: sharedEvidence, occurredAt: event.captured_at_wall, provider });
       continue;
     }
@@ -108,7 +104,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
           return `术语：${term}${oneLine ? ` — ${oneLine}` : ""}`;
         }).filter(Boolean)
         : [];
-      const body = [text(result.overview), ...strings(result.key_points).map((item) => `• ${item}`), ...terminology, ...strings(result.open_questions).map((item) => `待复习：${item}`)].filter(Boolean).join("\n");
+      const body = [text(result.overview), ...strings(result.key_points).map((item) => `• ${item}`), ...terminology].filter(Boolean).join("\n");
       items.push({ id: text(payload.summary_id) || event.event_id, kind: "session-summary", title: "课程总结", body, evidenceIds: [...evidence(result.evidence_segment_ids), ...evidence(result.asset_page_ids)], occurredAt: event.captured_at_wall, provider: text(result.provider) });
       continue;
     }
@@ -136,8 +132,8 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       items.push({
         id: event.event_id,
         kind: "status",
-        title: materialFailure ? "材料解析失败，讲解未执行" : event.event_type === "model.job.failed" ? "模型任务暂时不可用" : "真实模型等待恢复",
-        body: materialFailure ? "材料已经保存，但解析没有完成；请重新上传后再确认排队。" : "输入已经安全保存，任务会在本机模型恢复后继续处理",
+        title: materialFailure ? "材料解析失败，讲解未执行" : text(payload.job_type) === "translate" ? "翻译暂时未跟上" : event.event_type === "model.job.failed" ? "模型任务暂时不可用" : "真实模型等待恢复",
+        body: materialFailure ? "材料已经保存，但解析没有完成；请重新上传后再确认排队。" : text(payload.job_type) === "translate" ? "原文和音频已经保存；这一段翻译会在模型恢复后重试，不影响后续录音。" : "输入已经安全保存，任务会在本机模型恢复后继续处理",
         evidenceIds: [],
         occurredAt: event.captured_at_wall,
       });

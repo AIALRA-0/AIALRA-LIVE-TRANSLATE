@@ -1199,7 +1199,11 @@ fn render_overview(
                 .rev()
                 .find(|event| event.event_type == "explanation.card.created")
                 .and_then(|event| event.payload.get("result"))
-                .and_then(|result| result.get("summary"))
+                .and_then(|result| {
+                    result
+                        .get("paragraph_summary")
+                        .or_else(|| result.get("summary"))
+                })
                 .and_then(Value::as_str)
         })
         .map(html)
@@ -1275,40 +1279,30 @@ fn render_explanations(events: &[aialra_event_protocol::EventEnvelope]) -> Strin
         .map(|event| {
             let result = event.payload.get("result").unwrap_or(&Value::Null);
             let summary = result
-                .get("summary")
+                .get("paragraph_summary")
+                .or_else(|| result.get("summary"))
                 .and_then(Value::as_str)
                 .unwrap_or("等待讲解总结");
-            let context = render_text_items(
-                result.get("missing_context"),
-                "text",
-                "暂无需要补充的背景",
-            );
-            let rare_terms = result
-                .get("rare_terms")
+            let terms = result
+                .get("terms")
+                .or_else(|| result.get("rare_terms"))
                 .and_then(Value::as_array)
                 .map(|items| {
                     items
                         .iter()
                         .map(|item| {
                             let term = item.get("term").and_then(Value::as_str).unwrap_or("术语");
-                            let one_line = item
-                                .get("one_line")
+                            let explanation = item
+                                .get("explanation")
+                                .or_else(|| item.get("one_line"))
                                 .and_then(Value::as_str)
                                 .unwrap_or("等待解释");
-                            format!("<li><strong>{}</strong>：{}</li>", html(term), html(one_line))
+                            format!("<li><strong>{}</strong>：{}</li>", html(term), html(explanation))
                         })
                         .collect::<String>()
                 })
                 .filter(|items| !items.is_empty())
-                .unwrap_or_else(|| "<li>暂无需要单独解释的生僻词</li>".to_owned());
-            let asr_errors = render_string_list(
-                result.get("possible_asr_errors"),
-                "暂无疑似识别错误",
-            );
-            let review_questions = render_string_list(
-                result.get("review_questions"),
-                "暂无复习问题",
-            );
+                .unwrap_or_else(|| "<li>本段没有需要单独解释的专业术语</li>".to_owned());
             let evidence = render_string_list(
                 result.get("evidence_segment_ids"),
                 "暂无字幕证据",
@@ -1318,13 +1312,10 @@ fn render_explanations(events: &[aialra_event_protocol::EventEnvelope]) -> Strin
                 "暂无课件页证据",
             );
             format!(
-                "<section><h3>{}</h3><p>{}</p><h4>补充背景</h4><ul>{}</ul><h4>生僻词</h4><ul>{}</ul><h4>疑似识别错误</h4><ul>{}</ul><h4>复习问题</h4><ul>{}</ul><p><small>字幕证据：{} · 课件证据：{} · 事件 {}</small></p></section>",
+                "<section><h3>{}</h3><h4>段落总结</h4><p>{}</p><h4>知识补充</h4><ul>{}</ul><p><small>字幕证据：{} · 课件证据：{} · 事件 {}</small></p></section>",
                 event.ingested_at.format("%H:%M:%S"),
                 html(summary),
-                context,
-                rare_terms,
-                asr_errors,
-                review_questions,
+                terms,
                 evidence,
                 page_evidence,
                 event.event_id
@@ -1336,20 +1327,6 @@ fn render_explanations(events: &[aialra_event_protocol::EventEnvelope]) -> Strin
     } else {
         rows
     }
-}
-
-fn render_text_items(value: Option<&Value>, field: &str, empty: &str) -> String {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get(field).and_then(Value::as_str))
-                .map(|item| format!("<li>{}</li>", html(item)))
-                .collect::<String>()
-        })
-        .filter(|items| !items.is_empty())
-        .unwrap_or_else(|| format!("<li>{}</li>", html(empty)))
 }
 
 fn render_string_list(value: Option<&Value>, empty: &str) -> String {
@@ -1750,18 +1727,15 @@ mod tests {
             None,
             json!({
                 "result": {
-                    "summary": "理解 <attention> 的作用",
-                    "missing_context": [{"text": "注意力机制按相关性聚合信息"}],
-                    "rare_terms": [{"term": "attention", "one_line": "按相关性选择上下文"}],
-                    "possible_asr_errors": [],
-                    "review_questions": ["为什么需要注意力机制"],
+                    "paragraph_summary": "理解 <attention> 的作用",
+                    "terms": [{"term": "attention", "explanation": "按相关性选择上下文"}],
                     "evidence_segment_ids": ["segment_1"]
                 }
             }),
         )
         .unwrap();
         let rendered = render_explanations(&[event]);
-        assert!(rendered.contains("生僻词"));
+        assert!(rendered.contains("知识补充"));
         assert!(rendered.contains("attention"));
         assert!(rendered.contains("segment_1"));
         assert!(rendered.contains("&lt;attention&gt;"));

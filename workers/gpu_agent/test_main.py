@@ -283,6 +283,37 @@ def test_cuda_asr_overlaps_an_active_gpu_llm() -> None:
     assert asyncio.run(scenario()) == ["llm-start", "asr", "llm-end"]
 
 
+def test_production_gpu_mode_serializes_asr_and_llm_to_protect_vram() -> None:
+    async def scenario() -> list[str]:
+        scheduler = GpuScheduler(asr_uses_gpu=True, allow_asr_llm_overlap=False)
+        order: list[str] = []
+        llm_started = asyncio.Event()
+        release_llm = asyncio.Event()
+
+        async def llm_request() -> httpx.Response:
+            order.append("llm-start")
+            llm_started.set()
+            await release_llm.wait()
+            order.append("llm-end")
+            return httpx.Response(200)
+
+        async def asr_request() -> httpx.Response:
+            order.append("asr")
+            return httpx.Response(201)
+
+        llm = asyncio.create_task(scheduler.run_llm(llm_request))
+        await asyncio.wait_for(llm_started.wait(), timeout=1)
+        asr = asyncio.create_task(scheduler.run_asr(asr_request))
+        await asyncio.sleep(0.01)
+        assert not asr.done()
+        release_llm.set()
+        await asyncio.wait_for(llm, timeout=1)
+        await asyncio.wait_for(asr, timeout=1)
+        return order
+
+    assert asyncio.run(scenario()) == ["llm-start", "llm-end", "asr"]
+
+
 def test_exclusive_model_waits_for_cuda_asr_and_blocks_new_asr() -> None:
     async def scenario() -> list[str]:
         scheduler = GpuScheduler(asr_uses_gpu=True)

@@ -17,6 +17,7 @@ if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_TIMEOUT_SECONDS)) { $env:AI
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS)) { $env:AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS = "150" }
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MAX_TOKENS)) { $env:AIALRA_SUMMARY_MAX_TOKENS = "420" }
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_CONTEXT_TOKENS)) { $env:AIALRA_SUMMARY_CONTEXT_TOKENS = "3072" }
+if ([string]::IsNullOrWhiteSpace($env:AIALRA_ALLOW_ASR_LLM_OVERLAP)) { $env:AIALRA_ALLOW_ASR_LLM_OVERLAP = "false" }
 $requiredModels = @($ollamaModel, $explanationModel, $summaryModel, $visionModel) | Select-Object -Unique
 
 function Test-OllamaReady {

@@ -1909,8 +1909,8 @@ impl EventStore {
         Ok(value.map(parse_time).transpose()?)
     }
 
-    /// Summary failures are visible and retryable, while failures in the
-    /// realtime fact pipeline still make a session fail closed.
+    /// Translation and other projections are independently retryable.  Only
+    /// failures that make the recorded facts unusable fail the session.
     pub fn has_failed_non_summary_job(&self, session_id: &str) -> Result<bool> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
@@ -1921,7 +1921,10 @@ impl EventStore {
         })?;
         for row in rows {
             let (job_type, input_json) = row?;
-            if job_type == "summarize" {
+            if matches!(
+                job_type.as_str(),
+                "summarize" | "translate" | "explain" | "asset_parse"
+            ) {
                 continue;
             }
             let input: Value = serde_json::from_str(&input_json)?;

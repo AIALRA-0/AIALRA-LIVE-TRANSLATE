@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type RuntimeHealth } from "./api";
 import { BrowserCapture, listAudioInputs, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
 import { applySessionStateEvent } from "./sessionState";
@@ -88,8 +88,8 @@ function stateLabel(state: string): string {
 }
 
 function stateTone(state: string): "green" | "yellow" | "red" | "gray" {
-  if (state === "recording" || state === "degraded" || state === "failed") return "red";
-  if (state === "stopping" || state === "processing") return "yellow";
+  if (state === "recording" || state === "degraded" || state === "stopping" || state === "processing") return "yellow";
+  if (state === "failed") return "red";
   if (state === "ready" || state === "completed") return "green";
   return "gray";
 }
@@ -122,7 +122,8 @@ function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: 
 }
 
 function capturePhaseTone(phase: CapturePhase, sessionState: string, hasLease: boolean): "green" | "yellow" | "red" | "gray" {
-  if (phase === "recording" || phase === "error" || (sessionState === "recording" && !hasLease && !["recoverable", "processing"].includes(phase))) return "red";
+  if (phase === "error" || (sessionState === "recording" && !hasLease && !["recoverable", "processing"].includes(phase))) return "red";
+  if (phase === "recording") return "yellow";
   if (phase === "blocked") return "yellow";
   if (phase === "recoverable") return "green";
   if (["requesting-permission", "acquiring-lease", "connecting", "stopping", "processing"].includes(phase) || sessionState === "processing") return "yellow";
@@ -697,6 +698,42 @@ function DocumentItem({ item, languageView }: { item: TimelineItem; languageView
   );
 }
 
+function ParagraphInsightPanel({ items, documentRef }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null> }) {
+  const paragraphs = useMemo(() => items.filter((item) => item.kind === "paragraph"), [items]);
+  const insights = items.filter((item) => item.kind === "insight");
+  const [currentParagraphId, setCurrentParagraphId] = useState<string | null>(paragraphs.at(-1)?.id ?? null);
+
+  useEffect(() => {
+    const root = documentRef.current;
+    if (!root || paragraphs.length === 0) return;
+    const paragraphIds = new Set(paragraphs.map((item) => item.id));
+    setCurrentParagraphId((current) => current && paragraphIds.has(current) ? current : paragraphs.at(-1)?.id ?? null);
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
+      if (visible) setCurrentParagraphId(visible.target.id.replace(/^evidence-/, ""));
+    }, { root, threshold: [0.2, 0.55, 0.9] });
+    root.querySelectorAll<HTMLElement>("[data-testid='course-paragraph']").forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [documentRef, paragraphs]);
+
+  const paragraph = paragraphs.find((item) => item.id === currentParagraphId) ?? paragraphs.at(-1);
+  const insight = paragraph
+    ? [...insights].reverse().find((item) => item.evidenceIds.includes(paragraph.id))
+    : undefined;
+  const summary = insight?.sections?.find((section) => section.label === "本段要点");
+  const terms = insight?.sections?.filter((section) => section.label.startsWith("知识补充")) ?? [];
+  return (
+    <section className="side-card paragraph-insight-panel" data-testid="paragraph-insight-panel">
+      <div className="card-heading"><h3>当前段落</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "等待补充"}</StatusBadge></div>
+      {paragraph ? <small className="paragraph-insight-source">{paragraph.original}</small> : <p>出现稳定段落后，这里会显示对应内容。</p>}
+      <section className="paragraph-summary-section"><strong>段落总结</strong><p>{summary?.text ?? "当前段落的总结正在生成。"}</p></section>
+      <section className="paragraph-terms-section"><strong>知识补充</strong>{terms.length ? terms.map((term, index) => <p key={`${term.label}:${index}`}><b>{term.label.replace("知识补充 · ", "")}</b>：{term.text}</p>) : <p>当前段落还没有检测到需要解释的专业名词或缩写。</p>}</section>
+    </section>
+  );
+}
+
 function GpuPanel({ runtime }: { runtime: RuntimeHealth | null }) {
   const metadata = runtime?.worker?.model_metadata ?? {};
   const gpu = metadata.gpu && typeof metadata.gpu === "object" ? metadata.gpu as Record<string, unknown> : {};
@@ -1175,6 +1212,13 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const summaryRetryable = latestSummaryEvent?.event_type === "session.summary.failed";
   const latestCompletedEvent = [...timeline.events].reverse().find((event) => event.event_type === "session.completed");
   const summaryPending = latestCompletedEvent?.payload.summary_pending === true;
+  const translationDegraded = latestCompletedEvent?.payload.translation_degraded === true;
+  const latestTranslationEventIndex = timeline.events.reduce((latest, event, index) => event.event_type === "translation.finalized" ? index : latest, -1);
+  const latestTranslationIssueIndex = timeline.events.reduce((latest, event, index) => (
+    ["model.job.failed", "model.job.retry_scheduled"].includes(event.event_type)
+      && event.payload.job_type === "translate" ? index : latest
+  ), -1);
+  const translationIssue = translationDegraded || latestTranslationIssueIndex > latestTranslationEventIndex;
   const visibleCaptureStatus = session.state === "processing"
     ? "录音已停止，音频已保存，后台正在生成结果"
     : session.state === "completed" && summaryPending ? "录音已完成，课程总结正在后台生成"
@@ -1205,12 +1249,12 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       : "录音已进入收尾或完成阶段；历史内容按时间戳保留，不能重新打开并覆盖本次会话。";
   const readWeaveTone = !readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : readWeave.syncing > 0 || readWeave.queued > 0 ? "yellow" : "green";
   const modelQueueDepth = (runtime?.model_queue?.queued ?? 0) + (runtime?.model_queue?.leased ?? 0);
-  const modelStatusTone = summaryRetryable ? "red" : modelQueueDepth > 0 ? "yellow" : "green";
+  const modelStatusTone = summaryRetryable ? "red" : translationIssue || modelQueueDepth > 0 ? "yellow" : "green";
   const section = routeSelection().section;
   const readWeaveNodeType = section === "user-notes" ? "user_notes" : section;
   const readWeaveUrl = readWeave?.targets?.find((target) => target.local_id === `${session.id}:${section === "user-notes" ? "user" : section}` || (!section && target.node_type === "session" && target.local_id === session.id))?.note_url ?? readWeave?.note_url;
   const visibleItems = timeline.items.filter(isRenderableDocumentItem).filter((item) => {
-    if (!section || section === "transcript") return section ? item.kind === "paragraph" : true;
+    if (!section || section === "transcript") return section ? item.kind === "paragraph" : item.kind !== "insight";
     if (section === "overview") return item.kind === "session-summary";
     if (section === "explanations") return item.kind === "insight";
     if (section === "assets") return item.kind === "asset";
@@ -1275,7 +1319,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             onDragLeave={(event) => { if (event.currentTarget === event.target || !event.currentTarget.contains(event.relatedTarget as Node)) setUploadDropActive(false); }}
             onDrop={(event) => { event.preventDefault(); setUploadDropActive(false); const file = event.dataTransfer.files[0]; if (file) chooseUpload(file); }}
           >
-            <div className="material-composer-heading"><div><h3>讲解与材料</h3><p>上传后先保存材料；只有你确认后才会排队，并自动加入下一次讲解。</p></div><StatusBadge tone={modelStatusTone}>{summaryRetryable ? "总结可重试" : modelQueueDepth > 0 ? "队列处理中" : "可用"}</StatusBadge></div>
+            <div className="material-composer-heading"><div><h3>讲解与材料</h3><p>上传后先保存材料；只有你确认后才会排队，并自动加入下一次讲解。</p></div><StatusBadge tone={modelStatusTone}>{summaryRetryable ? "总结可重试" : translationIssue ? "部分翻译待重试" : modelQueueDepth > 0 ? "队列处理中" : "可用"}</StatusBadge></div>
+            {translationIssue && <p className="translation-degraded-notice" role="status">原文和音频已保存；部分译文正在重试，录音控制与已完成内容不受影响。</p>}
             <div className="material-drop-copy"><strong>拖动材料到这里</strong><span>或选择 PPT、PDF、图片、文档和文本文件</span></div>
             <input ref={fileInput} className="visually-hidden" type="file" accept=".pptx,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) chooseUpload(file); }} />
             <button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}>选择材料</button>
@@ -1325,6 +1370,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             )}
           </section>
           <GpuPanel runtime={runtime} />
+          <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} />
           <section className="side-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
             <p>{readWeavePreview?.sessions.find((item) => item.session_id === session.id)?.latest_entries[0]?.translation ?? "稳定字幕和讲解会自动进入对应笔记"}</p>

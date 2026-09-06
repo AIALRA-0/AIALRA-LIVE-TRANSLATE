@@ -18,6 +18,7 @@ from workers.model_worker.main import (
     ExplanationRequest,
     ExplanationResponse,
     SummaryRequest,
+    _clean_translation_output,
     _dedupe_text_items,
     _has_explanation_shape,
     _has_nonempty_list,
@@ -27,6 +28,7 @@ from workers.model_worker.main import (
     _parse_model_json,
     _restore_realtime_translation_model,
     _translation_contract_ok,
+    _translation_text_contract_ok,
     _uses_requested_explanation_language,
 )
 
@@ -48,14 +50,10 @@ def _test_only_explanation(request: ExplanationRequest) -> ExplanationResponse:
     segment_ids = [segment.id for segment in request.segments]
     page_ids = [page.id for page in request.asset_pages]
     return ExplanationResponse(
-        summary=request.segments[-1].text,
-        missing_context=[],
-        rare_terms=[],
-        possible_asr_errors=[],
-        review_questions=[],
+        paragraph_summary=request.segments[-1].text,
+        terms=[],
         evidence_segment_ids=segment_ids,
         asset_page_ids=page_ids,
-        confidence=0.5,
         provider="test_only",
     )
 
@@ -220,6 +218,11 @@ def test_translation_contract_normalizes_region_codes_and_unicode_latin() -> Non
     )
 
 
+def test_auto_source_still_requires_the_requested_target_language() -> None:
+    assert _translation_text_contract_ok("注意力使用上下文。", "auto", "zh-CN")
+    assert not _translation_text_contract_ok("Attention uses context.", "auto", "zh-CN")
+
+
 def test_translation_prompt_keeps_source_and_translation_fields_separate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -250,18 +253,15 @@ def test_translation_prompt_keeps_source_and_translation_fields_separate(
     assert "translate only the translation field" in str(captured["repair_instruction"])
 
 
-def test_explanation_shape_requires_every_managed_section() -> None:
+def test_explanation_shape_requires_summary_and_valid_terms() -> None:
     valid = {
-        "summary": "简短总结",
-        "missing_context": [],
-        "rare_terms": [],
-        "possible_asr_errors": [],
-        "review_questions": [],
-        "confidence": 0.8,
+        "paragraph_summary": "简短总结",
+        "terms": [{"term": "GPU", "explanation": "图形处理器。"}],
     }
     assert _has_explanation_shape(valid)
-    assert _has_explanation_shape({"summary": "只有真实总结"})
-    assert not _has_explanation_shape({**valid, "review_questions": "none"})
+    assert _has_explanation_shape({"summary": "兼容旧结果"})
+    assert not _has_explanation_shape({**valid, "terms": "none"})
+    assert not _has_explanation_shape({**valid, "terms": [{"term": "GPU"}]})
 
 
 def test_model_json_accepts_unescaped_newline_inside_string() -> None:
@@ -272,6 +272,17 @@ def test_model_json_accepts_unescaped_newline_inside_string() -> None:
 def test_model_json_rejects_non_json_or_non_object_output() -> None:
     assert _parse_model_json("translation without JSON") is None
     assert _parse_model_json('["translation"]') is None
+
+
+def test_translation_contract_rejects_language_metadata_leaking_into_display() -> None:
+    leaked = "源语言：en\n目标语言：zh-CN\n术语：\n这是译文。"
+    assert _clean_translation_output(leaked) == "这是译文。"
+    assert _translation_text_contract_ok(leaked, "en", "zh-CN")
+    assert _translation_contract_ok(
+        {"source_text": "Source language: en\nAttention uses context.", "translation": leaked},
+        "en",
+        "zh-CN",
+    )
 
 
 def test_chinese_explanation_requires_chinese_summary() -> None:

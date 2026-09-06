@@ -139,8 +139,9 @@ def response_failure(
 class GpuScheduler:
     """Keep ASR responsive while serializing the longer Ollama requests."""
 
-    def __init__(self, *, asr_uses_gpu: bool = True) -> None:
+    def __init__(self, *, asr_uses_gpu: bool = True, allow_asr_llm_overlap: bool = True) -> None:
         self._asr_uses_gpu = asr_uses_gpu
+        self._allow_asr_llm_overlap = allow_asr_llm_overlap
         self._llm_lock = asyncio.Lock()
         self._condition = asyncio.Condition()
         self._active_kind: str | None = None
@@ -162,13 +163,19 @@ class GpuScheduler:
         async with self._condition:
             self._asr_waiters += 1
             try:
-                if self._active_kind == "llm":
+                if self._active_kind == "llm" and self._allow_asr_llm_overlap:
                     # Ollama generation cannot be preempted.  The measured RTX 4080
                     # memory envelope leaves room for small ASR, so run it alongside
                     # the active LLM instead of adding up to nine seconds of queueing.
                     concurrent_with_llm = True
                 else:
-                    await self._condition.wait_for(lambda: self._active_kind is None)
+                    await self._condition.wait_for(
+                        lambda: self._active_kind is None
+                        and (
+                            self._translation_waiters == 0
+                            or self._asr_since_translation < MAX_ASR_BURST_BEFORE_TRANSLATION
+                        )
+                    )
                     self._active_kind = "asr"
                 self._active_asr += 1
             finally:
@@ -865,7 +872,14 @@ async def run() -> None:
         metadata = {**cuda_metadata(), **health}
         active: dict[str, str | None] = {lane.suffix: None for lane in LANES}
         scheduler = GpuScheduler(
-            asr_uses_gpu=str(health.get("asr_provider", "")).endswith("@cuda")
+            asr_uses_gpu=str(health.get("asr_provider", "")).endswith("@cuda"),
+            # The RTX 4080 has only 16 GiB.  Keeping ASR and HY-MT/Ollama
+            # resident at the same time caused intermittent HTTP 503/OOM
+            # responses.  Operators may opt into overlap only after measuring
+            # the complete model set, and a separate GPU client must use the
+            # same host admission policy.
+            allow_asr_llm_overlap=os.getenv("AIALRA_ALLOW_ASR_LLM_OVERLAP", "0").casefold()
+            in {"1", "true", "yes"},
         )
         tasks = [asyncio.create_task(model_health_loop(model))]
         for lane in LANES:

@@ -566,6 +566,12 @@ fn apply_translation_result(
             "translation_id": format!("tr_{paragraph_id}"),
             "source_text": translation.source_text,
             "text": translation.text,
+            "source_language": translation
+                .source_language
+                .or_else(|| job.input.get("source_language").and_then(Value::as_str).map(str::to_owned)),
+            "target_language": translation
+                .target_language
+                .or_else(|| job.input.get("target_language").and_then(Value::as_str).map(str::to_owned)),
             "provider": translation.provider,
             "elapsed_ms": elapsed_ms
         }),
@@ -752,8 +758,9 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
         .iter()
         .any(|event| event.event_type == "session.summary.created");
     let failed_non_summary = state.store.has_failed_non_summary_job(session_id)?;
+    let failed_projection_count = counts.failed;
     let mut summary_pending = false;
-    if !failed_non_summary && counts.failed == 0 && has_segments && !has_summary {
+    if !failed_non_summary && has_segments && !has_summary {
         // The recording facts are complete as soon as non-summary work drains.
         // Summary remains an explicitly asynchronous projection so a cold 14B
         // load cannot make a safely stopped course look stuck.
@@ -780,6 +787,8 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
                 "summary_available": has_summary,
                 "summary_pending": summary_pending,
                 "summary_retryable": !has_summary && !summary_pending,
+                "translation_degraded": failed_projection_count > 0,
+                "failed_projection_jobs": failed_projection_count,
             }),
         )
     };
@@ -927,7 +936,8 @@ pub fn enqueue_summary(
             event
                 .payload
                 .get("result")?
-                .get("summary")?
+                .get("paragraph_summary")
+                .or_else(|| event.payload.get("result")?.get("summary"))?
                 .as_str()
                 .map(str::to_owned)
         })
@@ -993,14 +1003,20 @@ fn maybe_finalize_paragraph(
                 event,
                 id.to_owned(),
                 event.payload.get("text")?.as_str()?.trim().to_owned(),
+                event
+                    .payload
+                    .get("language")
+                    .and_then(Value::as_str)
+                    .map(normalize_language_code)
+                    .unwrap_or_else(|| "unknown".to_owned()),
             ))
         })
-        .filter(|(_, _, text)| !text.is_empty())
+        .filter(|(_, _, text, _)| !text.is_empty())
         .collect::<Vec<_>>();
     if pending.is_empty() {
         return Ok(None);
     }
-    let text = join_caption_fragments(pending.iter().map(|(_, _, text)| text.as_str()));
+    let text = join_caption_fragments(pending.iter().map(|(_, _, text, _)| text.as_str()));
     let trimmed = text.trim_end();
     let terminal = !trimmed.ends_with("...")
         && !trimmed.ends_with('…')
@@ -1020,7 +1036,7 @@ fn maybe_finalize_paragraph(
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let ids = pending
         .iter()
-        .map(|(_, id, _)| id.clone())
+        .map(|(_, id, _, _)| id.clone())
         .collect::<Vec<_>>();
     let evidence_key = ids.join(":");
     let paragraph_id = format!(
@@ -1030,9 +1046,24 @@ fn maybe_finalize_paragraph(
     let last = pending.last().expect("pending is non-empty").0;
     let provider = pending
         .iter()
-        .filter_map(|(event, _, _)| event.payload.get("provider").and_then(Value::as_str))
+        .filter_map(|(event, _, _, _)| event.payload.get("provider").and_then(Value::as_str))
         .next_back()
         .unwrap_or("unknown");
+    let detected_language = detected_language_for_paragraph(
+        pending.iter().map(|(_, _, _, language)| language.as_str()),
+    );
+    let translation_source_language = if matches!(
+        language_base(&session.source_language),
+        "auto" | "mixed" | "zh-en"
+    ) {
+        if detected_language == "unknown" {
+            session.source_language.clone()
+        } else {
+            detected_language.clone()
+        }
+    } else {
+        session.source_language.clone()
+    };
     let paragraph = state.emit_idempotent(
         &format!("{session_id}:paragraph:{evidence_key}"),
         session_id,
@@ -1045,12 +1076,13 @@ fn maybe_finalize_paragraph(
             "paragraph_id": paragraph_id.clone(),
             "segment_ids": ids,
             "text": text,
+            "detected_language": detected_language,
             "provider": provider,
             "assembly": "coherent-v1"
         }),
     )?;
     let same_language =
-        languages_match_for_translation(&session.source_language, &session.target_language);
+        languages_match_for_translation(&translation_source_language, &session.target_language);
     let paragraph_text = paragraph
         .payload
         .get("text")
@@ -1085,6 +1117,8 @@ fn maybe_finalize_paragraph(
                 "translation_id": format!("tr_{paragraph_id}"),
                 "source_text": paragraph_text,
                 "text": paragraph_text,
+                "source_language": translation_source_language,
+                "target_language": session.target_language,
                 "translation_mode": "same_language"
             }),
         )?;
@@ -1098,8 +1132,9 @@ fn maybe_finalize_paragraph(
             input: json!({
                 "text": paragraph_text,
                 "paragraph_id": paragraph_id.clone(),
-                "source_language": session.source_language,
+                "source_language": translation_source_language,
                 "target_language": session.target_language,
+                "detected_language": detected_language,
                 "glossary": [],
                 "context": context
             }),
@@ -1108,6 +1143,36 @@ fn maybe_finalize_paragraph(
         })?;
     }
     Ok(Some(paragraph))
+}
+
+fn normalize_language_code(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "zh" | "zh-cn" | "zh-hans" | "chinese" => "zh-CN".to_owned(),
+        "en" | "en-us" | "en-gb" | "english" => "en".to_owned(),
+        "ja" | "ja-jp" | "japanese" => "ja".to_owned(),
+        "ko" | "ko-kr" | "korean" => "ko".to_owned(),
+        "es" | "es-es" | "spanish" => "es".to_owned(),
+        "fr" | "fr-fr" | "french" => "fr".to_owned(),
+        "de" | "de-de" | "german" => "de".to_owned(),
+        "" => "unknown".to_owned(),
+        _ => normalized,
+    }
+}
+
+fn detected_language_for_paragraph<'a>(languages: impl Iterator<Item = &'a str>) -> String {
+    let mut detected = HashSet::new();
+    for language in languages.filter(|language| !language.is_empty() && *language != "unknown") {
+        detected.insert(language.to_owned());
+    }
+    match detected.len() {
+        0 => "unknown".to_owned(),
+        1 => detected
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "unknown".to_owned()),
+        _ => "mixed".to_owned(),
+    }
 }
 
 fn language_base(value: &str) -> &str {
@@ -1419,15 +1484,30 @@ use axum::response::IntoResponse;
 #[cfg(test)]
 mod tests {
     use super::{
-        PARAGRAPH_HARD_SEGMENTS, asr_initial_prompt, enqueue_summary, evenly_sample,
-        join_caption_fragments, languages_match_for_translation,
-        maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, require_provider,
-        require_provider_prefixes, sample_with_boundaries, validate_diagnostic_id,
-        validate_error_stage, validate_model_stage,
+        PARAGRAPH_HARD_SEGMENTS, asr_initial_prompt, detected_language_for_paragraph,
+        enqueue_summary, evenly_sample, join_caption_fragments, languages_match_for_translation,
+        maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, normalize_language_code,
+        require_provider, require_provider_prefixes, sample_with_boundaries,
+        validate_diagnostic_id, validate_error_stage, validate_model_stage,
     };
     use crate::app::AppState;
     use aialra_event_store::NewSession;
     use serde_json::json;
+
+    #[test]
+    fn auto_language_normalization_preserves_mixed_input_for_translation() {
+        assert_eq!(normalize_language_code("English"), "en");
+        assert_eq!(normalize_language_code("ja-JP"), "ja");
+        assert_eq!(normalize_language_code("zh_Hans"), "zh-CN");
+        assert_eq!(
+            detected_language_for_paragraph(["en", "en", "ja"].into_iter()),
+            "mixed"
+        );
+        assert_eq!(
+            detected_language_for_paragraph(["English", "English"].into_iter()),
+            "English"
+        );
+    }
 
     #[test]
     fn provider_gate_allows_cpu_asr_and_requires_cuda_llm() {
