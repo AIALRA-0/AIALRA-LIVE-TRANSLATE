@@ -24,10 +24,26 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
   }
   const hasParagraphs = events.some((event) => event.event_type === "paragraph.finalized");
   const usesInternalFragments = events.some((event) => event.event_type === "segment.finalized" && event.payload.display_mode === "internal_fragment");
+  const activeStages = new Map<string, EventEnvelope>();
 
   const items: TimelineItem[] = [];
   for (const event of events) {
     const payload = event.payload;
+    if (event.event_type === "model.job.stage") {
+      const jobId = text(payload.job_id);
+      const stage = text(payload.stage);
+      if (jobId && ["model_loading", "inferring", "retrying", "committing"].includes(stage)) activeStages.set(jobId, event);
+      continue;
+    }
+    if (event.event_type === "model.job.completed" || event.event_type === "model.job.failed") {
+      const jobId = text(payload.job_id);
+      if (jobId) activeStages.delete(jobId);
+      if (event.event_type === "model.job.completed") continue;
+    }
+    if (event.event_type === "model.job.retry_scheduled") {
+      const jobId = text(payload.job_id);
+      if (jobId) activeStages.delete(jobId);
+    }
     if (event.event_type === "paragraph.finalized" || (event.event_type === "segment.finalized" && !hasParagraphs && !usesInternalFragments)) {
       const segmentId = text(payload.paragraph_id) || text(payload.segment_id) || event.event_id;
       const translation = translations.get(segmentId);
@@ -126,6 +142,29 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
         occurredAt: event.captured_at_wall,
       });
     }
+  }
+  const stageTitles: Record<string, string> = {
+    model_loading: "模型准备中",
+    inferring: "模型正在推理",
+    retrying: "模型连接中断，正在重试",
+    committing: "正在保存模型结果",
+  };
+  for (const event of activeStages.values()) {
+    const payload = event.payload;
+    const stage = text(payload.stage);
+    if (!stageTitles[stage]) continue;
+    const elapsed = typeof payload.elapsed_ms === "number" && Number.isFinite(payload.elapsed_ms) && payload.elapsed_ms >= 0
+      ? `已持续约 ${Math.ceil(payload.elapsed_ms / 1_000)} 秒。`
+      : "结果完成后会自动显示在课程文档中。";
+    items.push({
+      id: `model-stage-${text(payload.job_id)}`,
+      kind: "status",
+      statusTone: stage === "retrying" ? "warning" : "neutral",
+      title: stageTitles[stage],
+      body: `${elapsed} 音频保存不受模型处理影响。`,
+      evidenceIds: [],
+      occurredAt: event.captured_at_wall,
+    });
   }
   return items;
 }

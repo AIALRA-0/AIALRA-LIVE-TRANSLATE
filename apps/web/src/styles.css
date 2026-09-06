@@ -176,6 +176,8 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 .insight-block { max-width: 920px; margin: 18px auto; padding: 15px 17px; border: 1px solid #c5c5c5; border-left: 4px solid #555; background: #f7f7f7; }
 .insight-block.insight, .insight-block.session-summary { border-left-color: var(--ink); background: var(--soft); }
 .insight-block.status { border-left-color: var(--red); background: color-mix(in srgb, var(--red) 7%, var(--paper)); }
+.insight-block.status.neutral { border-left-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 7%, var(--paper)); }
+.insight-block.status.warning { border-left-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 10%, var(--paper)); }
 .insight-block.asset { border-left-color: #6b6b6b; }
 .insight-block header { display: flex; justify-content: space-between; color: #505050; font-size: 11px; }
 .insight-block p { margin: 10px 0 0; white-space: pre-wrap; line-height: 1.65; }

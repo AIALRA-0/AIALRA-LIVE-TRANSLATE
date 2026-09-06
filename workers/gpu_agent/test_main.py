@@ -18,6 +18,7 @@ from workers.gpu_agent.main import (
     new_diagnostic_id,
     privacy_safe_failure_fields,
     provider_proves_local_execution,
+    report_stage,
     sanitize_worker_id,
 )
 
@@ -147,6 +148,26 @@ def test_failure_report_retries_with_the_same_diagnostic_id() -> None:
     payloads = asyncio.run(scenario())
     assert len(payloads) == 2
     assert {payload["diagnostic_id"] for payload in payloads} == {"diag_0123456789abcdef"}
+
+
+def test_stage_reporting_is_bounded_and_does_not_log_response_body() -> None:
+    async def scenario() -> dict[str, object]:
+        payload: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload.update(json.loads(request.content))
+            return httpx.Response(200, json={"accepted": True, "private": "not logged"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as gateway:
+            await report_stage(gateway, LANES[0], "job_test", "inferring", 1_200)
+        return payload
+
+    payload = asyncio.run(scenario())
+    assert payload == {
+        "worker_id": LANES[0].worker_id,
+        "stage": "inferring",
+        "elapsed_ms": 1_200,
+    }
 
 
 def test_latency_sensitive_model_jobs_have_independent_lanes() -> None:

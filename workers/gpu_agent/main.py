@@ -655,6 +655,37 @@ async def complete_job(
     response.raise_for_status()
 
 
+async def report_stage(
+    gateway: httpx.AsyncClient,
+    lane: Lane,
+    job_id: str,
+    stage: str,
+    elapsed_ms: int | None = None,
+) -> None:
+    """Best-effort bounded progress telemetry; never changes job execution."""
+
+    payload: dict[str, Any] = {"worker_id": lane.worker_id, "stage": stage}
+    if elapsed_ms is not None and 0 <= elapsed_ms <= 900_000:
+        payload["elapsed_ms"] = elapsed_ms
+    try:
+        response = await gateway.post(
+            f"{GATEWAY_URL}/internal/v1/jobs/{job_id}/stage",
+            json=payload,
+            timeout=5,
+        )
+        if response.status_code != 409:
+            response.raise_for_status()
+    except httpx.HTTPError:
+        # Progress is useful to a person waiting in the browser, but it must
+        # never turn a valid model result into a failed job.
+        LOGGER.warning(
+            json.dumps(
+                {"error_kind": "model_stage_report_failed", "stage": stage},
+                separators=(",", ":"),
+            )
+        )
+
+
 async def fail_job(
     gateway: httpx.AsyncClient,
     lane: Lane,
@@ -715,6 +746,8 @@ async def lane_loop(
             diagnostic_id = new_diagnostic_id()
             renew = asyncio.create_task(renew_loop(gateway, lane, job_id))
             try:
+                await report_stage(gateway, lane, job_id, "model_loading")
+                await report_stage(gateway, lane, job_id, "inferring")
                 execution_started = time.monotonic()
                 result = await execute_job(
                     gateway, model, job, scheduler, lane.worker_id, timings
@@ -723,6 +756,13 @@ async def lane_loop(
                     0, int((time.monotonic() - execution_started) * 1_000)
                 )
                 try:
+                    await report_stage(
+                        gateway,
+                        lane,
+                        job_id,
+                        "committing",
+                        max(0, int((time.monotonic() - started) * 1_000)),
+                    )
                     await complete_job(
                         gateway,
                         lane,
@@ -740,6 +780,14 @@ async def lane_loop(
                         FailureReport("gateway_response", "gateway_completion_failed")
                     ) from error
             except JobExecutionError as error:
+                if error.report.retryable:
+                    await report_stage(
+                        gateway,
+                        lane,
+                        job_id,
+                        "retrying",
+                        max(0, int((time.monotonic() - started) * 1_000)),
+                    )
                 await fail_job(
                     gateway,
                     lane,
@@ -749,6 +797,13 @@ async def lane_loop(
                     diagnostic_id,
                 )
             except RetryableJobError:
+                await report_stage(
+                    gateway,
+                    lane,
+                    job_id,
+                    "retrying",
+                    max(0, int((time.monotonic() - started) * 1_000)),
+                )
                 await fail_job(
                     gateway,
                     lane,
@@ -760,6 +815,13 @@ async def lane_loop(
             except (httpx.HTTPError, RuntimeError, KeyError, ValueError, json.JSONDecodeError):
                 # Once a job is leased, every execution/completion failure must
                 # release that lease through the same privacy-safe failure API.
+                await report_stage(
+                    gateway,
+                    lane,
+                    job_id,
+                    "retrying",
+                    max(0, int((time.monotonic() - started) * 1_000)),
+                )
                 await fail_job(
                     gateway,
                     lane,

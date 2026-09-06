@@ -687,7 +687,7 @@ function DocumentItem({ item, languageView }: { item: TimelineItem; languageView
     );
   }
   return (
-    <aside id={`evidence-${item.id}`} className={`insight-block ${item.kind}`} data-testid={`insight-${item.kind}`}>
+    <aside id={`evidence-${item.id}`} className={`insight-block ${item.kind}${item.statusTone ? ` ${item.statusTone}` : ""}`} data-testid={`insight-${item.kind}`}>
       <header><strong>{item.title}</strong><time>{time}</time></header>
       {item.imageUrl && <img src={item.imageUrl} alt={item.title} />}
       {item.sections?.length ? <div className="insight-sections">{item.sections.map((section, index) => <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p></section>)}</div> : <p>{item.body || "正在解析内容"}</p>}
@@ -701,7 +701,7 @@ function GpuPanel({ runtime }: { runtime: RuntimeHealth | null }) {
   const metadata = runtime?.worker?.model_metadata ?? {};
   const gpu = metadata.gpu && typeof metadata.gpu === "object" ? metadata.gpu as Record<string, unknown> : {};
   const online = runtime?.worker?.online === true;
-  const queued = runtime?.model_queue?.queued ?? 0;
+  const queued = (runtime?.model_queue?.queued ?? 0) + (runtime?.model_queue?.leased ?? 0);
   const tone = !online ? "red" : queued > 0 ? "yellow" : "green";
   const number = (key: string) => typeof gpu[key] === "number" ? gpu[key] as number : null;
   const utilization = number("utilization_percent");
@@ -717,7 +717,7 @@ function GpuPanel({ runtime }: { runtime: RuntimeHealth | null }) {
         <span><b>{number("power_w") === null ? "--" : `${number("power_w")} W`}</b>功耗</span>
         <span><b>{number("temperature_c") === null ? "--" : `${number("temperature_c")}°C`}</b>温度</span>
       </div>
-      <p>{String(metadata.llm_provider ?? "模型等待连接")} · 队列 {queued}</p>
+      <p>{String(metadata.llm_provider ?? "模型等待连接")} · 任务 {queued}（排队 {runtime?.model_queue?.queued ?? 0} · 执行中 {runtime?.model_queue?.leased ?? 0}）</p>
     </section>
   );
 }
@@ -881,8 +881,14 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   useEffect(() => {
     if (recordingStatus?.lease?.holder !== "other") return;
     const timer = window.setInterval(() => setStatusClock((current) => current + 1_000), 1_000);
-    return () => window.clearInterval(timer);
-  }, [recordingStatus?.lease?.holder]);
+    const expiresAt = recordingStatus.lease?.expires_at;
+    const serverTime = recordingStatus.server_time;
+    const untilExpiry = expiresAt && serverTime
+      ? Math.max(1_000, new Date(expiresAt).getTime() - new Date(serverTime).getTime() + 250)
+      : 10_000;
+    const refreshTimer = window.setTimeout(() => void refreshRecordingStatus(), untilExpiry);
+    return () => { window.clearInterval(timer); window.clearTimeout(refreshTimer); };
+  }, [recordingStatus?.lease?.holder, recordingStatus?.lease?.expires_at, recordingStatus?.server_time, refreshRecordingStatus]);
 
   useEffect(() => {
     void api.readWeaveStatus(project.id).then(setReadWeave).catch(() => setReadWeave(null));
@@ -1198,7 +1204,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       ? "这是同一课程会话；开始后再次进入会回到这里，不会覆盖已有历史。"
       : "录音已进入收尾或完成阶段；历史内容按时间戳保留，不能重新打开并覆盖本次会话。";
   const readWeaveTone = !readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : readWeave.syncing > 0 || readWeave.queued > 0 ? "yellow" : "green";
-  const modelQueueDepth = runtime?.model_queue?.queued ?? 0;
+  const modelQueueDepth = (runtime?.model_queue?.queued ?? 0) + (runtime?.model_queue?.leased ?? 0);
   const modelStatusTone = summaryRetryable ? "red" : modelQueueDepth > 0 ? "yellow" : "green";
   const section = routeSelection().section;
   const readWeaveNodeType = section === "user-notes" ? "user_notes" : section;

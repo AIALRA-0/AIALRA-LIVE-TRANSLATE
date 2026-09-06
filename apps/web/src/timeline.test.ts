@@ -90,6 +90,17 @@ describe("timeline mapping", () => {
     expect(item.body).toContain("请重新上传后再确认排队");
   });
 
+  it("shows only the latest active model stage and removes it after completion", () => {
+    const loading = event("model.job.stage", { job_id: "job-1", stage: "model_loading" });
+    const inferring = { ...event("model.job.stage", { job_id: "job-1", stage: "inferring", elapsed_ms: 12_000 }), event_id: "evt-inferring" };
+    const active = buildCourseDocument([loading, inferring]);
+    expect(active).toHaveLength(1);
+    expect(active[0]?.title).toBe("模型正在推理");
+    expect(active[0]?.body).toContain("12 秒");
+    const completed = { ...event("model.job.completed", { job_id: "job-1" }), event_id: "evt-completed" };
+    expect(buildCourseDocument([loading, inferring, completed])).toHaveLength(0);
+  });
+
   it("keeps summary terminology visible as a separate readable line", () => {
     const [item] = buildCourseDocument([event("session.summary.created", {
       summary_id: "summary-1",

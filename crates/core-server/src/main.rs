@@ -212,6 +212,7 @@ async fn main() -> Result<()> {
         .route("/workers/heartbeat", post(jobs::worker_heartbeat))
         .route("/jobs/lease", post(jobs::lease_job))
         .route("/jobs/{job_id}/renew", post(jobs::renew_job))
+        .route("/jobs/{job_id}/stage", post(jobs::stage_job))
         .route("/jobs/{job_id}/input", get(jobs::job_input))
         .route("/jobs/{job_id}/complete", post(jobs::complete_job))
         .route("/jobs/{job_id}/fail", post(jobs::fail_job));

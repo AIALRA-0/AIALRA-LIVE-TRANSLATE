@@ -44,6 +44,14 @@ pub struct WorkerRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct StageRequest {
+    worker_id: String,
+    stage: String,
+    #[serde(default)]
+    elapsed_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CompleteRequest {
     worker_id: String,
     /// The worker must echo the durable job key so a stale or cross-job result
@@ -195,6 +203,48 @@ pub async fn renew_job(
         ));
     }
     Ok(Json(json!({"renewed": true})))
+}
+
+pub async fn stage_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Json(request): Json<StageRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers)?;
+    validate_worker_id(&request.worker_id)?;
+    let stage = validate_model_stage(&request.stage)?;
+    if request.elapsed_ms.is_some_and(|value| value > 900_000) {
+        return Err(ApiError::bad_request("model stage timing is out of bounds"));
+    }
+    let job = state
+        .store
+        .get_model_job(&job_id)?
+        .ok_or_else(|| ApiError::not_found("model job not found"))?;
+    if job.status != "leased" || job.lease_owner.as_deref() != Some(&request.worker_id) {
+        return Err(ApiError::conflict(
+            "model job stage is not leased to this worker",
+        ));
+    }
+    let mut payload = json!({
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "stage": stage,
+    });
+    if let Some(elapsed_ms) = request.elapsed_ms {
+        payload["elapsed_ms"] = json!(elapsed_ms);
+    }
+    let _ = state.emit_idempotent(
+        &format!("{}:stage:{}:{}", job.id, job.attempts, stage),
+        &job.session_id,
+        "model_scheduler",
+        "model.job.stage",
+        0,
+        &job.id,
+        None,
+        payload,
+    );
+    Ok(Json(json!({"accepted": true})))
 }
 
 pub async fn job_input(
@@ -1323,6 +1373,13 @@ fn validate_error_stage(value: Option<&str>) -> Result<Option<&str>, ApiError> {
     }
 }
 
+fn validate_model_stage(value: &str) -> Result<&str, ApiError> {
+    match value {
+        value @ ("model_loading" | "inferring" | "retrying" | "committing") => Ok(value),
+        _ => Err(ApiError::bad_request("model stage is invalid")),
+    }
+}
+
 fn validate_diagnostic_id(value: Option<&str>) -> Result<Option<&str>, ApiError> {
     match value {
         None => Ok(None),
@@ -1347,7 +1404,7 @@ mod tests {
         PARAGRAPH_HARD_SEGMENTS, asr_initial_prompt, enqueue_summary, evenly_sample,
         join_caption_fragments, languages_match_for_translation,
         maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, require_provider,
-        sample_with_boundaries, validate_diagnostic_id, validate_error_stage,
+        sample_with_boundaries, validate_diagnostic_id, validate_error_stage, validate_model_stage,
     };
     use crate::app::AppState;
     use aialra_event_store::NewSession;
@@ -1391,6 +1448,14 @@ mod tests {
         assert!(validate_error_stage(Some("provider_response_invalid")).is_err());
         assert!(validate_diagnostic_id(Some("diag_0123456789ABCDEf")).is_err());
         assert!(validate_diagnostic_id(Some("diag_0123")).is_err());
+    }
+
+    #[test]
+    fn model_stage_validation_is_bounded_and_stable() {
+        for stage in ["model_loading", "inferring", "retrying", "committing"] {
+            assert_eq!(validate_model_stage(stage).unwrap(), stage);
+        }
+        assert!(validate_model_stage("provider_response").is_err());
     }
 
     #[test]

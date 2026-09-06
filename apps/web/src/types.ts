@@ -198,6 +198,7 @@ export interface TimelineItem {
   evidenceIds: string[];
   occurredAt: string;
   provider?: string;
+  statusTone?: "neutral" | "warning";
   imageUrl?: string;
   original?: string;
   translation?: string;

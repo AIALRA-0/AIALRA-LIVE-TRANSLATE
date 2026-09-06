@@ -47,7 +47,7 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
       forbidden: "当前账号没有执行此操作的权限",
       bad_request: "请求内容不完整或已失效，请检查后重试",
       not_found: "目标内容不存在，可能已被移动或删除",
-      conflict: "当前操作与另一台设备或后台处理冲突，请稍后重试",
+      conflict: "当前操作暂时未完成，请先查看页面状态后重试",
       recording_lease_conflict: "这个项目当前由另一台设备录音，请等待停止或租约到期后重试",
       recording_lease_expired: "本机录音租约已到期，未确认音频仍保留；请重新检查状态后继续",
       recording_capacity_unavailable: "GPU 正在处理已有课程，新项目暂时不能开始录音，请稍后重试",
