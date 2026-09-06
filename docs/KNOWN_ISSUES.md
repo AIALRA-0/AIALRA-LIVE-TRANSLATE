@@ -2,7 +2,7 @@
 
 ## 2026-09-05 当前线上边界（最高优先级）
 
-- 当前运行版本为 `quality-v29-20260905-87c86f1`，运行代码 SHA、发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 均为 `87c86f1fba18d8cba2cb71bc759f299dae89087f`。Core healthy、restart count 为 `0`，GPU Worker 在线且 ASR/LLM provider 为 CUDA，活动租约和模型队列均为 `0`。
+- 当前运行版本为 `quality-v29-20260905-87c86f1`，运行代码 SHA、发布目录 `BUILD_ID`、Core `build_id` 和 OCI revision 均为 `87c86f1fba18d8cba2cb71bc759f299dae89087f`。其后的 `main` 提交仅为状态文档，不代表线上运行代码变化。Core healthy、restart count 为 `0`，GPU Worker 在线且 ASR/LLM provider 为 CUDA，活动租约和模型队列均为 `0`。
 - 本次生产合成冒烟已证明租约冲突、durable ACK、字幕、译文、材料自动讲解、安全停止、ReadWeave 读回和队列排空可运行；它没有证明真实课程的词错率、翻译准确性、总结质量或“难以阅读”的主观体验已经解决。
 - 真实用户课程仍需重点观察模型端到端延迟、ASR 识别率、跨语言逻辑、停止后的可见状态、知识补充清晰度和总结质量。当前没有带人工参考答案的自动质量基准，不可从合成冒烟反推这些指标。
 - 自动滚动、文档滚动边界、同语言翻译契约和屏幕唤醒锁已有代码与快速测试覆盖；真实浏览器/操作系统是否按预期表现仍需实际课程确认，尤其是 macOS 麦克风切换和浏览器 Wake Lock。

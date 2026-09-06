@@ -6,7 +6,7 @@
 
 | 范围 | 结果 | 证据摘要 |
 |---|---|---|
-| GitHub/main | 通过 | 本地和远端 `main` 为 `87c86f1fba18d8cba2cb71bc759f299dae89087f`，工作树干净，无短期分支 |
+| GitHub/main | 通过 | `main` 包含运行代码提交 `87c86f1fba18d8cba2cb71bc759f299dae89087f`；其后的提交仅为本次脱敏状态文档，工作树干净，无短期分支 |
 | 本地快速检查 | 通过 | Rust 66 项、Python Worker 33 项、Web 28 项；Clippy、格式、Worker Ruff/mypy、TypeScript、ESLint、生产构建、compileall、Node 语法和 `git diff --check` 通过 |
 | 本地容器 | 未使用 | 未启动 Docker、Docker Desktop 或 WSL；镜像只在 VPS 远端构建 |
 | 远端部署 | 通过 | `quality-v29-20260905-87c86f1` 构建并切换成功；部署器保留 v28 回滚资源和数据库/配置备份 |
