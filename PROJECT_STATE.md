@@ -2,7 +2,7 @@
 
 ## 0.0.8 2026-09-06 v31 专用实时模型接入与最小生产冒烟（当前线上）
 
-当前唯一有效线上快照：运行代码 SHA、GitHub `main`、发布目录 `BUILD_ID`、Core `build_id` 和容器 OCI revision 均为 `7e7df161934537fcbfddd04e7cb5f971481dbef9`；线上发布为 `quality-v31-20260906-7e7df16`。本次没有创建分支或 PR，也没有启动本地 Docker、Docker Desktop 或 WSL。
+当前唯一有效线上快照：线上运行代码 SHA、发布目录 `BUILD_ID`、Core `build_id` 和容器 OCI revision 均为 `7e7df161934537fcbfddd04e7cb5f971481dbef9`；线上发布为 `quality-v31-20260906-7e7df16`。部署完成后 `main` 只追加了本次脱敏状态文档，本次没有创建分支或 PR，也没有启动本地 Docker、Docker Desktop 或 WSL。
 
 实时模型组合已切换为 `Qwen/Qwen3-ASR-1.7B@cuda` 和 `tencent/HY-MT1.5-1.8B@cuda`。讲解和总结继续使用既有的本机 CUDA Ollama 路径。专用模型的首次加载会明显增加首个请求耗时，加载完成后进入热运行；GPU 不可用时不会静默回退到 CPU。
 

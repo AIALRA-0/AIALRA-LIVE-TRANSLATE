@@ -6,7 +6,7 @@
 
 | 范围 | 结果 | 证据摘要 |
 |---|---|---|
-| GitHub/main | 通过 | `main` 当前运行代码 SHA 为 `7e7df161934537fcbfddd04e7cb5f971481dbef9`，没有创建短期分支或 PR |
+| GitHub/main | 通过 | 运行代码基线 SHA 为 `7e7df161934537fcbfddd04e7cb5f971481dbef9`；部署后 `main` 只追加本次脱敏状态文档，没有创建短期分支或 PR |
 | 本地相关检查 | 通过 | Rust workspace、provider 回归测试、Clippy、格式检查和 `git diff --check` 通过；专用模型和 Web/Python 检查沿用前一提交已通过结果 |
 | 本地容器 | 未使用 | 未启动 Docker、Docker Desktop 或 WSL；Core 镜像只在 VPS 远端构建 |
 | 远端部署 | 通过 | 发布为 `quality-v31-20260906-7e7df16`，旧版本和数据库/配置备份保留 |
