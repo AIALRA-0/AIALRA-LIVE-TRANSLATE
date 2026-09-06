@@ -1,5 +1,15 @@
 # AIALRA-LIVE-TRANSLATE 项目状态
 
+## 0.0.9 2026-09-06 翻译稳定性与 GPU 调度修复（已推送，待部署）
+
+本批运行代码已直接提交并推送到 GitHub `main`，SHA 为 `bfe40be9383b343dc4a3ffac8ee23474ff1394ca`。线上仍是上一版 `quality-v31-20260906-7e7df16`，本批尚未远程部署，因此不能把下面的本地结果当成线上结果。
+
+本批针对最新课程反馈收敛了四个根因：翻译 HTTP／Provider 失败不再把已经保存的录音和稳定段落标成整节课程失败；自动识别会把 ASR 返回的语言归一化并按段落传给翻译，中文、英文、日文混合内容不再统一按固定源语言处理；翻译结果会清理泄漏的源语言、目标语言、术语和翻译标签；讲解改为“段落总结＋知识补充”，移除疑似听写、复习问题和置信度展示，并在右侧按当前可见段落切换。
+
+录音中、收尾中和处理中状态统一使用黄色，红色只表示失败或不可继续。GPU Agent 的生产默认调度改为 ASR 与翻译／Ollama 不重叠，翻译仍有独立优先级并避免长期被 ASR 饥饿；安装脚本和启动脚本都把重叠设为显式 opt-in。这个门只覆盖 AIALRA 自己的任务通道，当前工作区没有 Paneltone 的进程或代码，不能据此宣称已经完成两个产品之间的主机级互斥。
+
+本地验证已通过：Rust workspace 测试、Clippy、格式检查，Model Worker 与 GPU Agent 共 41 项测试、Ruff、mypy，Web 33 项测试、TypeScript、ESLint、生产构建、PowerShell 语法解析和 `git diff --check`。没有启动本地 Docker、Docker Desktop 或 WSL。下一步只有远程部署该 SHA 后做健康核对和一次生产最小冒烟，再交给用户真实体验；专用模型质量、真实课程延迟、Paneltone 外部协调和长期稳定性仍不能由本地测试代替。
+
 ## 0.0.8 2026-09-06 v31 专用实时模型接入与最小生产冒烟（当前线上）
 
 当前唯一有效线上快照：线上运行代码 SHA、发布目录 `BUILD_ID`、Core `build_id` 和容器 OCI revision 均为 `7e7df161934537fcbfddd04e7cb5f971481dbef9`；线上发布为 `quality-v31-20260906-7e7df16`。部署完成后 `main` 只追加了本次脱敏状态文档，本次没有创建分支或 PR，也没有启动本地 Docker、Docker Desktop 或 WSL。
