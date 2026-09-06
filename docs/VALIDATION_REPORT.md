@@ -1,5 +1,36 @@
 # AIALRA-LIVE-TRANSLATE 验证报告
 
+## 2026-09-05 v29 最终重部署与新 Worker 生产冒烟
+
+状态：已部署，健康门通过，生产合成冒烟通过。
+
+| 范围 | 结果 | 证据摘要 |
+|---|---|---|
+| GitHub/main | 通过 | 本地和远端 `main` 为 `87c86f1fba18d8cba2cb71bc759f299dae89087f`，工作树干净，无短期分支 |
+| 本地快速检查 | 通过 | Rust 66 项、Python Worker 33 项、Web 28 项；Clippy、格式、Worker Ruff/mypy、TypeScript、ESLint、生产构建、compileall、Node 语法和 `git diff --check` 通过 |
+| 本地容器 | 未使用 | 未启动 Docker、Docker Desktop 或 WSL；镜像只在 VPS 远端构建 |
+| 远端部署 | 通过 | `quality-v29-20260905-87c86f1` 构建并切换成功；部署器保留 v28 回滚资源和数据库/配置备份 |
+| SHA 追溯 | 通过 | 发布目录 `BUILD_ID`、Core `build_id`、OCI revision 和 GitHub `main` 完全一致 |
+| Core 健康 | 通过 | `running/healthy`，restart count `0`，数据库可读，活动租约 `0`，模型队列 `queued=0`/`leased=0` |
+| GPU Worker | 通过 | Worker 在线；ASR `faster-whisper:small@cuda`，LLM `ollama:qwen2.5:7b-instruct@cuda` |
+| 公网边界 | 通过 | 未认证健康入口 `302` 进入 Authentik；公网 `/internal/` `404` |
+| 录音与 ACK | 通过 | 21/21 合成音频块收到 durable ACK，全部含 `commit_id`；同项目第二设备 `409` |
+| 模型结果 | 通过 | 产生 6 条稳定字幕、2 条稳定译文；本次无新增最终模型失败 |
+| 材料与讲解 | 通过 | 1 页材料抽取、1 张自动讲解卡，确认后自动进入讲解链路 |
+| 停止与读回 | 通过 | 安全停止、会话结果读取、ReadWeave 可读、队列排空通过 |
+| 测试工具租约 | 已修正 | 原工具等待异步讲解时未续租；已补 10 秒续租并重新部署，修复后冒烟约 73 秒通过 |
+
+### 本次结论
+
+当前 v29 可以交给用户真实使用，不能据此宣称真实课程质量或长期稳定性已经完成验收。模型延迟、ASR 识别率、翻译准确性/可读性、知识补充清晰度、总结质量、真实滚动和屏幕常亮，必须由用户带真实课程继续验证；后续只修复可复现的 P0/P1。
+
+### 验证缺口
+
+- 没有人工参考转写和参考译文，无法计算词错率、翻译准确率或总结覆盖率。
+- 合成冒烟没有替代真实麦克风、真实课程时长、真实浏览器操作或 macOS 设备切换。
+- 6 小时/24 小时门禁、Android 真机矩阵和 Windows 崩溃调查按本轮边界未执行。
+- 全仓库 Ruff 的既有单点规则问题和全仓库 pytest 的环境插件缺失已单独记录，未扩大本轮范围。
+
 ## 2026-09-05 体验收敛修复与生产冒烟
 
 状态：已提交、已远端部署并通过最小生产冒烟。
