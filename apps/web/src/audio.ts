@@ -31,17 +31,66 @@ function writeU64(view: DataView, offset: number, value: number): void {
 }
 
 export function resample(input: Float32Array, sourceRate: number): Float32Array {
-  if (sourceRate === TARGET_SAMPLE_RATE) return input;
-  const ratio = sourceRate / TARGET_SAMPLE_RATE;
-  const output = new Float32Array(Math.max(1, Math.floor(input.length / ratio)));
-  for (let index = 0; index < output.length; index += 1) {
-    const sourceIndex = index * ratio;
-    const left = Math.floor(sourceIndex);
-    const right = Math.min(left + 1, input.length - 1);
-    const fraction = sourceIndex - left;
-    output[index] = input[left] * (1 - fraction) + input[right] * fraction;
-  }
+  const streaming = new StreamingResampler(sourceRate);
+  const outputParts = [streaming.push(input), streaming.flush()];
+  const output = new Float32Array(outputParts[0].length + outputParts[1].length);
+  output.set(outputParts[0]);
+  output.set(outputParts[1], outputParts[0].length);
   return output;
+}
+
+// AudioWorklet delivers many short blocks.  Keeping the interpolation phase and
+// the final source samples across blocks prevents each callback from dropping
+// its tail and restarting the resampler at zero.
+export class StreamingResampler {
+  private buffer = new Float32Array(0);
+  private sourcePosition = 0;
+
+  constructor(private readonly sourceRate: number) {}
+
+  push(input: Float32Array): Float32Array {
+    if (input.length === 0) return new Float32Array(0);
+    if (this.sourceRate === TARGET_SAMPLE_RATE) return input.slice();
+
+    const merged = new Float32Array(this.buffer.length + input.length);
+    merged.set(this.buffer);
+    merged.set(input, this.buffer.length);
+    this.buffer = merged;
+    const ratio = this.sourceRate / TARGET_SAMPLE_RATE;
+    const output: number[] = [];
+    while (this.sourcePosition + 1 < this.buffer.length) {
+      const left = Math.floor(this.sourcePosition);
+      const right = Math.min(left + 1, this.buffer.length - 1);
+      const fraction = this.sourcePosition - left;
+      output.push(this.buffer[left] * (1 - fraction) + this.buffer[right] * fraction);
+      this.sourcePosition += ratio;
+    }
+    this.compact();
+    return Float32Array.from(output);
+  }
+
+  flush(): Float32Array {
+    if (this.sourceRate === TARGET_SAMPLE_RATE || this.buffer.length === 0) {
+      return new Float32Array(0);
+    }
+    // Duplicate only the final sample as an interpolation endpoint.  This does
+    // not invent speech and lets the last real sample be emitted once.
+    const endpoint = new Float32Array([this.buffer[this.buffer.length - 1]]);
+    const output = this.push(endpoint);
+    this.buffer = new Float32Array(0);
+    this.sourcePosition = 0;
+    return output;
+  }
+
+  private compact(): void {
+    // Retain one source sample as the interpolation anchor for the next
+    // callback.  The next output position may already be past the current
+    // block, so dropping all floor(sourcePosition) samples would skip audio.
+    const consumed = Math.min(Math.floor(this.sourcePosition), Math.max(0, this.buffer.length - 1));
+    if (consumed === 0) return;
+    this.buffer = this.buffer.slice(consumed);
+    this.sourcePosition -= consumed;
+  }
 }
 
 export function encodeFrame(sequence: number, capturedAtMs: number, samples: Float32Array): ArrayBuffer {
@@ -262,6 +311,7 @@ export class BrowserCapture {
   private leaseGeneration = 0;
   private sampleChunks: Float32Array[] = [];
   private sampleCount = 0;
+  private resampler: StreamingResampler | null = null;
   private writeChain = Promise.resolve();
   private sourceId = "";
   private sequenceStorageKey = "";
@@ -314,6 +364,7 @@ export class BrowserCapture {
         }
       }
       this.context = new AudioContext({ latencyHint: "interactive" });
+      this.resampler = new StreamingResampler(this.context.sampleRate);
       const moduleUrl = workletModuleUrl();
       try {
         await this.context.audioWorklet.addModule(moduleUrl);
@@ -380,6 +431,7 @@ export class BrowserCapture {
     this.outputGain?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
     await this.context?.close();
+    this.appendSamples(this.resampler?.flush() ?? new Float32Array(0));
     if (this.sampleCount > 0) {
       const tail = this.takeSamples(this.sampleCount);
       this.writeChain = this.writeChain.then(() => this.queueFrame(tail));
@@ -438,6 +490,7 @@ export class BrowserCapture {
     this.outputGain = null;
     this.stream = null;
     this.context = null;
+    this.resampler = null;
     this.prepared = false;
   }
 
@@ -447,9 +500,14 @@ export class BrowserCapture {
 
   private acceptSamples(samples: Float32Array): void {
     if (this.stopped || this.stopping) return;
-    const resampled = resample(samples, this.context?.sampleRate ?? 48_000);
-    this.sampleChunks.push(resampled);
-    this.sampleCount += resampled.length;
+    const resampled = this.resampler?.push(samples) ?? resample(samples, this.context?.sampleRate ?? 48_000);
+    this.appendSamples(resampled);
+  }
+
+  private appendSamples(samples: Float32Array): void {
+    if (samples.length === 0) return;
+    this.sampleChunks.push(samples);
+    this.sampleCount += samples.length;
     while (this.sampleCount >= TARGET_SAMPLE_RATE) {
       const chunk = this.takeSamples(TARGET_SAMPLE_RATE);
       this.writeChain = this.writeChain.then(() => this.queueFrame(chunk));

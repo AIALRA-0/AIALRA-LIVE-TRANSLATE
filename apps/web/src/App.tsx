@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useReducer, useRef, useState } from 
 import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type RuntimeHealth } from "./api";
 import { BrowserCapture, listAudioInputs, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
 import { applySessionStateEvent } from "./sessionState";
-import { appendEvent } from "./timeline";
+import { appendEvent, isRenderableDocumentItem } from "./timeline";
 import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, RecordingProjectStatus, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
 import { canDropWorkspaceTarget, formatAudioInputLabel, formatLocalTimestamp, isFolderDescendant, isRecordingResumable, resumeSessionLabel, type WorkspaceDragTarget, type WorkspaceDropTarget } from "./uiState";
 
@@ -600,7 +600,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     <aside className={`workspace-sidebar ${mobileOpen ? "mobile-open" : ""}`} aria-label="课程工作区">
       <div className="workspace-brand"><span>A</span><div><strong>AIALRA</strong><small>课程工作区</small></div><button className="theme-toggle" aria-label={`切换到${theme === "light" ? "黑色" : "白色"}模式`} onClick={onToggleTheme}>{theme === "light" ? "◐ 黑色" : "◑ 白色"}</button><button className="mobile-tree-toggle" aria-expanded={mobileOpen} onClick={() => setMobileOpen((current) => !current)}>{mobileOpen ? "关闭课程树" : "打开课程树"}</button></div>
       <nav className="workspace-tree">
-        <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-label="打开设置和运行状态" onClick={onOpenSettings}>设置</button></div></div>
+        <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-haspopup="menu" aria-label="打开工作区新建菜单" onClick={(event) => showContextMenu(event, { entityType: "root" })}>新建</button><button aria-label="打开设置和运行状态" onClick={onOpenSettings}>设置</button></div></div>
         {dragging && <div className="drag-status" role="status" aria-live="polite"><strong>正在移动：{targetTitle(dragging)}</strong><span>{dropTarget ? `松开放入“${dropTargetTitle(dropTarget)}”` : "将光标移到高亮位置，再松开鼠标"}</span></div>}
         <ul className={currentDropIntent({ entityType: "root" }) ? "workspace-root-drop drop-target drop-root" : "workspace-root-drop"} onContextMenu={(event) => showContextMenu(event, { entityType: "root" })}>
           {snapshot.folders.filter((folder) => !folder.archived_at && folder.parent_id === null).map((folder) => renderFolder(folder, 0))}
@@ -1209,7 +1209,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const section = routeSelection().section;
   const readWeaveNodeType = section === "user-notes" ? "user_notes" : section;
   const readWeaveUrl = readWeave?.targets?.find((target) => target.local_id === `${session.id}:${section === "user-notes" ? "user" : section}` || (!section && target.node_type === "session" && target.local_id === session.id))?.note_url ?? readWeave?.note_url;
-  const visibleItems = timeline.items.filter((item) => {
+  const visibleItems = timeline.items.filter(isRenderableDocumentItem).filter((item) => {
     if (!section || section === "transcript") return section ? item.kind === "paragraph" : true;
     if (section === "overview") return item.kind === "session-summary";
     if (section === "explanations") return item.kind === "insight";

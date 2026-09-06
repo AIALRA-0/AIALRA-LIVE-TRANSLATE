@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendEvent, buildCourseDocument } from "./timeline";
+import { appendEvent, buildCourseDocument, isRenderableDocumentItem } from "./timeline";
 import type { EventEnvelope } from "./types";
 
 // Fixture creation keeps protocol metadata stable across reducer tests.
@@ -88,6 +88,15 @@ describe("timeline mapping", () => {
     expect(item.kind).toBe("status");
     expect(item.title).toBe("材料解析失败，讲解未执行");
     expect(item.body).toContain("请重新上传后再确认排队");
+  });
+
+  it("keeps processing statuses out of the course document", () => {
+    const [status] = buildCourseDocument([event("model.job.stage", { job_id: "job-1", stage: "inferring" })]);
+    const [paragraph] = buildCourseDocument([event("segment.finalized", { segment_id: "seg-1", text: "hello" })]);
+    expect(status.kind).toBe("status");
+    expect(isRenderableDocumentItem(status)).toBe(false);
+    expect(paragraph.kind).toBe("paragraph");
+    expect(isRenderableDocumentItem(paragraph)).toBe(true);
   });
 
   it("shows only the latest active model stage and removes it after completion", () => {

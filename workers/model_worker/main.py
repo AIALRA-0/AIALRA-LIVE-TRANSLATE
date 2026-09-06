@@ -70,16 +70,25 @@ SUMMARY_MAX_TOKENS = max(
     160, min(int(os.getenv("AIALRA_SUMMARY_MAX_TOKENS", "420")), 600)
 )
 VISION_MODEL = os.getenv("AIALRA_VISION_MODEL", "qwen3-vl:8b-instruct")
+ASR_PROVIDER = os.getenv("AIALRA_ASR_PROVIDER", "faster-whisper").strip().casefold()
 ASR_MODEL_NAME = os.getenv("AIALRA_ASR_MODEL", "small")
 ASR_DEVICE = os.getenv("AIALRA_ASR_DEVICE", "cuda")
 ASR_COMPUTE_TYPE = os.getenv("AIALRA_ASR_COMPUTE_TYPE", "float16")
 ASR_CPU_THREADS = max(0, min(32, int(os.getenv("AIALRA_ASR_CPU_THREADS", "12"))))
 ASR_BEAM_SIZE = max(1, min(5, int(os.getenv("AIALRA_ASR_BEAM_SIZE", "3"))))
 ASR_BEST_OF = max(1, min(5, int(os.getenv("AIALRA_ASR_BEST_OF", str(ASR_BEAM_SIZE)))))
+TRANSLATION_PROVIDER = os.getenv("AIALRA_TRANSLATION_PROVIDER", "ollama").strip().casefold()
+HYMT_MODEL = os.getenv("AIALRA_HYMT_MODEL", "tencent/HY-MT1.5-1.8B")
+HYMT_DEVICE = os.getenv("AIALRA_HYMT_DEVICE", "cuda")
 LLM_DEVICE = os.getenv("AIALRA_LLM_DEVICE", "cuda")
 
 _asr_model: Any | None = None
 _asr_lock = threading.Lock()
+_qwen_asr_model: Any | None = None
+_qwen_asr_lock = threading.Lock()
+_hymt_tokenizer: Any | None = None
+_hymt_model: Any | None = None
+_hymt_lock = threading.Lock()
 
 
 class HealthResponse(BaseModel):
@@ -93,6 +102,8 @@ class HealthResponse(BaseModel):
     asr_provider: str
     asr_cpu_threads: int
     llm_provider: str
+    translation_available: bool
+    translation_provider: str
 
 
 class AsrRequest(BaseModel):
@@ -231,20 +242,23 @@ class AssetParseResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    """The core can keep recording when Ollama or faster-whisper is unavailable."""
+    """Health proves configured imports without loading large model weights."""
 
-    asr_available = _faster_whisper_importable()
+    asr_available = _configured_asr_importable()
     ollama_available = await _ollama_available()
     ollama_gpu_resident = await _ollama_gpu_resident()
+    translation_available = _configured_translation_importable()
     return HealthResponse(
-        status="ok" if asr_available and ollama_available else "degraded",
+        status="ok" if asr_available and ollama_available and translation_available else "degraded",
         asr_available=asr_available,
         ollama_available=ollama_available,
         ollama_gpu_resident=ollama_gpu_resident,
         model=OLLAMA_MODEL,
-        asr_provider=f"faster-whisper:{ASR_MODEL_NAME}@{ASR_DEVICE}",
+        asr_provider=_asr_provider_name(),
         asr_cpu_threads=ASR_CPU_THREADS,
         llm_provider=f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}",
+        translation_available=translation_available,
+        translation_provider=_translation_provider_name(),
     )
 
 
@@ -252,8 +266,8 @@ async def health() -> HealthResponse:
 async def transcribe(request: AsrRequest) -> AsrResponse:
     """ASR runs in a worker thread so model inference never blocks the HTTP event loop."""
 
-    if not _faster_whisper_importable():
-        raise HTTPException(status_code=503, detail="faster-whisper speech extra is unavailable")
+    if not _configured_asr_importable():
+        raise HTTPException(status_code=503, detail="configured ASR provider is unavailable")
     try:
         pcm_bytes = base64.b64decode(request.pcm_s16le_base64, validate=True)
     except ValueError as error:
@@ -261,24 +275,65 @@ async def transcribe(request: AsrRequest) -> AsrResponse:
     if len(pcm_bytes) % 2:
         raise HTTPException(status_code=400, detail="PCM must contain complete 16-bit samples")
     audio = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
-    return await asyncio.to_thread(_transcribe_sync, audio, request)
+    try:
+        return await asyncio.to_thread(_transcribe_sync, audio, request)
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        raise HTTPException(status_code=503, detail="configured ASR provider failed") from error
 
 
 @app.post("/v1/translate", response_model=TranslationResponse)
 async def translate(request: TranslationRequest) -> TranslationResponse:
-    """A translation is accepted only when the configured local Ollama model returns valid JSON."""
+    """Use the configured dedicated translator while keeping the old Ollama path available."""
+
+    source_language = request.source_language.casefold().replace("_", "-")
+    target_language = request.target_language.casefold().replace("_", "-")
+    if (
+        source_language.split("-", 1)[0] == target_language.split("-", 1)[0]
+        and source_language not in {"auto", "mixed", "zh-en"}
+    ):
+        return TranslationResponse(
+            source_text=request.text,
+            text=request.text,
+            provider=f"identity:{source_language}@cpu",
+        )
+
+    if TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"}:
+        if not _configured_translation_importable():
+            raise HTTPException(
+                status_code=503, detail="configured translation provider is unavailable"
+            )
+        try:
+            translation_text = await asyncio.to_thread(_translate_hymt_sync, request)
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            raise HTTPException(
+                status_code=503, detail="dedicated translation provider failed"
+            ) from error
+        if not _translation_text_contract_ok(
+            translation_text, request.source_language, request.target_language
+        ):
+            raise HTTPException(status_code=503, detail="dedicated translation result is invalid")
+        return TranslationResponse(
+            source_text=request.text,
+            text=translation_text,
+            provider=_translation_provider_name(),
+        )
 
     glossary_lines = [
         f"{item.source} => {item.source if item.do_not_translate else item.preferred}"
         for item in request.glossary
     ]
     system = (
-        "You clean and translate one provisional ASR lecture paragraph. Return JSON only. "
-        "source_text must stay in the source language: restore punctuation and casing, join "
-        "clearly split clauses, and remove only immediate accidental repetition from adjacent "
-        "ASR windows. Never paraphrase, translate, invent, or remove meaning in source_text. "
-        "translation must be one natural, meaning-based target-language paragraph that preserves "
-        "the cleaned source's logical connections without adding facts. "
+        "You clean and translate one provisional ASR lecture paragraph. Return exactly one JSON "
+        "object with only source_text and translation. The source_text field is a cleaned copy "
+        "of the input Text in the source language; it is never a translation. Restore punctuation "
+        "and casing, join clearly split clauses, and remove only immediate accidental repetition "
+        "from adjacent ASR windows. Never paraphrase, translate, invent, or remove meaning in "
+        "source_text. The translation field is one natural, meaning-based paragraph in the target "
+        "language that preserves the cleaned source's logical connections without adding facts. "
+        "For an English-to-Chinese request, source_text must remain English and only translation "
+        "may be Chinese. For any other language pair, apply the same rule: never put "
+        "target-language "
+        "text in source_text. "
         "Context is previous-course context for terminology "
         "and pronoun resolution only: never translate, quote, or repeat Context. "
         "Preserve formulas, code, model numbers, and do-not-translate terms. "
@@ -307,6 +362,12 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
         model=TRANSLATION_MODEL,
         timeout_seconds=45.0,
         attempts=2,
+        repair_instruction=(
+            f"This is a {request.source_language}-to-{request.target_language} request. "
+            "The previous JSON was rejected because source_text was not in the source language "
+            "or was identical to translation. Copy and clean the input Text into source_text; "
+            "translate only the translation field. Do not put target-language text in source_text."
+        ),
         accept=lambda payload: _translation_contract_ok(
             payload, request.source_language, request.target_language
         ),
@@ -315,7 +376,7 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
         return TranslationResponse(
             source_text=str(result["source_text"]).strip(),
             text=str(result["translation"]).strip(),
-            provider=f"ollama:{TRANSLATION_MODEL}@{LLM_DEVICE}",
+            provider=_translation_provider_name(),
         )
     raise HTTPException(status_code=503, detail="local Ollama translation is unavailable")
 
@@ -525,7 +586,7 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
 
     await _unload_ollama_model(VISION_MODEL)
     await _unload_ollama_model(EXPLANATION_MODEL)
-    if SUMMARY_MODEL != TRANSLATION_MODEL:
+    if TRANSLATION_PROVIDER == "ollama" and SUMMARY_MODEL != TRANSLATION_MODEL:
         # Remove the resident realtime model before loading 14B.  Relying on
         # Ollama's eviction heuristics made the one-shot path sensitive to the
         # exact lecture history and left too little headroom for CUDA ASR.
@@ -662,6 +723,54 @@ def _faster_whisper_importable() -> bool:
     return True
 
 
+def _qwen_asr_importable() -> bool:
+    """The dedicated ASR package is optional so the legacy provider remains usable."""
+
+    try:
+        import qwen_asr  # noqa: F401
+        import torch
+    except ImportError:
+        return False
+    return ASR_DEVICE.casefold() != "cuda" or bool(torch.cuda.is_available())
+
+
+def _configured_asr_importable() -> bool:
+    """Check only the selected provider and its execution device."""
+
+    if ASR_PROVIDER in {"qwen3-asr", "qwen_asr", "qwen3_asr"}:
+        return _qwen_asr_importable()
+    return _faster_whisper_importable()
+
+
+def _hymt_importable() -> bool:
+    """Check the dedicated translation runtime without downloading model weights."""
+
+    try:
+        import torch
+        import transformers  # noqa: F401
+    except ImportError:
+        return False
+    return HYMT_DEVICE.casefold() != "cuda" or bool(torch.cuda.is_available())
+
+
+def _configured_translation_importable() -> bool:
+    if TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"}:
+        return _hymt_importable()
+    return True
+
+
+def _asr_provider_name() -> str:
+    if ASR_PROVIDER in {"qwen3-asr", "qwen_asr", "qwen3_asr"}:
+        return f"qwen3-asr:{ASR_MODEL_NAME}@{ASR_DEVICE}"
+    return f"faster-whisper:{ASR_MODEL_NAME}@{ASR_DEVICE}"
+
+
+def _translation_provider_name() -> str:
+    if TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"}:
+        return f"hy-mt:{HYMT_MODEL}@{HYMT_DEVICE}"
+    return f"ollama:{TRANSLATION_MODEL}@{LLM_DEVICE}"
+
+
 def _get_asr_model() -> Any:
     """One lazy model instance preserves VRAM and serializes first-load races."""
 
@@ -679,8 +788,80 @@ def _get_asr_model() -> Any:
         return _asr_model
 
 
+def _qwen_language(language: str) -> str | None:
+    """Qwen3-ASR accepts English language names rather than ISO language tags."""
+
+    normalized = language.casefold().replace("_", "-")
+    if normalized in {"auto", "mixed", "zh-en"}:
+        return None
+    base = normalized.split("-", 1)[0]
+    names = {
+        "zh": "Chinese",
+        "en": "English",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "pt": "Portuguese",
+        "ru": "Russian",
+        "ar": "Arabic",
+        "it": "Italian",
+        "nl": "Dutch",
+        "hi": "Hindi",
+    }
+    return names.get(base, language)
+
+
+def _get_qwen_asr_model() -> Any:
+    """Load one serialized Qwen3-ASR instance and require CUDA when configured."""
+
+    global _qwen_asr_model
+    with _qwen_asr_lock:
+        if _qwen_asr_model is None:
+            import torch
+            from qwen_asr import Qwen3ASRModel
+
+            if ASR_DEVICE.casefold() == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError("Qwen3-ASR CUDA is unavailable")
+            _qwen_asr_model = Qwen3ASRModel.from_pretrained(
+                ASR_MODEL_NAME,
+                dtype=torch.bfloat16 if ASR_DEVICE.casefold() == "cuda" else torch.float32,
+                device_map="cuda:0" if ASR_DEVICE.casefold() == "cuda" else "cpu",
+                max_inference_batch_size=1,
+                max_new_tokens=256,
+            )
+        return _qwen_asr_model
+
+
+def _transcribe_qwen_sync(
+    audio: npt.NDArray[np.float32], request: AsrRequest
+) -> AsrResponse:
+    model = _get_qwen_asr_model()
+    result = model.transcribe(
+        audio=(audio, request.sample_rate),
+        language=_qwen_language(request.language),
+        context="",
+        return_time_stamps=False,
+    )
+    first = result[0] if result else None
+    if first is None or not str(getattr(first, "text", "")).strip():
+        raise RuntimeError("Qwen3-ASR returned no transcript")
+    duration_ms = int(len(audio) * 1_000 / request.sample_rate)
+    return AsrResponse(
+        text=str(first.text).strip(),
+        language=str(getattr(first, "language", None) or request.language),
+        confidence=0.0,
+        duration_ms=duration_ms,
+        provider=_asr_provider_name(),
+    )
+
+
 def _transcribe_sync(audio: npt.NDArray[np.float32], request: AsrRequest) -> AsrResponse:
     """A bounded four-second window produces a stable bootstrap segment."""
+
+    if ASR_PROVIDER in {"qwen3-asr", "qwen_asr", "qwen3_asr"}:
+        return _transcribe_qwen_sync(audio, request)
 
     model = _get_asr_model()
     language = None if request.language in {"auto", "mixed", "zh-en"} else request.language
@@ -703,8 +884,100 @@ def _transcribe_sync(audio: npt.NDArray[np.float32], request: AsrRequest) -> Asr
         language=str(getattr(info, "language", language or "unknown")),
         confidence=confidence,
         duration_ms=duration_ms,
-        provider=f"faster-whisper:{ASR_MODEL_NAME}@{ASR_DEVICE}",
+        provider=_asr_provider_name(),
     )
+
+
+def _get_hymt_runtime() -> tuple[Any, Any]:
+    """Load HY-MT lazily so ordinary health checks never allocate model memory."""
+
+    global _hymt_model, _hymt_tokenizer
+    with _hymt_lock:
+        if _hymt_model is None or _hymt_tokenizer is None:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+
+            if HYMT_DEVICE.casefold() == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError("HY-MT CUDA is unavailable")
+            _hymt_tokenizer = AutoTokenizer.from_pretrained(HYMT_MODEL)  # type: ignore[no-untyped-call]
+            _hymt_model = AutoModelForCausalLM.from_pretrained(
+                HYMT_MODEL,
+                dtype=torch.bfloat16 if HYMT_DEVICE.casefold() == "cuda" else torch.float32,
+                device_map="cuda:0" if HYMT_DEVICE.casefold() == "cuda" else "cpu",
+                low_cpu_mem_usage=True,
+            )
+        return _hymt_tokenizer, _hymt_model
+
+
+def _translate_hymt_sync(request: TranslationRequest) -> str:
+    """Generate one plain translation and keep provider output out of ordinary logs."""
+
+    import torch
+
+    tokenizer, model = _get_hymt_runtime()
+    glossary = "; ".join(
+        f"{item.source} => {item.source if item.do_not_translate else item.preferred}"
+        for item in request.glossary
+    )
+    context = " | ".join(request.context[-3:])
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a professional simultaneous lecture translator. Return only the target "
+                "translation, with no labels, explanations, notes, or markdown. Preserve every "
+                "fact, number, unit, name, negation, condition, formula, and uncertainty. "
+                "Do not summarize or add information."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Source language: {request.source_language}\n"
+                f"Target language: {request.target_language}\n"
+                f"Terminology: {glossary}\n"
+                f"Previous context for terminology only: {context}\n"
+                f"Text to translate:\n{request.text}"
+            ),
+        },
+    ]
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    )
+    device = getattr(model, "device", None)
+    if device is None:
+        device = torch.device("cuda:0" if HYMT_DEVICE.casefold() == "cuda" else "cpu")
+    inputs = inputs.to(device)
+    with torch.inference_mode():
+        generated = model.generate(
+            inputs,
+            max_new_tokens=512,
+            do_sample=False,
+            num_beams=1,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    output = str(
+        tokenizer.decode(generated[0, inputs.shape[1] :], skip_special_tokens=True)
+    ).strip()
+    for prefix in ("Translation:", "翻译：", "翻译:"):
+        if output.startswith(prefix):
+            output = output[len(prefix) :].strip()
+    return output
+
+
+def _translation_text_contract_ok(text: str, source_language: str, target_language: str) -> bool:
+    if not text.strip():
+        return False
+    source_normalized = source_language.casefold().replace("_", "-")
+    target_normalized = target_language.casefold().replace("_", "-")
+    if source_normalized in {"auto", "mixed", "zh-en"}:
+        return True
+    if source_normalized.split("-", 1)[0] == target_normalized.split("-", 1)[0]:
+        return True
+    return _language_matches(text, target_language)
 
 
 async def _ollama_available() -> bool:
@@ -763,6 +1036,7 @@ async def _ollama_json(
     timeout_seconds: float = 90.0,
     attempts: int = 2,
     num_ctx: int | None = None,
+    repair_instruction: str | None = None,
 ) -> dict[str, Any] | None:
     """Ollama receives only text already allowed by the local session policy."""
 
@@ -771,7 +1045,8 @@ async def _ollama_json(
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:
                 repair = (
                     "\nThe prior response was invalid. Return exactly the requested JSON shape "
-                    "with every required field populated."
+                    "with every required field populated. "
+                    f"{repair_instruction or ''}"
                     if attempt
                     else ""
                 )
@@ -826,6 +1101,8 @@ async def _unload_ollama_model(model: str) -> None:
 async def _restore_realtime_translation_model(background_model: str) -> None:
     """Restore the low-latency model before a background lane releases its lock."""
 
+    if TRANSLATION_PROVIDER != "ollama":
+        return
     if background_model == TRANSLATION_MODEL:
         return
     await _unload_ollama_model(background_model)
@@ -908,7 +1185,7 @@ async def _parse_image_with_vlm(data: bytes) -> AssetParseResponse:
         image.verify()
     await _unload_ollama_model(EXPLANATION_MODEL)
     await _unload_ollama_model(SUMMARY_MODEL)
-    if VISION_MODEL != TRANSLATION_MODEL:
+    if TRANSLATION_PROVIDER == "ollama" and VISION_MODEL != TRANSLATION_MODEL:
         await _unload_ollama_model(TRANSLATION_MODEL)
     await asyncio.to_thread(_release_asr_model_sync)
     schema = {
@@ -990,7 +1267,7 @@ async def _parse_image_with_vlm(data: bytes) -> AssetParseResponse:
     finally:
         # Release VLM weights and restore the resident realtime model even when
         # inference, JSON validation, or the GPU residency proof fails.
-        if VISION_MODEL != TRANSLATION_MODEL:
+        if TRANSLATION_PROVIDER == "ollama" and VISION_MODEL != TRANSLATION_MODEL:
             await _unload_ollama_model(VISION_MODEL)
             await _restore_realtime_translation_model(VISION_MODEL)
 

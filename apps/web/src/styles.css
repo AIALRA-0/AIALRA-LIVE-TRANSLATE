@@ -121,7 +121,7 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 .overview-card, .side-card, .document-panel { border: 1px solid var(--line); border-radius: 14px; background: var(--paper); box-shadow: 0 10px 35px rgba(0, 0, 0, .04); }
 .overview-card { padding: 24px; }
 .overview-card h2 { margin: 0 0 18px; font-size: 18px; }
-.overview-card > button { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 13px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; }
+.overview-card > .recent-session-row { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 13px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; }
 .resume-session-card { display: grid; gap: 12px; margin: 0 0 10px; padding: 14px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--green) 7%, var(--paper)); }
 .resume-session-card > div { display: grid; gap: 4px; }
 .resume-session-card p { margin: 0; color: var(--green); font-size: 10px; font-weight: 800; }
@@ -130,7 +130,7 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 .recent-session-row > span { display: grid; gap: 3px; min-width: 0; }
 .recent-session-row strong { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
 .new-session { display: grid; gap: 14px; }
-.new-session > button.primary-button { justify-content: center; padding: 13px 18px; border: 1px solid #111; text-align: center; }
+.new-session > button.primary-button { justify-content: center; padding: 13px 18px; border: 1px solid #111; color: #fff; background: #111; text-align: center; }
 .new-session label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .form-help { margin: -4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .language-pair { display: flex; justify-content: space-between; padding: 11px 13px; border-radius: 8px; background: var(--soft); font-size: 12px; font-weight: 700; }
@@ -370,7 +370,7 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 [data-theme="dark"] .overview-card,
 [data-theme="dark"] .side-card,
 [data-theme="dark"] .document-panel { background: var(--paper); box-shadow: 0 10px 35px rgba(0, 0, 0, .22); }
-[data-theme="dark"] .overview-card > button { color: var(--ink); }
+[data-theme="dark"] .overview-card > .recent-session-row { color: var(--ink); }
 [data-theme="dark"] .resume-session-card { background: #17301f; border-color: #356c49; }
 [data-theme="dark"] .session-continuity { background: #17301f; border-color: #356c49; }
 [data-theme="dark"] .audio-device-row { background: #242424; }

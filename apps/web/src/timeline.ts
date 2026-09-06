@@ -169,6 +169,13 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
   return items;
 }
 
+// Processing and retry states belong to the control/status surfaces, never to the
+// transcript document. Keeping this boundary explicit prevents mobile layouts
+// from rendering backend progress events as if they were recognized speech.
+export function isRenderableDocumentItem(item: TimelineItem): boolean {
+  return item.kind !== "status";
+}
+
 // Replay and live delivery can overlap, so event IDs remain the deduplication boundary.
 export function appendEvent(state: { events: EventEnvelope[]; items: TimelineItem[] }, event: EventEnvelope): { events: EventEnvelope[]; items: TimelineItem[] } {
   if (state.events.some((candidate) => candidate.event_id === event.event_id)) return state;

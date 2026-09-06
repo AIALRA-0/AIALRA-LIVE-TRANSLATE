@@ -40,7 +40,11 @@ if ($occupiedProjectPorts.Count -gt 0) { throw "AIALRA 端口已被占用：$($o
 # Install locked dependencies and rebuild the browser bundle before launching long-running services.
 Push-Location -LiteralPath $projectRoot # Package commands expect the repository root.
 try {
-    uv sync --extra dev --extra speech # Restore Python, ASR, and project-local NVIDIA libraries.
+    $uvArgs = @("--extra", "dev", "--extra", "speech") # Restore the normal worker and legacy ASR environment.
+    if ($env:AIALRA_ASR_PROVIDER -in @("qwen3-asr", "qwen_asr", "qwen3_asr") -or $env:AIALRA_TRANSLATION_PROVIDER -in @("hy-mt", "hymt", "hy_mt")) {
+        $uvArgs += @("--extra", "dedicated-models") # Install dedicated model adapters only for an explicitly selected provider.
+    }
+    uv sync @uvArgs
     pnpm install --frozen-lockfile # Restore the exact browser dependency graph.
     pnpm build # Produce the static application served by the Rust process.
 } finally {

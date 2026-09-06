@@ -275,9 +275,17 @@ def provider_proves_local_execution(job_type: str, provider: str) -> bool:
     """ASR may use the local CPU while every language-model result must prove CUDA."""
 
     if job_type == "asr":
-        return provider.startswith("faster-whisper:") and provider.endswith(("@cpu", "@cuda"))
+        return (
+            (provider.startswith("faster-whisper:") or provider.startswith("qwen3-asr:"))
+            and provider.endswith(("@cpu", "@cuda"))
+        )
     if job_type in {"translate", "explain", "summarize"}:
-        return provider.startswith("ollama:") and provider.endswith("@cuda")
+        if job_type == "translate" and provider.startswith("identity:"):
+            return provider.endswith("@cpu")
+        return (
+            (provider.startswith("ollama:") or provider.startswith("hy-mt:"))
+            and provider.endswith("@cuda")
+        )
     return True
 
 
@@ -346,11 +354,16 @@ async def verify_model_worker(client: httpx.AsyncClient) -> dict[str, Any]:
         raise RuntimeError("local ASR and Ollama providers must both be ready")
     if not health.get("ollama_gpu_resident"):
         raise RuntimeError("configured Ollama model is not resident on the local GPU")
+    if "translation_available" in health and not health.get("translation_available"):
+        raise RuntimeError("configured translation provider is unavailable")
     asr_provider = str(health.get("asr_provider", ""))
     if not asr_provider.endswith(("@cpu", "@cuda")):
         raise RuntimeError("asr_provider did not prove local execution")
     if not str(health.get("llm_provider", "")).endswith("@cuda"):
         raise RuntimeError("llm_provider did not prove CUDA execution")
+    translation_provider = str(health.get("translation_provider", ""))
+    if translation_provider and not translation_provider.endswith("@cuda"):
+        raise RuntimeError("translation_provider did not prove CUDA execution")
     return health
 
 
@@ -361,6 +374,7 @@ def model_worker_remains_available(health: dict[str, Any]) -> bool:
         health.get("status") == "ok"
         and health.get("asr_available")
         and health.get("ollama_available")
+        and health.get("translation_available", True)
     )
 
 

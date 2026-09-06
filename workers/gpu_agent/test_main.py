@@ -180,7 +180,10 @@ def test_latency_sensitive_model_jobs_have_independent_lanes() -> None:
 def test_provider_gate_allows_cpu_asr_but_requires_cuda_llm() -> None:
     assert provider_proves_local_execution("asr", "faster-whisper:small@cpu")
     assert provider_proves_local_execution("asr", "faster-whisper:small@cuda")
+    assert provider_proves_local_execution("asr", "qwen3-asr:Qwen/Qwen3-ASR-1.7B@cuda")
     assert provider_proves_local_execution("translate", "ollama:qwen2.5:3b-instruct@cuda")
+    assert provider_proves_local_execution("translate", "hy-mt:tencent/HY-MT1.5-1.8B@cuda")
+    assert provider_proves_local_execution("translate", "identity:en@cpu")
     assert not provider_proves_local_execution("translate", "ollama:qwen2.5:3b-instruct@cpu")
     assert provider_proves_local_execution("summarize", "ollama:qwen2.5:14b-instruct@cuda")
     assert not provider_proves_local_execution("asr", "deterministic@cpu")

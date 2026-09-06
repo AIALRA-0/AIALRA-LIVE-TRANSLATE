@@ -20,7 +20,9 @@ const SAMPLE_RATE: u32 = 16_000;
 const CHANNELS: u16 = 1;
 const PCM_BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * 2;
 const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 3 / 2;
-const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 5;
+// Longer uninterrupted speech needs context to avoid cutting off words at the
+// five-second boundary; phrase pauses still close a window after the minimum.
+const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 8;
 const SILENCE_LOOKBACK_BYTES: usize = PCM_BYTES_PER_SECOND * 450 / 1_000;
 const SILENCE_MEAN_ABSOLUTE_PCM: i64 = 550;
 const MAX_FRAME_BYTES: usize = PCM_BYTES_PER_SECOND * 3 + HEADER_BYTES;
@@ -359,7 +361,10 @@ fn extract_lease_token(headers: &HeaderMap) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SILENCE_LOOKBACK_BYTES, assemble_source, trailing_audio_is_silent};
+    use super::{
+        MAX_ASR_WINDOW_BYTES, PCM_BYTES_PER_SECOND, SILENCE_LOOKBACK_BYTES, assemble_source,
+        trailing_audio_is_silent,
+    };
     use crate::app::AppState;
     use crate::jobs::enqueue_asr;
     use aialra_event_store::{AudioChunkRecord, NewSession};
@@ -448,6 +453,57 @@ mod tests {
                 .unwrap(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn assembler_keeps_uninterrupted_speech_within_the_eight_second_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_long_speech".to_owned(),
+                title: "Synthetic long speech".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        let pcm = [0x10_u8, 0x27_u8].repeat(PCM_BYTES_PER_SECOND / 2);
+        let stored = state.objects.put(&pcm).unwrap();
+        for sequence in 1..=9 {
+            state
+                .store
+                .insert_audio_chunk(&AudioChunkRecord {
+                    session_id: "session_long_speech".to_owned(),
+                    source_id: "browser-mic-g1".to_owned(),
+                    sequence,
+                    captured_at_ms: sequence * 1_000,
+                    sample_rate: 16_000,
+                    channels: 1,
+                    encoding: "pcm_s16le".to_owned(),
+                    duration_ms: 1_000,
+                    object_hash: stored.hash.clone(),
+                    size_bytes: stored.size_bytes,
+                    acknowledged_at: Utc::now(),
+                })
+                .unwrap();
+        }
+
+        assert_eq!(
+            assemble_source(&state, "session_long_speech", "browser-mic-g1", false).unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .store
+                .audio_assembly_cursor("session_long_speech", "browser-mic-g1")
+                .unwrap(),
+            Some(8)
+        );
+        assert_eq!(MAX_ASR_WINDOW_BYTES, PCM_BYTES_PER_SECOND * 8);
     }
 
     #[test]

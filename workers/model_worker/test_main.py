@@ -6,6 +6,7 @@ import asyncio
 import io
 
 import httpx
+import numpy as np
 import pytest
 from pptx import Presentation
 
@@ -131,6 +132,81 @@ def test_translation_contract_allows_configured_same_language_output() -> None:
     )
 
 
+def test_dedicated_translation_path_returns_plain_provider_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "hy-mt")
+    monkeypatch.setattr(model_worker, "HYMT_MODEL", "test/hy-mt")
+    monkeypatch.setattr(model_worker, "HYMT_DEVICE", "cuda")
+    monkeypatch.setattr(model_worker, "_configured_translation_importable", lambda: True)
+    monkeypatch.setattr(model_worker, "_translate_hymt_sync", lambda _request: "注意力使用上下文。")
+
+    result = asyncio.run(
+        model_worker.translate(
+            model_worker.TranslationRequest(
+                text="Attention uses context.",
+                source_language="en",
+                target_language="zh-CN",
+            )
+        )
+    )
+
+    assert result.source_text == "Attention uses context."
+    assert result.text == "注意力使用上下文。"
+    assert result.provider == "hy-mt:test/hy-mt@cuda"
+
+
+def test_same_language_translation_is_an_identity_result_without_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        model_worker,
+        "_translate_hymt_sync",
+        lambda _request: pytest.fail("same-language input must not call a translator"),
+    )
+    result = asyncio.run(
+        model_worker.translate(
+            model_worker.TranslationRequest(
+                text="Attention uses context.",
+                source_language="en",
+                target_language="en-US",
+            )
+        )
+    )
+    assert result.text == result.source_text
+    assert result.provider == "identity:en@cpu"
+
+
+def test_qwen_asr_path_uses_the_configured_language_and_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        text = "Attention uses context."
+        language = "English"
+
+    class Model:
+        def transcribe(self, **kwargs: object) -> list[Result]:
+            assert kwargs["language"] == "English"
+            assert kwargs["context"] == ""
+            return [Result()]
+
+    monkeypatch.setattr(model_worker, "ASR_PROVIDER", "qwen3-asr")
+    monkeypatch.setattr(model_worker, "ASR_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
+    monkeypatch.setattr(model_worker, "ASR_DEVICE", "cuda")
+    monkeypatch.setattr(model_worker, "_get_qwen_asr_model", lambda: Model())
+    request = model_worker.AsrRequest(
+        pcm_s16le_base64="AA==",
+        sample_rate=16_000,
+        language="en-US",
+    )
+    audio = np.zeros(1, dtype=np.float32)
+
+    result = model_worker._transcribe_sync(audio, request)
+
+    assert result.provider == "qwen3-asr:Qwen/Qwen3-ASR-1.7B@cuda"
+    assert result.text == "Attention uses context."
+
+
 def test_translation_contract_normalizes_region_codes_and_unicode_latin() -> None:
     assert _translation_contract_ok(
         {"source_text": "Café déjà vu.", "translation": "咖啡似曾相识。"},
@@ -142,6 +218,36 @@ def test_translation_contract_normalizes_region_codes_and_unicode_latin() -> Non
         "en-US",
         "zh-CN",
     )
+
+
+def test_translation_prompt_keeps_source_and_translation_fields_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def ollama_json(
+        system: str,
+        user: str,
+        _schema: dict[str, object],
+        **kwargs: object,
+    ) -> dict[str, str]:
+        captured["system"] = system
+        captured["user"] = user
+        captured.update(kwargs)
+        return {"source_text": "Attention uses context.", "translation": "注意力使用上下文。"}
+
+    monkeypatch.setattr(model_worker, "_ollama_json", ollama_json)
+    request = model_worker.TranslationRequest(
+        text="Attention uses context.",
+        source_language="en",
+        target_language="zh-CN",
+    )
+    result = asyncio.run(model_worker.translate(request))
+
+    assert result.source_text == request.text
+    assert result.text == "注意力使用上下文。"
+    assert "source_text field is a cleaned copy" in str(captured["system"])
+    assert "translate only the translation field" in str(captured["repair_instruction"])
 
 
 def test_explanation_shape_requires_every_managed_section() -> None:

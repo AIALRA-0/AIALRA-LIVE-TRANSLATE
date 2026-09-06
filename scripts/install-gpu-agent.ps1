@@ -3,6 +3,12 @@ param(
     [string]$GatewayUrl = "http://worker-gateway.example.invalid",
     [string]$OllamaUrl = "http://127.0.0.1:11434",
     [string]$OllamaModel = "qwen2.5:7b-instruct",
+    [string]$AsrProvider = "faster-whisper",
+    [string]$AsrModel = "small",
+    [string]$AsrDevice = "cuda",
+    [string]$TranslationProvider = "ollama",
+    [string]$HymtModel = "tencent/HY-MT1.5-1.8B",
+    [string]$HymtDevice = "cuda",
     [string]$ExplanationModel = "qwen2.5:7b-instruct",
     [string]$SummaryModel = "qwen2.5:14b-instruct",
     [string]$VisionModel = "qwen3-vl:8b-instruct"
@@ -32,6 +38,12 @@ $settings = New-ScheduledTaskSettingsSet -RestartCount 6 -RestartInterval (New-T
 [Environment]::SetEnvironmentVariable("AIALRA_GPU_GATEWAY_URL", $GatewayUrl, "User") # Store only the private endpoint, never the token.
 [Environment]::SetEnvironmentVariable("AIALRA_OLLAMA_URL", $OllamaUrl, "User") # Persist the verified loopback provider for future logins.
 [Environment]::SetEnvironmentVariable("AIALRA_OLLAMA_MODEL", $OllamaModel, "User") # Keep startup and the validated model on the same provider.
+[Environment]::SetEnvironmentVariable("AIALRA_ASR_PROVIDER", $AsrProvider, "User") # Persist the selected ASR provider without storing a secret.
+[Environment]::SetEnvironmentVariable("AIALRA_ASR_MODEL", $AsrModel, "User") # Persist the selected ASR checkpoint name.
+[Environment]::SetEnvironmentVariable("AIALRA_ASR_DEVICE", $AsrDevice, "User") # Require the selected ASR execution device at startup.
+[Environment]::SetEnvironmentVariable("AIALRA_TRANSLATION_PROVIDER", $TranslationProvider, "User") # Persist the selected translation provider.
+[Environment]::SetEnvironmentVariable("AIALRA_HYMT_MODEL", $HymtModel, "User") # Persist the dedicated translation checkpoint name.
+[Environment]::SetEnvironmentVariable("AIALRA_HYMT_DEVICE", $HymtDevice, "User") # Require the selected translation execution device at startup.
 [Environment]::SetEnvironmentVariable("AIALRA_EXPLANATION_MODEL", $ExplanationModel, "User") # Keep rolling explanations on the measured real-time tier.
 [Environment]::SetEnvironmentVariable("AIALRA_SUMMARY_MODEL", $SummaryModel, "User") # Preserve the measured final summary tier.
 [Environment]::SetEnvironmentVariable("AIALRA_VISION_MODEL", $VisionModel, "User") # Preserve the local image understanding tier.
@@ -39,6 +51,12 @@ $env:AIALRA_GPU_GATEWAY_URL = $GatewayUrl # The immediate launch must use the sa
 $env:AIALRA_OLLAMA_URL = $OllamaUrl
 $env:AIALRA_OLLAMA_MODEL = $OllamaModel
 $env:AIALRA_TRANSLATION_MODEL = $OllamaModel
+$env:AIALRA_ASR_PROVIDER = $AsrProvider
+$env:AIALRA_ASR_MODEL = $AsrModel
+$env:AIALRA_ASR_DEVICE = $AsrDevice
+$env:AIALRA_TRANSLATION_PROVIDER = $TranslationProvider
+$env:AIALRA_HYMT_MODEL = $HymtModel
+$env:AIALRA_HYMT_DEVICE = $HymtDevice
 $env:AIALRA_EXPLANATION_MODEL = $ExplanationModel
 $env:AIALRA_SUMMARY_MODEL = $SummaryModel
 $env:AIALRA_VISION_MODEL = $VisionModel

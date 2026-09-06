@@ -6,6 +6,8 @@ $agentScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-gpu-agent.ps1")
 $restartDelaySeconds = 1
 $ollamaUrl = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_URL)) { "http://127.0.0.1:11434" } else { $env:AIALRA_OLLAMA_URL.TrimEnd("/") }
 $ollamaModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_MODEL)) { "qwen2.5:7b-instruct" } else { $env:AIALRA_OLLAMA_MODEL }
+$translationProvider = if ([string]::IsNullOrWhiteSpace($env:AIALRA_TRANSLATION_PROVIDER)) { "ollama" } else { $env:AIALRA_TRANSLATION_PROVIDER }
+$hymtModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_HYMT_MODEL)) { "tencent/HY-MT1.5-1.8B" } else { $env:AIALRA_HYMT_MODEL }
 $explanationModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_EXPLANATION_MODEL)) { "qwen2.5:7b-instruct" } else { $env:AIALRA_EXPLANATION_MODEL }
 $summaryModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MODEL)) { "qwen2.5:14b-instruct" } else { $env:AIALRA_SUMMARY_MODEL }
 $visionModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_VISION_MODEL)) { "qwen3-vl:8b-instruct" } else { $env:AIALRA_VISION_MODEL }
@@ -63,6 +65,18 @@ function Initialize-LocalProviders {
     } | ConvertTo-Json -Depth 4 -Compress
     [void](Invoke-RestMethod -Uri "$ollamaUrl/api/generate" -Method Post -ContentType "application/json" -Body $ollamaBody -TimeoutSec 120)
     [void](Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/asr/transcribe" -Method Post -ContentType "application/json" -Body $asrBody -TimeoutSec 120)
+
+    if ($translationProvider -in @("hy-mt", "hymt", "hy_mt")) {
+        $translationBody = @{
+            text = "Attention uses context."
+            source_language = "en"
+            target_language = "zh-CN"
+            glossary = @()
+            context = @()
+        } | ConvertTo-Json -Depth 4 -Compress
+        $translationProbe = Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/translate" -Method Post -ContentType "application/json" -Body $translationBody -TimeoutSec 120
+        if ($translationProbe.provider -notlike "hy-mt:*@cuda") { throw "专用翻译 Provider 未证明 CUDA" }
+    }
 }
 
 function Stop-OwnedOllama([Diagnostics.Process]$Process) {
@@ -125,7 +139,7 @@ while ($true) {
             if ($worker.HasExited) { throw "本机模型 Worker 在就绪前退出" }
             try {
                 $health = Invoke-RestMethod -Uri "http://127.0.0.1:8790/health" -TimeoutSec 3
-                $ready = $health.asr_available -and $health.ollama_available
+                $ready = $health.asr_available -and $health.ollama_available -and ($health.translation_available -ne $false)
             } catch { $ready = $false }
             if ($ready) { break }
             Start-Sleep -Seconds 1

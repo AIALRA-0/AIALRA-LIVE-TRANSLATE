@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeFrame, isDurableAudioAck, mediaInputError, nextFramesToSend, recoverNextSequence, resample } from "./audio";
+import { StreamingResampler, encodeFrame, isDurableAudioAck, mediaInputError, nextFramesToSend, recoverNextSequence, resample } from "./audio";
 
 describe("audio transport", () => {
   it("encodes sequence and capture time as big-endian unsigned integers", () => {
@@ -15,6 +15,22 @@ describe("audio transport", () => {
     const input = new Float32Array(48_000);
     const output = resample(input, 48_000);
     expect(output).toHaveLength(16_000);
+  });
+
+  it("keeps the resampling phase and duration across AudioWorklet blocks", () => {
+    const input = Float32Array.from({ length: 48_000 }, (_, index) => index / 48_000);
+    const streaming = new StreamingResampler(48_000);
+    const outputParts: Float32Array[] = [];
+    for (let offset = 0; offset < input.length; offset += 128) {
+      outputParts.push(streaming.push(input.subarray(offset, Math.min(offset + 128, input.length))));
+    }
+    outputParts.push(streaming.flush());
+    const output = new Float32Array(outputParts.reduce((total, part) => total + part.length, 0));
+    let offset = 0;
+    outputParts.forEach((part) => { output.set(part, offset); offset += part.length; });
+    expect(output).toHaveLength(16_000);
+    expect(output[0]).toBeCloseTo(input[0]);
+    expect(output[15_999]).toBeCloseTo(input[47_997]);
   });
 });
 
