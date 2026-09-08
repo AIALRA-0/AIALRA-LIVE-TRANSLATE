@@ -405,17 +405,19 @@ async def test_cancelled_http_request_keeps_gpu_exclusive_until_actual_completio
     assert await inference() == 7
 
 
-def test_hymt_uses_bounded_official_context_without_metadata_labels() -> None:
+def test_hymt_keeps_free_history_out_of_the_current_translation() -> None:
     request = model_worker.TranslationRequest(
         text="The voltage is not 5 V.", source_language="en", target_language="zh-CN",
         context=["prior context " * 300], glossary=[],
     )
     prompt = model_worker._hymt_prompt(request)
     assert prompt.endswith(request.text)
-    assert "不需要翻译上文" in prompt
+    assert "prior context" not in prompt
     assert len(prompt) < 1400
     assert "Source language:" not in prompt
     assert "Text to translate:" not in prompt
+    request.glossary = [model_worker.GlossaryConstraint(source="voltage", preferred="电压")]
+    assert "voltage 翻译成 电压" in model_worker._hymt_prompt(request)
 
 
 @pytest.mark.asyncio

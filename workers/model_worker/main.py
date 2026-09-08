@@ -1016,20 +1016,17 @@ def _hymt_prompt(request: TranslationRequest) -> str:
     target = (languages if chinese_pair else english_languages).get(
         request.target_language.casefold(), request.target_language,
     )
-    context = "\n".join(request.context[-2:])[-1200:]
+    # Free-form history made the model import quantities and claims from a
+    # previous paragraph into the current translation. Core already assembles
+    # coherent source paragraphs. Keep the request compatible, but translate
+    # only its source text; explicitly confirmed glossary terms remain usable.
     terms = "\n".join(
         f"{item.source} 翻译成 {item.source if item.do_not_translate else item.preferred}"
         for item in request.glossary[:32]
     )
     if not chinese_pair:
-        prompt = (f"{context}\nBased on the provided information, translate the following text "
-                  f"into {target}, without translating the preceding information or adding "
-                  f"explanations:\n{request.text}" if context else
-                  f"Translate the following segment into {target}, without additional "
+        prompt = (f"Translate the following segment into {target}, without additional "
                   f"explanation.\n\n{request.text}")
-    elif context:
-        prompt = (f"{context}\n参考上面的信息，把下面的文本翻译成{target}，"
-                  f"注意不需要翻译上文，也不要额外解释：\n{request.text}")
     else:
         prompt = (f"将以下文本翻译为{target}，注意只需要输出翻译后的结果，"
                   f"不要额外解释：\n\n{request.text}")
