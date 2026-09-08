@@ -384,9 +384,9 @@ export class BrowserCapture {
       this.worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
         this.acceptSamples(event.data);
       };
-      if (this.mode === "microphone" && this.noiseMode === "rnnoise") {
+      if (this.mode === "microphone" && (this.noiseMode === "rnnoise" || this.noiseMode === "gtcrn")) {
         try {
-          this.denoiser = await createDenoiser(this.context);
+          this.denoiser = await createDenoiser(this.context, this.noiseMode);
         } catch {
           await this.stream.getAudioTracks()[0]?.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
           this.onStatus("增强降噪暂不可用，已使用浏览器可用的音频处理");

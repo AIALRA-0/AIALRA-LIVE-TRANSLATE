@@ -733,14 +733,14 @@ function ParagraphInsightPanel({ items, documentRef }: { items: TimelineItem[]; 
     : undefined;
   const groupParagraphs = insight
     ? paragraphs.filter((item) => insight.evidenceIds.includes(item.id))
-    : paragraph ? [paragraph] : [];
+    : paragraphs.filter((item) => !insights.some((entry) => entry.evidenceIds.includes(item.id)));
   const summary = insight?.sections?.find((section) => section.label === "当前内容组总结");
   const terms = insight?.sections?.filter((section) => section.label.startsWith("知识补充")) ?? [];
   return (
     <section className="side-card paragraph-insight-panel" data-testid="paragraph-insight-panel">
-      <div className="card-heading"><h3>当前内容组</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "等待补充"}</StatusBadge></div>
-      {groupParagraphs.length ? <small className="paragraph-insight-source">{groupParagraphs.map((item) => item.original).join(" ")}</small> : <p>出现稳定内容组后，这里会显示对应总结和知识补充。</p>}
-      <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "当前内容组的总结正在生成。"}</p></section>
+      <div className="card-heading"><h3>当前内容组</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "积累内容"}</StatusBadge></div>
+      {groupParagraphs.length ? <details className="paragraph-insight-source"><summary>{insight ? "本组覆盖" : "尚未整理"} {groupParagraphs.length} 个段落 · 查看原文</summary><p>{groupParagraphs.map((item) => item.original).join(" ")}</p></details> : <p>积累一大段课程内容后，这里会显示总结和知识补充。</p>}
+      <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "通常积累至少 8 段、约 1800 字符后统一整理；短句较多时合并到 16 段，不逐句总结。"}</p></section>
       <section className="paragraph-terms-section"><strong>知识补充</strong>{terms.length ? terms.map((term, index) => <details key={`${term.label}:${index}`}><summary>{term.label.replace("知识补充 · ", "")}</summary><p>{term.text}</p></details>) : <p>当前内容组还没有检测到需要解释的专业名词或缩写。</p>}</section>
     </section>
   );
@@ -812,7 +812,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [micResult, setMicResult] = useState<MicrophoneTestResult | null>(null);
   const [micTesting, setMicTesting] = useState(false);
   const micTestAbort = useRef<AbortController | null>(null);
-  const [noiseMode, setNoiseMode] = useState<NoiseSuppressionMode>("rnnoise");
+  const [noiseMode, setNoiseMode] = useState<NoiseSuppressionMode>("gtcrn");
   const inputOperation = useRef(false);
   const [stopPending, setStopPending] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeHealth | null>(null);
@@ -1377,7 +1377,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
              <label>音频来源<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as CaptureMode)} disabled={isRecording || busy || micTesting || audioPermissionPending}><option value="microphone">麦克风</option><option value="screen">浏览器标签或共享音频</option></select></label>
              {captureMode === "microphone" && <>
                <label>输入设备<select value={selectedAudioInput} onChange={(event) => { setSelectedAudioInput(event.target.value); setMicResult(null); }} disabled={isRecording || busy || micTesting || audioPermissionPending}><option value="">{defaultAudioLabel}</option>{audioInputs.filter((device) => device.deviceId !== "default" && device.deviceId !== "communications").map((device) => <option key={device.deviceId} value={device.deviceId}>{formatAudioInputLabel(device)}</option>)}</select></label>
-               <label>降噪<select value={noiseMode} disabled={isRecording || busy || micTesting || audioPermissionPending} onChange={(event) => setNoiseMode(event.target.value as NoiseSuppressionMode)}><option value="rnnoise">增强降噪（本机 RNNoise）</option><option value="browser">浏览器降噪</option><option value="off">关闭降噪（清晰音源）</option></select></label>
+               <label>降噪<select value={noiseMode} disabled={isRecording || busy || micTesting || audioPermissionPending} onChange={(event) => setNoiseMode(event.target.value as NoiseSuppressionMode)}><option value="gtcrn">清晰人声（本机 GTCRN）</option><option value="rnnoise">传统降噪（本机 RNNoise）</option><option value="browser">浏览器降噪</option><option value="off">关闭降噪（清晰音源）</option></select></label>
               <div className="audio-device-row"><span><strong>当前设备</strong><small>{selectedAudioLabel}</small></span><button className="text-link-button" type="button" disabled={isRecording || micTesting || audioPermissionPending} onClick={() => void refreshAudioInputs(true).catch(() => undefined)}>{audioPermissionPending ? "正在等待系统权限" : audioInputsReady ? "刷新设备" : "允许权限并刷新设备"}</button></div>
                {audioDeviceNotice && <small className="audio-device-notice" role="status">{audioDeviceNotice}</small>}
              </>}
@@ -1411,8 +1411,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="primary-button" disabled>等待后台处理完成</button>
             )}
           </section>
-          <GpuPanel runtime={runtime} />
           <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} />
+          <GpuPanel runtime={runtime} />
           <section className="side-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
             <p>{readWeavePreview?.sessions.find((item) => item.session_id === session.id)?.latest_entries[0]?.translation ?? "稳定字幕和讲解会自动进入对应笔记"}</p>

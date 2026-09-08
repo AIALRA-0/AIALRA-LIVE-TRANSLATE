@@ -36,7 +36,7 @@ pub fn enqueue_explanation_for_paragraphs(
         .get_session(session_id)?
         .context("session not found")?;
     let events = state.store.list_events(session_id)?;
-    let mut segments = events
+    let segments = events
         .iter()
         .filter(|event| event.event_type == "paragraph.finalized")
         .filter_map(|event| {
@@ -47,7 +47,9 @@ pub fn enqueue_explanation_for_paragraphs(
             Some(json!({"id": id, "text": event.payload.get("text")?.as_str()?}))
         })
         .collect::<Vec<_>>();
-    bound_segment_text(&mut segments);
+    // The scheduler already selects one bounded group. Preserve complete
+    // paragraphs: equal per-paragraph truncation can remove the conclusion of
+    // a long sentence while leaving unused space for shorter neighbours.
     let (_, pages) = collect_evidence(state, session_id)?;
     if segments.is_empty() {
         bail!("selected content group has no stable segments");

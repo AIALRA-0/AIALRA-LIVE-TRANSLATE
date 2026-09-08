@@ -1,5 +1,13 @@
 # AIALRA-LIVE-TRANSLATE 验证报告
 
+## 2026-09-08 v35 候选验证
+
+回归覆盖不足 8 段不触发、成组去重、完整原文、16 个短段不阻塞，以及长片段／冒号／省略号等待与停止封存。Web 43 项、TypeScript、ESLint、构建通过；真实 Chromium 验证 GTCRN 默认、内容组在 GPU 前、无虚假生成提示、3 个 durable ACK、停止释放、笔记及桌面／390px 布局。
+
+20 秒清晰与加噪／混响音频分别通过 RNNoise、GTCRN 实时 AudioWorklet，4 次均无处理器错误、削波或非有限输出。相对清晰参考的语音区 SI-SDR，清晰输入分别 15.07／31.54 dB；加噪输入分别 10.46／12.70 dB，未增强基线 10.55 dB。模拟静音区衰减分别 4.45／32.85 dB。这是波形保真比较，不是听感或识别准确率。
+
+实际 CUDA 验证 4 次 ASR、3 次分句／合句翻译，输出均非空；GTCRN 与原声存在少量尾词差异，合句译文仍有术语关系错误。私有证据：`enhancement-ab.json`、`enhancement-metrics.json`、`v35-quality-metrics.json`、`v35-browser/browser-validation.json`；音轨和模型原文不进入 Git。生产尚待新 SHA 部署与冒烟。
+
 ## 2026-09-08 v34 最终验证
 
 运行 SHA：`632998062dc4137e40201fb3dd09e2f2fdcf14ef`；发布：`quality-v34-20260908-6329980`。本次状态文档提交不重新部署，文档 HEAD 与运行 SHA 分开记录。

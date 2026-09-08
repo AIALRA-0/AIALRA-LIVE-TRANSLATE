@@ -968,10 +968,28 @@ pub fn enqueue_summary(
 }
 
 const PARAGRAPH_MIN_TERMINAL_CHARS: usize = 100;
-const PARAGRAPH_HARD_CHARS: usize = 260;
+const PARAGRAPH_HARD_CHARS: usize = 600;
 const PARAGRAPH_HARD_SEGMENTS: usize = 4;
-const AUTO_EXPLAIN_MIN_PARAGRAPHS: usize = 4;
-const AUTO_EXPLAIN_MIN_CHARS: usize = 900;
+const AUTO_EXPLAIN_MIN_PARAGRAPHS: usize = 8;
+const AUTO_EXPLAIN_MIN_CHARS: usize = 1_800;
+const AUTO_EXPLAIN_MAX_PARAGRAPHS: usize = 16;
+
+fn paragraph_ready(text: &str, fragments: usize, force: bool) -> bool {
+    // A colon introduces the next clause; character count alone must not turn
+    // one acoustic fragment into an independent translation. Keep the existing
+    // four-fragment upper bound so incomplete speech cannot wait indefinitely.
+    let trimmed = text
+        .trim_end()
+        .trim_end_matches(['"', '\'', '”', '’', '」', '』', ')', '）']);
+    let terminal = !trimmed.ends_with("...")
+        && !trimmed.ends_with('…')
+        && trimmed.ends_with(['.', '?', '!', '。', '？', '！']);
+    force
+        || fragments >= PARAGRAPH_HARD_SEGMENTS
+        || (fragments >= 2
+            && (text.chars().count() >= PARAGRAPH_HARD_CHARS
+                || (text.chars().count() >= PARAGRAPH_MIN_TERMINAL_CHARS && terminal)))
+}
 
 fn maybe_finalize_paragraph(
     state: &AppState,
@@ -1017,17 +1035,7 @@ fn maybe_finalize_paragraph(
         return Ok(None);
     }
     let text = join_caption_fragments(pending.iter().map(|(_, _, text, _)| text.as_str()));
-    let trimmed = text.trim_end();
-    let terminal = !trimmed.ends_with("...")
-        && !trimmed.ends_with('…')
-        && trimmed.chars().last().is_some_and(|character| {
-            matches!(character, '.' | '?' | '!' | '。' | '？' | '！' | ':' | '：')
-        });
-    let ready = force
-        || pending.len() >= PARAGRAPH_HARD_SEGMENTS
-        || text.chars().count() >= PARAGRAPH_HARD_CHARS
-        || (pending.len() >= 2 && text.chars().count() >= PARAGRAPH_MIN_TERMINAL_CHARS && terminal);
-    if !ready {
+    if !paragraph_ready(&text, pending.len(), force) {
         return Ok(None);
     }
     let session = state
@@ -1078,7 +1086,7 @@ fn maybe_finalize_paragraph(
             "text": text,
             "detected_language": detected_language,
             "provider": provider,
-            "assembly": "coherent-v1"
+            "assembly": "sentence-boundary-v2"
         }),
     )?;
     let same_language =
@@ -1229,7 +1237,7 @@ fn maybe_enqueue_coherent_explanation(
     let mut group = Vec::new();
     let mut chars = 0;
     for (paragraph_id, text) in pending {
-        if group.len() >= 8 {
+        if group.len() >= AUTO_EXPLAIN_MAX_PARAGRAPHS {
             break;
         }
         group.push(paragraph_id.clone());
@@ -1238,7 +1246,9 @@ fn maybe_enqueue_coherent_explanation(
             break;
         }
     }
-    if group.len() < AUTO_EXPLAIN_MIN_PARAGRAPHS || chars < AUTO_EXPLAIN_MIN_CHARS {
+    if group.len() < AUTO_EXPLAIN_MAX_PARAGRAPHS
+        && (group.len() < AUTO_EXPLAIN_MIN_PARAGRAPHS || chars < AUTO_EXPLAIN_MIN_CHARS)
+    {
         return Ok(());
     }
     crate::explanation::enqueue_explanation_for_paragraphs(
@@ -1500,7 +1510,7 @@ mod tests {
         PARAGRAPH_HARD_SEGMENTS, asr_initial_prompt, detected_language_for_paragraph,
         enqueue_summary, evenly_sample, join_caption_fragments, languages_match_for_translation,
         maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, normalize_language_code,
-        require_provider, require_provider_prefixes, sample_with_boundaries,
+        paragraph_ready, require_provider, require_provider_prefixes, sample_with_boundaries,
         validate_diagnostic_id, validate_error_stage, validate_model_stage,
     };
     use crate::app::AppState;
@@ -1664,6 +1674,18 @@ mod tests {
             "A model uses evidence."
         );
         assert_eq!(PARAGRAPH_HARD_SEGMENTS, 4);
+    }
+
+    #[test]
+    fn translation_waits_for_sentence_continuation_but_flushes_on_stop() {
+        let clause =
+            "The device implements a conditional control mechanism with several stages ".repeat(4);
+        assert!(!paragraph_ready(&clause, 1, false));
+        assert!(!paragraph_ready(&format!("{clause}:"), 2, false));
+        assert!(!paragraph_ready(&format!("{clause}..."), 2, false));
+        assert!(paragraph_ready(&format!("{clause}.\""), 2, false));
+        assert!(paragraph_ready(&clause, 4, false));
+        assert!(paragraph_ready("unfinished final words", 1, true));
     }
 
     #[test]
@@ -1831,6 +1853,22 @@ mod tests {
                     json!({"paragraph_id": format!("para-{index}"), "segment_ids": [format!("seg-{index}")], "text": "A coherent technical passage explains attention, representation learning, optimization, and the evidence needed to compare these mechanisms in a lecture setting. This paragraph intentionally carries enough semantic content for the teaching gate."}),
                 )
                 .unwrap();
+            if index < 8 {
+                maybe_enqueue_coherent_explanation(
+                    &state,
+                    "session_explanation",
+                    "current-translate",
+                )
+                .unwrap();
+                assert_eq!(
+                    state
+                        .store
+                        .model_queue_counts(Some("session_explanation"))
+                        .unwrap()
+                        .queued,
+                    0
+                );
+            }
         }
         maybe_enqueue_coherent_explanation(&state, "session_explanation", "current-translate")
             .unwrap();
@@ -1857,10 +1895,10 @@ mod tests {
                 .get("segments")
                 .and_then(|value| value.as_array())
                 .map(Vec::len),
-            Some(4)
+            Some(8)
         );
         assert_eq!(job.input["segments"][0]["id"], "para-1");
-        assert_eq!(job.input["segments"][3]["id"], "para-4");
+        assert_eq!(job.input["segments"][7]["id"], "para-8");
     }
 
     #[test]
@@ -1880,7 +1918,7 @@ mod tests {
             })
             .unwrap();
         let paragraph_text = "A coherent technical passage explains a mechanism, its assumptions, and the evidence needed to compare it in a lecture setting. ".repeat(8);
-        for index in 1..=4 {
+        for index in 1..=8 {
             state
                 .emit_idempotent(
                     &format!("paragraph-dedup-{index}"),
@@ -1905,6 +1943,7 @@ mod tests {
             .lease_model_job("explain-worker", &["explain".to_owned()], 60)
             .unwrap()
             .unwrap();
+        assert_eq!(first_job.input["segments"][0]["text"], paragraph_text);
         state
             .store
             .complete_model_job(&first_job.id, "explain-worker", &json!({"summary": "done"}))
@@ -1918,7 +1957,7 @@ mod tests {
                 0,
                 &first_job.id,
                 None,
-                json!({"result": {"evidence_segment_ids": ["para-1", "para-2", "para-3", "para-4"]}}),
+                json!({"result": {"evidence_segment_ids": ["para-1", "para-2", "para-3", "para-4", "para-5", "para-6", "para-7", "para-8"]}}),
             )
             .unwrap();
 
@@ -1937,7 +1976,7 @@ mod tests {
             0
         );
 
-        for index in 5..=8 {
+        for index in 9..=16 {
             state
                 .emit_idempotent(
                     &format!("paragraph-dedup-{index}"),
@@ -1965,5 +2004,37 @@ mod tests {
                 .queued,
             1
         );
+    }
+
+    #[test]
+    fn short_paragraphs_eventually_form_one_group_instead_of_stalling_the_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_short_group".into(),
+                title: "Short group".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for index in 1..=16 {
+            state.emit_idempotent(&format!("short-{index}"), "session_short_group", "test",
+                "paragraph.finalized", index, &format!("short-{index}"), None,
+                json!({"paragraph_id": format!("para-short-{index}"), "text": "Short but stable."})).unwrap();
+            maybe_enqueue_coherent_explanation(&state, "session_short_group", "current").unwrap();
+            assert_eq!(
+                state
+                    .store
+                    .model_queue_counts(Some("session_short_group"))
+                    .unwrap()
+                    .queued,
+                if index == 16 { 1 } else { 0 }
+            );
+        }
     }
 }

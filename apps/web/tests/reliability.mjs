@@ -71,6 +71,14 @@ try {
   assert.equal(await page.evaluate(() => window.__captureProbe.calls),0);
   assert.equal(await page.getByText("其他设备正在录制本项目",{exact:true}).count(),0);
   checks.push("opening requests no microphone and historical lease replay causes no conflict");
+  assert.equal(await page.getByRole("combobox",{name:/^降噪/}).inputValue(),"gtcrn");
+  assert.ok(await page.evaluate(() => {
+    const panel=document.querySelector(".paragraph-insight-panel");
+    const gpu=[...document.querySelectorAll(".session-sidebar .side-card")].find(el=>el.querySelector("h3")?.textContent==="本机 GPU");
+    return panel && gpu && Boolean(panel.compareDocumentPosition(gpu)&Node.DOCUMENT_POSITION_FOLLOWING);
+  }));
+  assert.equal(await page.getByText("当前内容组的总结正在生成。",{exact:true}).count(),0);
+  checks.push("content group precedes GPU; accumulation is not falsely presented as generation; GTCRN default");
   await page.getByRole("button",{name:"新建项目",exact:true}).click();
   assert.equal(await page.getByRole("menuitem",{name:"新建文件夹",exact:true}).count(),0);
   await page.getByRole("button",{name:"取消",exact:true}).click();
@@ -84,7 +92,7 @@ try {
   await page.getByRole("button",{name:"开始录音",exact:true}).click();
   await page.getByRole("button",{name:"停止并完成处理",exact:true}).waitFor({timeout:20000});
   await sleep(2500);
-  assert.ok(wasm.length>0 && wasm.every((s)=>s===200),"RNNoise WASM loaded locally");
+  assert.ok(wasm.length>0 && wasm.every((s)=>s===200),"GTCRN WASM loaded locally");
   assert.ok(acks.length>=1 && acks.every(Boolean),"durable ACKs");
   assert.ok(await page.evaluate(() => window.__captureProbe.wakes>=1));
   const stoppedResponse=page.waitForResponse((response)=>response.url().endsWith("/recording/stop") && response.request().method()==="POST");
@@ -93,7 +101,7 @@ try {
   await page.waitForFunction(() => window.__captureProbe.tracks.every((t)=>t.readyState==="ended") && window.__captureProbe.releases>=1);
   const status=await request(`/api/v1/projects/${project.id}/recording/status?device_id=reliability-browser`);
   assert.equal(status.lease,null);
-  checks.push("real browser RNNoise -> PCM -> durable ACK -> stop -> lease and tracks released; wake API lifecycle");
+  checks.push("real browser GTCRN -> PCM -> durable ACK -> stop -> lease and tracks released; wake API lifecycle");
   await page.goto(`${course}/notes/user-notes`);
   const editor=page.getByRole("textbox",{name:"课程笔记"}); await editor.waitFor();
   await editor.fill("Synthetic personal note.");
