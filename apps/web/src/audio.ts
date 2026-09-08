@@ -7,6 +7,7 @@ const MAX_IN_FLIGHT_FRAMES = 8;
 export type CaptureMode = "microphone" | "screen";
 export type CapturePhase =
   | "idle"
+  | "checking-status"
   | "requesting-permission"
   | "acquiring-lease"
   | "connecting"
@@ -658,6 +659,8 @@ export interface MicrophoneTestResult {
   speechP95Dbfs: number;
   peakDbfs: number;
   clippingRatio: number;
+  voicedRatio: number;
+  speechMedianDbfs: number;
   sampleRate: number;
   message: string;
 }
@@ -672,13 +675,41 @@ function percentile(values: number[], ratio: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
 }
 
+export function assessMicrophoneLevels(
+  quietLevels: number[],
+  speechLevels: number[],
+  clippingRatio: number,
+): Pick<MicrophoneTestResult, "passed" | "noiseFloorDbfs" | "speechP95Dbfs" | "voicedRatio" | "speechMedianDbfs" | "message"> {
+  const noiseFloorDbfs = percentile(quietLevels, 0.75);
+  const speechMedianDbfs = percentile(speechLevels, 0.5);
+  const speechP95Dbfs = percentile(speechLevels, 0.95);
+  const voicedThreshold = Math.min(-24, noiseFloorDbfs + 6);
+  const voicedRatio = speechLevels.length === 0
+    ? 0
+    : speechLevels.filter((level) => level >= voicedThreshold).length / speechLevels.length;
+  const relativeLevel = speechMedianDbfs - noiseFloorDbfs;
+  const passed = speechLevels.length > 0
+    && voicedRatio >= 0.25
+    && relativeLevel >= 8
+    && speechP95Dbfs >= -60
+    && clippingRatio <= 0.01;
+  const message = clippingRatio > 0.01
+    ? "输入音量过高，请降低系统麦克风增益"
+    : voicedRatio < 0.12 || relativeLevel < 4
+      ? "没有检测到持续语音，请确认麦克风已选中后再测试"
+      : passed
+        ? "麦克风收音正常"
+        : "语音信号偏弱或不稳定，请靠近麦克风后重试";
+  return { passed, noiseFloorDbfs, speechP95Dbfs, voicedRatio, speechMedianDbfs, message };
+}
+
 // The preflight test reads the selected microphone locally and never opens a recording lease or network request.
 export async function testMicrophone(
   deviceId: string | undefined,
   onProgress: (progress: MicrophoneTestProgress) => void,
 ): Promise<MicrophoneTestResult> {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("当前浏览器不支持麦克风测试");
-  const stream = await navigator.mediaDevices.getUserMedia({
+  const stream = await requestMediaWithTimeout(navigator.mediaDevices.getUserMedia({
     audio: {
       channelCount: 1,
       echoCancellation: true,
@@ -686,7 +717,7 @@ export async function testMicrophone(
       autoGainControl: true,
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
     },
-  });
+  }));
   const context = new AudioContext({ latencyHint: "interactive" });
   const analyser = context.createAnalyser();
   analyser.fftSize = 2048;
@@ -722,15 +753,8 @@ export async function testMicrophone(
     stream.getTracks().forEach((track) => track.stop());
     await context.close();
   }
-  const noiseFloorDbfs = percentile(quietLevels, 0.5);
-  const speechP95Dbfs = percentile(speechLevels, 0.95);
   const peakDbfs = amplitudeDbfs(peak);
   const clippingRatio = total > 0 ? clipped / total : 0;
-  const passed = speechP95Dbfs >= -45 && speechP95Dbfs - noiseFloorDbfs >= 12 && clippingRatio <= 0.01;
-  const message = clippingRatio > 0.01
-    ? "输入音量过高，请降低系统麦克风增益"
-    : passed
-      ? "麦克风收音正常"
-      : "语音信号偏弱，请靠近麦克风或检查输入设备";
-  return { passed, noiseFloorDbfs, speechP95Dbfs, peakDbfs, clippingRatio, sampleRate: context.sampleRate, message };
+  const assessment = assessMicrophoneLevels(quietLevels, speechLevels, clippingRatio);
+  return { ...assessment, peakDbfs, clippingRatio, sampleRate: context.sampleRate };
 }

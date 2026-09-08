@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { StreamingResampler, encodeFrame, isDurableAudioAck, mediaInputError, nextFramesToSend, recoverNextSequence, resample } from "./audio";
+import { StreamingResampler, assessMicrophoneLevels, encodeFrame, isDurableAudioAck, mediaInputError, nextFramesToSend, recoverNextSequence, resample } from "./audio";
 
 describe("audio transport", () => {
   it("encodes sequence and capture time as big-endian unsigned integers", () => {
@@ -72,5 +72,39 @@ describe("microphone device errors", () => {
   it("keeps permission and device failures actionable without exposing browser internals", () => {
     expect(mediaInputError({ name: "NotAllowedError" })).toContain("麦克风权限被拒绝");
     expect(mediaInputError({ name: "OverconstrainedError" })).toContain("所选输入设备当前不可用");
+  });
+});
+
+describe("microphone level assessment", () => {
+  it("accepts ordinary speech relative to a quiet room even below the old fixed peak threshold", () => {
+    const result = assessMicrophoneLevels(
+      [-62, -60, -61, -59, -60],
+      [-48, -46, -45, -47, -49, -46, -44],
+      0,
+    );
+    expect(result.passed).toBe(true);
+    expect(result.voicedRatio).toBeGreaterThanOrEqual(0.25);
+    expect(result.speechMedianDbfs).toBeGreaterThan(result.noiseFloorDbfs);
+  });
+
+  it("rejects silence and a quiet signal without enough speech frames", () => {
+    const result = assessMicrophoneLevels(
+      [-70, -69, -71, -70],
+      [-69, -70, -68, -71],
+      0,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.voicedRatio).toBe(0);
+    expect(result.message).toContain("持续语音");
+  });
+
+  it("rejects clipped input independently of speech presence", () => {
+    const result = assessMicrophoneLevels(
+      [-65, -64, -66],
+      [-35, -34, -36, -35],
+      0.02,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.message).toContain("音量过高");
   });
 });

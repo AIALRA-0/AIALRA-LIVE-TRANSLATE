@@ -169,11 +169,12 @@ class EvidencePage(BaseModel):
 
 
 class ExplanationRequest(BaseModel):
-    """The request contains a bounded transcript window and recent relevant pages."""
+    """The request contains one bounded content group and relevant course pages."""
 
     segments: list[EvidenceSegment] = Field(min_length=1, max_length=20)
     asset_pages: list[EvidencePage] = Field(default_factory=list, max_length=12)
     target_language: str
+    content_group_id: str | None = None
 
 
 class ExplanationTerm(BaseModel):
@@ -472,13 +473,17 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
     segment_ids = [segment.id for segment in request.segments]
     page_ids = [page.id for page in request.asset_pages]
     system = (
-        "You are a lecture comprehension assistant. Return compact JSON in the requested language. "
+        "You are a lecture comprehension assistant. Return compact JSON for the supplied "
+        "content group "
+        "in the requested language. The group contains several adjacent stable lecture paragraphs; "
+        "reason over the whole group before writing the result. "
         "When target_language starts with zh, write every natural-language field "
         "in Simplified Chinese. "
         "Return only a paragraph_summary and a terms list. "
-        "The paragraph_summary must describe only the supplied paragraph in one or two sentences. "
+        "The paragraph_summary must describe the supplied content group in one to three sentences. "
         "terms must contain only professional terms or abbreviations that visibly occur in the "
-        "supplied paragraph or course material. Explain each term in exactly one short sentence. "
+        "supplied content group or course material. Explain each term in exactly one short "
+        "sentence. "
         "Do not produce ASR guesses, review questions, confidence scores, identifiers, citations, "
         "unsupported background, or any text outside the JSON object."
     )
@@ -834,6 +839,16 @@ def _transcribe_qwen_sync(
 def _transcribe_sync(audio: npt.NDArray[np.float32], request: AsrRequest) -> AsrResponse:
     """A bounded four-second window produces a stable bootstrap segment."""
 
+    duration_ms = int(len(audio) * 1_000 / request.sample_rate)
+    if not _audio_has_speech(audio, request.sample_rate):
+        return AsrResponse(
+            text="",
+            language="unknown",
+            confidence=0.0,
+            duration_ms=duration_ms,
+            provider=_asr_provider_name(),
+        )
+
     if ASR_PROVIDER in {"qwen3-asr", "qwen_asr", "qwen3_asr"}:
         return _transcribe_qwen_sync(audio, request)
 
@@ -860,6 +875,34 @@ def _transcribe_sync(audio: npt.NDArray[np.float32], request: AsrRequest) -> Asr
         duration_ms=duration_ms,
         provider=_asr_provider_name(),
     )
+
+
+def _audio_has_speech(audio: npt.NDArray[np.float32], sample_rate: int) -> bool:
+    """Reject genuinely silent windows before they can become model hallucinations.
+
+    Very short arrays are kept compatible with provider unit tests and are not a
+    meaningful silence sample. Real capture windows are scored using short RMS
+    frames relative to the quietest part of the same window.
+    """
+
+    if audio.size == 0:
+        return False
+    if audio.size < max(320, int(sample_rate * 0.25)):
+        return True
+    samples = np.nan_to_num(audio.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
+    samples = samples - float(np.mean(samples))
+    frame_size = max(160, int(round(sample_rate * 0.02)))
+    frame_count = samples.size // frame_size
+    if frame_count == 0:
+        return False
+    frames = samples[: frame_count * frame_size].reshape(frame_count, frame_size)
+    rms = np.sqrt(np.mean(np.square(frames), axis=1))
+    levels = np.maximum(-96.0, 20.0 * np.log10(np.maximum(rms, 1e-5)))
+    noise_floor = float(np.percentile(levels, 20))
+    threshold = max(-55.0, min(-35.0, noise_floor + 7.0))
+    voiced = levels >= threshold
+    voiced_count = int(np.count_nonzero(voiced))
+    return voiced_count >= 2 and voiced_count / len(levels) >= 0.04
 
 
 def _get_hymt_runtime() -> tuple[Any, Any]:
@@ -958,12 +1001,7 @@ def _translation_text_contract_ok(text: str, source_language: str, target_langua
 def _contains_translation_metadata(text: str) -> bool:
     """Reject provider labels that leaked into the user-facing translation field."""
 
-    labels = (
-        "source language:", "source_language:", "target language:", "target_language:",
-        "terminology:", "glossary:", "text to translate:", "translation:",
-        "源语言：", "源语言:", "目标语言：", "目标语言:", "术语：", "术语:",
-        "译文：", "译文:",
-    )
+    labels = _translation_metadata_labels()
     return any(
         line.strip().casefold().startswith(label)
         for line in text.splitlines()
@@ -971,20 +1009,53 @@ def _contains_translation_metadata(text: str) -> bool:
     )
 
 
-def _clean_translation_output(text: str) -> str:
-    """Remove a bounded provider header without touching the translated body."""
-
-    labels = (
-        "source language:", "source_language:", "target language:", "target_language:",
-        "terminology:", "glossary:", "text to translate:", "translation:",
-        "源语言：", "源语言:", "目标语言：", "目标语言:", "术语：", "术语:",
+def _translation_metadata_labels() -> tuple[str, ...]:
+    return (
+        "previous context for terminology only:", "translated text:",
+        "text to translate:", "source language:", "source_language:",
+        "target language:", "target_language:", "terminology:", "glossary:",
+        "translation:", "源语言：", "源语言:", "目标语言：", "目标语言:",
+        "术语背景：", "术语背景:", "之前的术语背景仅用于说明：", "之前的术语背景仅用于说明:",
+        "术语：", "术语:", "翻译后的文本：", "翻译后的文本:", "翻译后文本：", "翻译后文本:",
         "译文：", "译文:",
     )
+
+
+def _translation_content_labels() -> tuple[str, ...]:
+    return (
+        "translated text:", "translation:", "翻译后的文本：", "翻译后的文本:",
+        "翻译后文本：", "翻译后文本:", "译文：", "译文:",
+    )
+
+
+def _metadata_remainder(line: str) -> str | None:
+    normalized = line.strip().casefold()
+    for label in sorted(_translation_metadata_labels(), key=len, reverse=True):
+        if normalized.startswith(label):
+            original = line.strip()
+            if label in _translation_content_labels():
+                return original[len(label) :].lstrip()
+            return ""
+    return None
+
+
+def _clean_translation_output(text: str) -> str:
+    """Remove only leading provider metadata while preserving same-line content."""
+
     lines = text.strip().splitlines()
-    cleaned = [
-        line for index, line in enumerate(lines)
-        if index >= 8 or not any(line.strip().casefold().startswith(label) for label in labels)
-    ]
+    cleaned: list[str] = []
+    leading = True
+    for line in lines:
+        if leading:
+            remainder = _metadata_remainder(line)
+            if remainder is not None:
+                if remainder:
+                    cleaned.append(remainder)
+                continue
+            if not line.strip():
+                continue
+            leading = False
+        cleaned.append(line)
     return "\n".join(cleaned).strip()
 
 

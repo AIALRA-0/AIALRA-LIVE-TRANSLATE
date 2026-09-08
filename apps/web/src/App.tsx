@@ -102,8 +102,10 @@ const SYSTEM_NOTE_LABELS: Record<string, string> = {
   "user-notes": "我的笔记",
 };
 
-function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: boolean, mode: CaptureMode = "microphone"): string {
+function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: boolean, mode: CaptureMode = "microphone", statusReady = true): string {
   const inputName = mode === "screen" ? "共享音频" : "麦克风";
+  if (!statusReady && phase === "idle") return "正在检查录音状态";
+  if (phase === "checking-status") return "正在检查课程状态";
   if (phase === "requesting-permission") return `正在申请${inputName}权限`;
   if (phase === "acquiring-lease") return "正在获取录音权限";
   if (phase === "connecting") return "正在连接服务器";
@@ -121,19 +123,21 @@ function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: 
   return "尚未录音";
 }
 
-function capturePhaseTone(phase: CapturePhase, sessionState: string, hasLease: boolean): "green" | "yellow" | "red" | "gray" {
-  if (phase === "error" || (sessionState === "recording" && !hasLease && !["recoverable", "processing"].includes(phase))) return "red";
+function capturePhaseTone(phase: CapturePhase, sessionState: string, hasLease: boolean, statusReady = true): "green" | "yellow" | "red" | "gray" {
+  if (!statusReady) return "gray";
+  if (phase === "error" || sessionState === "failed") return "red";
   if (phase === "recording") return "yellow";
   if (phase === "blocked") return "yellow";
   if (phase === "recoverable") return "green";
-  if (["requesting-permission", "acquiring-lease", "connecting", "stopping", "processing"].includes(phase) || sessionState === "processing") return "yellow";
+  if (["checking-status", "requesting-permission", "acquiring-lease", "connecting", "stopping", "processing"].includes(phase) || sessionState === "processing") return "yellow";
+  if (sessionState === "recording" && !hasLease) return "yellow";
   if (sessionState === "ready" || sessionState === "completed") return "green";
-  if (sessionState === "failed") return "red";
   return "gray";
 }
 
 function captureActionLabel(phase: CapturePhase, hasLease: boolean, mode: CaptureMode = "microphone"): string {
   const inputName = mode === "screen" ? "共享音频" : "麦克风";
+  if (phase === "checking-status") return "正在检查课程状态";
   if (phase === "requesting-permission") return `正在申请${inputName}权限`;
   if (phase === "acquiring-lease") return "正在获取录音权限";
   if (phase === "connecting") return "正在连接服务器";
@@ -680,10 +684,9 @@ function DocumentItem({ item, languageView }: { item: TimelineItem; languageView
   if (item.kind === "paragraph") {
     return (
       <article id={`evidence-${item.id}`} className="course-paragraph" data-testid="course-paragraph">
-        <header><time>{time}</time><span>{item.sourceProvider || "等待 Provider"}</span></header>
+        <header><time>{time}</time></header>
         {languageView !== "translation" && <p className="source-text">{item.original}</p>}
         {languageView !== "source" && <p className="translation-text">{item.translationMode === "same_language" ? "原文，无需翻译" : item.translation || "等待真实模型翻译"}</p>}
-        {item.translationProvider && <small>{item.translationProvider}</small>}
       </article>
     );
   }
@@ -692,7 +695,6 @@ function DocumentItem({ item, languageView }: { item: TimelineItem; languageView
       <header><strong>{item.title}</strong><time>{time}</time></header>
       {item.imageUrl && <img src={item.imageUrl} alt={item.title} />}
       {item.sections?.length ? <div className="insight-sections">{item.sections.map((section, index) => <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p></section>)}</div> : <p>{item.body || "正在解析内容"}</p>}
-      {item.provider && <small>{item.provider}</small>}
       {item.evidenceIds.length > 0 && <footer>{item.evidenceIds.slice(0, 6).map((id) => <button key={id} className="evidence-link" type="button" title={`回到证据 ${id}`} onClick={() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}>证据 · {id.slice(-6)}</button>)}</footer>}
     </aside>
   );
@@ -722,14 +724,17 @@ function ParagraphInsightPanel({ items, documentRef }: { items: TimelineItem[]; 
   const insight = paragraph
     ? [...insights].reverse().find((item) => item.evidenceIds.includes(paragraph.id))
     : undefined;
-  const summary = insight?.sections?.find((section) => section.label === "本段要点");
+  const groupParagraphs = insight
+    ? paragraphs.filter((item) => insight.evidenceIds.includes(item.id))
+    : paragraph ? [paragraph] : [];
+  const summary = insight?.sections?.find((section) => section.label === "当前内容组总结");
   const terms = insight?.sections?.filter((section) => section.label.startsWith("知识补充")) ?? [];
   return (
     <section className="side-card paragraph-insight-panel" data-testid="paragraph-insight-panel">
-      <div className="card-heading"><h3>当前段落</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "等待补充"}</StatusBadge></div>
-      {paragraph ? <small className="paragraph-insight-source">{paragraph.original}</small> : <p>出现稳定段落后，这里会显示对应内容。</p>}
-      <section className="paragraph-summary-section"><strong>段落总结</strong><p>{summary?.text ?? "当前段落的总结正在生成。"}</p></section>
-      <section className="paragraph-terms-section"><strong>知识补充</strong>{terms.length ? terms.map((term, index) => <p key={`${term.label}:${index}`}><b>{term.label.replace("知识补充 · ", "")}</b>：{term.text}</p>) : <p>当前段落还没有检测到需要解释的专业名词或缩写。</p>}</section>
+      <div className="card-heading"><h3>当前内容组</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "等待补充"}</StatusBadge></div>
+      {groupParagraphs.length ? <small className="paragraph-insight-source">{groupParagraphs.map((item) => item.original).join(" ")}</small> : <p>出现稳定内容组后，这里会显示对应总结和知识补充。</p>}
+      <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "当前内容组的总结正在生成。"}</p></section>
+      <section className="paragraph-terms-section"><strong>知识补充</strong>{terms.length ? terms.map((term, index) => <p key={`${term.label}:${index}`}><b>{term.label.replace("知识补充 · ", "")}</b>：{term.text}</p>) : <p>当前内容组还没有检测到需要解释的专业名词或缩写。</p>}</section>
     </section>
   );
 }
@@ -783,6 +788,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [capturePhase, setCapturePhase] = useState<CapturePhase>("idle");
   const [captureNotice, setCaptureNotice] = useState("");
   const [recordingStatus, setRecordingStatus] = useState<RecordingProjectStatus | null>(null);
+  const [recordingStatusReady, setRecordingStatusReady] = useState(false);
+  const recordingStatusRequest = useRef(0);
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -792,6 +799,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [selectedAudioInput, setSelectedAudioInput] = useState(() => window.localStorage.getItem(audioInputStorageKey(project.id)) ?? "");
   const [audioInputsReady, setAudioInputsReady] = useState(false);
+  const [audioPermissionPending, setAudioPermissionPending] = useState(false);
   const [audioDeviceNotice, setAudioDeviceNotice] = useState("");
   const [micProgress, setMicProgress] = useState<MicrophoneTestProgress | null>(null);
   const [micResult, setMicResult] = useState<MicrophoneTestResult | null>(null);
@@ -813,9 +821,12 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   const refreshRecordingStatus = useCallback(async (): Promise<RecordingProjectStatus | null> => {
+    const requestId = ++recordingStatusRequest.current;
     try {
       const next = await api.recordingStatus(project.id, recorderDeviceId());
+      if (requestId !== recordingStatusRequest.current) return next;
       setRecordingStatus(next);
+      setRecordingStatusReady(true);
       setStatusClock(new Date(next.server_time).getTime());
       if (next.lease?.holder === "other") {
         capture.current?.revoke();
@@ -843,11 +854,13 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       }
       return next;
     } catch {
+      if (requestId === recordingStatusRequest.current) setRecordingStatusReady(true);
       return null;
     }
   }, [project.id, initial.id]);
 
   const refreshAudioInputs = useCallback(async (requestPermission = false): Promise<MediaDeviceInfo[]> => {
+    if (requestPermission) setAudioPermissionPending(true);
     try {
       const devices = await listAudioInputs(requestPermission);
       const hasNamedInputs = devices.some((device) => device.label.trim().length > 0);
@@ -869,6 +882,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       const message = caught instanceof Error ? caught.message : "无法读取麦克风设备，请检查浏览器和系统权限";
       setAudioDeviceNotice(message);
       throw caught;
+    } finally {
+      if (requestPermission) setAudioPermissionPending(false);
     }
   }, []);
 
@@ -933,17 +948,33 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     const initialDeviceRefresh = window.setTimeout(() => void refreshAudioInputs(false).catch(() => undefined), 0);
     const onDeviceChange = () => void refreshAudioInputs(false).catch(() => undefined);
     navigator.mediaDevices?.addEventListener("devicechange", onDeviceChange);
-    const restored = restoredLocalLease(project.id, initial.id);
-    if (restored) void api.renewRecording(project.id, initial.id, recorderDeviceId(), restored.lease_token).then(() => {
-      setLease(restored);
-      setCapturePhase("connecting");
-      setCaptureStatus("录音租约已恢复，可继续收音");
-    }).catch(() => saveLocalLease(null));
     return () => {
       window.clearTimeout(initialDeviceRefresh);
       navigator.mediaDevices?.removeEventListener("devicechange", onDeviceChange);
     };
   }, [project.id, initial.id, refreshAudioInputs]);
+
+  useEffect(() => {
+    let active = true;
+    const restored = restoredLocalLease(project.id, initial.id);
+    if (!restored) return () => { active = false; };
+    const timer = window.setTimeout(() => {
+      void refreshRecordingStatus().then((status) => {
+        if (!active || !status) return;
+        if (status.lease?.holder !== "self" || status.lease.session_id !== initial.id) {
+          saveLocalLease(null);
+          return;
+        }
+        return api.renewRecording(project.id, initial.id, recorderDeviceId(), restored.lease_token).then(() => {
+          if (!active) return;
+          setLease(restored);
+          setCapturePhase("connecting");
+          setCaptureStatus("录音租约已恢复，可继续收音");
+        }).catch(() => saveLocalLease(null));
+      });
+    }, 0);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [project.id, initial.id, refreshRecordingStatus]);
 
   useEffect(() => {
     const key = audioInputStorageKey(project.id);
@@ -1019,10 +1050,9 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   async function runMicTest(): Promise<void> {
     setMicTesting(true); setMicResult(null); setCaptureNotice("");
     try {
-      const devices = await refreshAudioInputs(true);
-      const requestedDeviceId = selectedAudioInput && devices.some((device) => device.deviceId === selectedAudioInput && device.deviceId !== "default" && device.deviceId !== "communications") ? selectedAudioInput : undefined;
-      if (!requestedDeviceId && selectedAudioInput) setSelectedAudioInput("");
+      const requestedDeviceId = selectedAudioInput && selectedAudioInput !== "default" && selectedAudioInput !== "communications" ? selectedAudioInput : undefined;
       setMicResult(await testMicrophone(requestedDeviceId, setMicProgress));
+      await refreshAudioInputs(false).catch(() => undefined);
     }
     catch (caught) { setCaptureNotice(caught instanceof Error ? caught.message : "麦克风测试失败"); }
     finally { setMicTesting(false); setMicProgress(null); }
@@ -1072,7 +1102,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     setBusy(true);
     setNotice("");
     setCaptureNotice("");
-    setCapturePhase("requesting-permission");
+    setCapturePhase("checking-status");
     let acquired: RecordingLease | null = null;
     let preparedCapture: BrowserCapture | null = null;
     try {
@@ -1098,13 +1128,12 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         setCaptureNotice("GPU 正在处理已有课程，新项目暂时不能开始录音；当前录音、停止和确认不会受影响。");
         return;
       }
-      const availableInputs = captureMode === "microphone" ? await refreshAudioInputs(true) : [];
-      const requestedDeviceId = selectedAudioInput && availableInputs.some((device) => device.deviceId === selectedAudioInput && device.deviceId !== "default" && device.deviceId !== "communications")
+      const requestedDeviceId = captureMode === "microphone" && selectedAudioInput && selectedAudioInput !== "default" && selectedAudioInput !== "communications"
         ? selectedAudioInput
         : undefined;
-      if (selectedAudioInput && !requestedDeviceId) setSelectedAudioInput("");
       // Request the browser input while the click still carries user intent.
       // The server lease is created only after this local step succeeds.
+      setCapturePhase("requesting-permission");
       preparedCapture = new BrowserCapture(
         project.id,
         session.id,
@@ -1223,8 +1252,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     ? "录音已停止，音频已保存，后台正在生成结果"
     : session.state === "completed" && summaryPending ? "录音已完成，课程总结正在后台生成"
       : session.state === "completed" ? "录音和模型处理均已完成" : captureStatus;
-  const captureTone = capturePhaseTone(capturePhase, session.state, Boolean(lease));
-  const captureLabel = capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode);
+  const captureTone = capturePhaseTone(capturePhase, session.state, Boolean(lease), recordingStatusReady);
+  const captureLabel = capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode, recordingStatusReady);
   const currentRecordingStatus = recordingStatus?.sessions?.find((item) => item.session_id === initial.id);
   const conflictingLeaseSeconds = recordingStatus?.lease?.holder === "other"
     ? Math.max(0, Math.ceil((new Date(recordingStatus.lease.expires_at).getTime() - statusClock) / 1_000))
@@ -1340,14 +1369,14 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
              <label>音频来源<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as CaptureMode)} disabled={isRecording}><option value="microphone">麦克风</option><option value="screen">浏览器标签或共享音频</option></select></label>
              {captureMode === "microphone" && <>
                <label>输入设备<select value={selectedAudioInput} onChange={(event) => { setSelectedAudioInput(event.target.value); setMicResult(null); }} disabled={isRecording}><option value="">{defaultAudioLabel}</option>{audioInputs.filter((device) => device.deviceId !== "default" && device.deviceId !== "communications").map((device) => <option key={device.deviceId} value={device.deviceId}>{formatAudioInputLabel(device)}</option>)}</select></label>
-               <div className="audio-device-row"><span><strong>当前设备</strong><small>{selectedAudioLabel}</small></span><button className="text-link-button" type="button" disabled={isRecording || micTesting} onClick={() => void refreshAudioInputs(true).catch(() => undefined)}>{audioInputsReady ? "刷新设备" : "允许权限并刷新设备"}</button></div>
+              <div className="audio-device-row"><span><strong>当前设备</strong><small>{selectedAudioLabel}</small></span><button className="text-link-button" type="button" disabled={isRecording || micTesting || audioPermissionPending} onClick={() => void refreshAudioInputs(true).catch(() => undefined)}>{audioPermissionPending ? "正在等待系统权限" : audioInputsReady ? "刷新设备" : "允许权限并刷新设备"}</button></div>
                {audioDeviceNotice && <small className="audio-device-notice" role="status">{audioDeviceNotice}</small>}
              </>}
             <div className="mic-test">
               <div className="mic-meter"><span style={{ width: `${Math.max(2, Math.min(100, ((micProgress?.levelDbfs ?? -96) + 96) / 0.96))}%` }} /></div>
               <StatusBadge tone={micTesting ? "yellow" : micResult?.passed ? "green" : micResult ? "red" : "yellow"}>{micTesting ? micProgress?.phase === "quiet" ? "请保持安静" : "请朗读一句话" : micResult?.message ?? "麦克风尚未测试"}</StatusBadge>
-              {micResult && <small>噪声 {micResult.noiseFloorDbfs.toFixed(1)} dBFS · 语音 {micResult.speechP95Dbfs.toFixed(1)} dBFS · 峰值 {micResult.peakDbfs.toFixed(1)} dBFS</small>}
-              <button className="secondary-button" disabled={micTesting || isRecording || captureMode !== "microphone"} onClick={() => void runMicTest()}>{micTesting ? "测试中 4 秒" : "测试麦克风"}</button>
+              {micResult && <small>噪声 {micResult.noiseFloorDbfs.toFixed(1)} dBFS · 语音 {micResult.speechP95Dbfs.toFixed(1)} dBFS · 有声帧 {Math.round(micResult.voicedRatio * 100)}% · 峰值 {micResult.peakDbfs.toFixed(1)} dBFS</small>}
+              <button className="secondary-button" disabled={micTesting || audioPermissionPending || isRecording || captureMode !== "microphone"} onClick={() => void runMicTest()}>{micTesting ? "测试中 4 秒" : "测试麦克风"}</button>
             </div>
             <p className="capture-help">音频在确认写入后才会从本机发送队列中移除；浏览器端不需要额外配对设备。</p>
             {captureActive && wakeLockNotice && <small className="wake-lock-notice" role="status">{wakeLockNotice}</small>}
@@ -1358,13 +1387,13 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             {captureNotice && <div className="capture-inline-alert" role="alert">{captureNotice}</div>}
             <p className="capture-copy" aria-live="polite"><strong>{captureLabel}</strong> · {visibleCaptureStatus}</p>
             {!isRecording ? (
-              <button className="primary-button" disabled={busy || capacityBlocked || capturePhase === "processing" || session.state === "processing"} onClick={() => void begin()}>{captureActionLabel(capturePhase, Boolean(lease), captureMode)}</button>
+              <button className="primary-button" disabled={busy || audioPermissionPending || capacityBlocked || capturePhase === "processing" || session.state === "processing"} onClick={() => void begin()}>{captureActionLabel(capturePhase, Boolean(lease), captureMode)}</button>
             ) : lease && captureActive ? (
               <button className="stop-button" disabled={busy} onClick={() => void stop()}>停止并完成处理</button>
             ) : lease ? (
               <button className="primary-button" disabled={busy} onClick={() => void continueCapture()}>继续连接收音</button>
             ) : currentRecordingStatus?.recoverable ? (
-              <button className="primary-button" disabled={busy} onClick={() => void begin()}>确认并继续本次课程</button>
+              <button className="primary-button" disabled={busy || audioPermissionPending} onClick={() => void begin()}>确认并继续本次课程</button>
             ) : (
               <button className="primary-button" disabled>等待后台处理完成</button>
             )}

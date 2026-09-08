@@ -18,6 +18,7 @@ from workers.model_worker.main import (
     ExplanationRequest,
     ExplanationResponse,
     SummaryRequest,
+    _audio_has_speech,
     _clean_translation_output,
     _dedupe_text_items,
     _has_explanation_shape,
@@ -205,6 +206,23 @@ def test_qwen_asr_path_uses_the_configured_language_and_provider(
     assert result.text == "Attention uses context."
 
 
+def test_silent_audio_is_rejected_before_provider_inference() -> None:
+    assert not _audio_has_speech(np.zeros(16_000, dtype=np.float32), 16_000)
+
+
+def test_quiet_speech_like_audio_is_not_rejected_as_silence() -> None:
+    samples = np.arange(16_000, dtype=np.float32)
+    quiet_voice = (0.01 * np.sin(2 * np.pi * 180 * samples / 16_000)).astype(np.float32)
+    envelope = np.zeros(16_000, dtype=np.float32)
+    envelope[2_000:7_000] = np.linspace(0.2, 1.0, 5_000, dtype=np.float32)
+    envelope[9_000:14_000] = np.linspace(1.0, 0.2, 5_000, dtype=np.float32)
+    assert _audio_has_speech(quiet_voice * envelope, 16_000)
+
+
+def test_short_provider_probe_remains_compatible_with_unit_inputs() -> None:
+    assert _audio_has_speech(np.zeros(1, dtype=np.float32), 16_000)
+
+
 def test_translation_contract_normalizes_region_codes_and_unicode_latin() -> None:
     assert _translation_contract_ok(
         {"source_text": "Café déjà vu.", "translation": "咖啡似曾相识。"},
@@ -227,6 +245,7 @@ def test_translation_prompt_keeps_source_and_translation_fields_separate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "ollama")
 
     async def ollama_json(
         system: str,
@@ -285,6 +304,12 @@ def test_translation_contract_rejects_language_metadata_leaking_into_display() -
     )
 
 
+def test_translation_cleaner_removes_multilingual_labels_without_losing_same_line_text() -> None:
+    leaked = "之前的术语背景仅用于说明：是的。\n翻译后的文本：这是译文。"
+    assert _clean_translation_output(leaked) == "这是译文。"
+    assert not model_worker._contains_translation_metadata(_clean_translation_output(leaked))
+
+
 def test_chinese_explanation_requires_chinese_summary() -> None:
     assert _uses_requested_explanation_language({"summary": "中文总结"}, "zh-CN")
     assert not _uses_requested_explanation_language({"summary": "English summary"}, "zh-CN")
@@ -295,6 +320,7 @@ def test_background_model_restores_translation_before_releasing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "ollama")
 
     async def unload(model: str) -> None:
         calls.append(f"unload:{model}")

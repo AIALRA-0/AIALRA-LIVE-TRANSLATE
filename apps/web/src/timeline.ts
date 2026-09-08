@@ -18,8 +18,36 @@ function evidence(value: unknown): string[] {
 
 function cleanTranslationDisplay(value: unknown): string {
   if (typeof value !== "string") return "";
-  const labels = ["source language:", "source_language:", "target language:", "target_language:", "terminology:", "glossary:", "text to translate:", "translation:", "源语言：", "源语言:", "目标语言：", "目标语言:", "术语：", "术语:", "译文：", "译文:"];
-  return value.trim().split(/\r?\n/).filter((line, index) => index >= 8 || !labels.some((label) => line.trim().toLocaleLowerCase().startsWith(label))).join("\n").trim();
+  const labels = [
+    "previous context for terminology only:", "translated text:", "text to translate:",
+    "source language:", "source_language:", "target language:", "target_language:",
+    "terminology:", "glossary:", "translation:", "源语言：", "源语言:", "目标语言：",
+    "目标语言:", "术语背景：", "术语背景:", "之前的术语背景仅用于说明：", "之前的术语背景仅用于说明:",
+    "术语：", "术语:", "翻译后的文本：", "翻译后的文本:", "翻译后文本：", "翻译后文本:",
+    "译文：", "译文:",
+  ].sort((left, right) => right.length - left.length);
+  const contentLabels = new Set([
+    "translated text:", "translation:", "翻译后的文本：", "翻译后的文本:",
+    "翻译后文本：", "翻译后文本:", "译文：", "译文:",
+  ]);
+  const lines = value.trim().split(/\r?\n/);
+  const cleaned: string[] = [];
+  let leading = true;
+  for (const line of lines) {
+    if (leading) {
+      const normalized = line.trim().toLocaleLowerCase();
+      const label = labels.find((candidate) => normalized.startsWith(candidate));
+      if (label) {
+        const remainder = contentLabels.has(label) ? line.trim().slice(label.length).trimStart() : "";
+        if (remainder) cleaned.push(remainder);
+        continue;
+      }
+      if (!line.trim()) continue;
+      leading = false;
+    }
+    cleaned.push(line);
+  }
+  return cleaned.join("\n").trim();
 }
 
 // A course document pairs stable source segments with translations and expands structured teaching output.
@@ -73,7 +101,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       const provider = text(result.provider);
       const sections: NonNullable<TimelineItem["sections"]> = [];
       const summary = text(result.paragraph_summary) || text(result.summary);
-      if (summary) sections.push({ label: "本段要点", text: summary });
+      if (summary) sections.push({ label: "当前内容组总结", text: summary });
       const terms = Array.isArray(result.terms) ? result.terms : Array.isArray(result.rare_terms) ? result.rare_terms : [];
       terms.forEach((entry) => {
         const value = object(entry); const term = text(value.term); const explanation = text(value.explanation) || text(value.one_line);

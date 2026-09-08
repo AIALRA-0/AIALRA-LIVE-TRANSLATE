@@ -85,7 +85,7 @@ def stage_latency(event_type: str) -> list[float]:
     return [
         float(payload["elapsed_ms"])
         for current_type, payload in payloads
-        if current_type == event_type and isinstance(payload.get("elapsed_ms"), (int, float))
+        if current_type == event_type and isinstance(payload.get("elapsed_ms"), int | float)
     ]
 
 

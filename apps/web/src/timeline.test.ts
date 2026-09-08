@@ -58,6 +58,17 @@ describe("timeline mapping", () => {
     expect(paragraph.translation).toBe("注意力使用上下文。");
   });
 
+  it("removes explanation labels without dropping translated text on the same line", () => {
+    const source = event("paragraph.finalized", { paragraph_id: "para-2", text: "Attention uses context." });
+    const translation = event("translation.finalized", {
+      paragraph_id: "para-2",
+      source_text: "Attention uses context.",
+      text: "翻译后的文本：注意力使用上下文。",
+    });
+    const [paragraph] = buildCourseDocument([source, translation]);
+    expect(paragraph.translation).toBe("注意力使用上下文。");
+  });
+
   it("keeps raw acoustic fragments internal and shows one coherent paragraph", () => {
     const fragment = event("segment.finalized", { segment_id: "seg-1", text: "attention", display_mode: "internal_fragment" });
     const paragraph = { ...event("paragraph.finalized", { paragraph_id: "para-1", segment_ids: ["seg-1"], text: "Attention uses context.", provider: "asr" }), event_id: "evt-paragraph" };
@@ -73,7 +84,7 @@ describe("timeline mapping", () => {
     })]);
     expect(item.kind).toBe("insight");
     expect(item.sections).toHaveLength(2);
-    expect(item.sections?.map((section) => section.label)).toEqual(["本段要点", "知识补充 · token"]);
+    expect(item.sections?.map((section) => section.label)).toEqual(["当前内容组总结", "知识补充 · token"]);
   });
 
   it("shows a retryable summary failure without inventing summary text", () => {

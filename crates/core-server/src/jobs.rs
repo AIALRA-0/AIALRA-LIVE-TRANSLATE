@@ -1226,14 +1226,27 @@ fn maybe_enqueue_coherent_explanation(
         })
         .max();
     let pending = &paragraphs[last_explained.map_or(0, |index| index + 1)..];
-    let chars = pending
-        .iter()
-        .map(|(_, text)| text.chars().count())
-        .sum::<usize>();
-    if pending.len() < AUTO_EXPLAIN_MIN_PARAGRAPHS || chars < AUTO_EXPLAIN_MIN_CHARS {
+    let mut group = Vec::new();
+    let mut chars = 0;
+    for (paragraph_id, text) in pending {
+        if group.len() >= 8 {
+            break;
+        }
+        group.push(paragraph_id.clone());
+        chars += text.chars().count();
+        if group.len() >= AUTO_EXPLAIN_MIN_PARAGRAPHS && chars >= AUTO_EXPLAIN_MIN_CHARS {
+            break;
+        }
+    }
+    if group.len() < AUTO_EXPLAIN_MIN_PARAGRAPHS || chars < AUTO_EXPLAIN_MIN_CHARS {
         return Ok(());
     }
-    crate::explanation::enqueue_explanation(state, session_id, "coherent_passage")?;
+    crate::explanation::enqueue_explanation_for_paragraphs(
+        state,
+        session_id,
+        "coherent_content_group",
+        &group,
+    )?;
     Ok(())
 }
 
@@ -1704,7 +1717,7 @@ mod tests {
                 demo_mode: false,
             })
             .unwrap();
-        for index in 1..=4 {
+        for index in 1..=12 {
             state
                 .emit_idempotent(
                     &format!("same-language-segment-{index}"),
@@ -1805,7 +1818,7 @@ mod tests {
                 demo_mode: false,
             })
             .unwrap();
-        for index in 1..=4 {
+        for index in 1..=12 {
             state
                 .emit_idempotent(
                     &format!("paragraph-{index}"),
@@ -1837,8 +1850,17 @@ mod tests {
         assert_eq!(job.job_type, "explain");
         assert_eq!(
             job.input.get("trigger").and_then(|value| value.as_str()),
-            Some("coherent_passage")
+            Some("coherent_content_group")
         );
+        assert_eq!(
+            job.input
+                .get("segments")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(4)
+        );
+        assert_eq!(job.input["segments"][0]["id"], "para-1");
+        assert_eq!(job.input["segments"][3]["id"], "para-4");
     }
 
     #[test]

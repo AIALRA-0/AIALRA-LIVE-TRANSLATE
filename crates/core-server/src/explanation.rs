@@ -11,7 +11,7 @@ pub fn enqueue_explanation(
     session_id: &str,
     trigger: &str,
 ) -> Result<ModelJobRecord> {
-    let session = state
+    state
         .store
         .get_session(session_id)?
         .context("session not found")?;
@@ -19,13 +19,66 @@ pub fn enqueue_explanation(
     if segments.is_empty() {
         bail!("at least one stable segment is required before explanation");
     }
+    enqueue_with_evidence(state, session_id, trigger, segments, pages, false)
+}
+
+/// Enqueue one stable, not-yet-explained content group selected by the scheduler.
+/// The selector lives in `jobs.rs`, while this function owns the exact evidence
+/// payload and idempotency boundary used by both manual and automatic paths.
+pub fn enqueue_explanation_for_paragraphs(
+    state: &AppState,
+    session_id: &str,
+    trigger: &str,
+    paragraph_ids: &[String],
+) -> Result<ModelJobRecord> {
+    let session = state
+        .store
+        .get_session(session_id)?
+        .context("session not found")?;
+    let events = state.store.list_events(session_id)?;
+    let mut segments = events
+        .iter()
+        .filter(|event| event.event_type == "paragraph.finalized")
+        .filter_map(|event| {
+            let id = event.payload.get("paragraph_id")?.as_str()?;
+            if !paragraph_ids.iter().any(|candidate| candidate == id) {
+                return None;
+            }
+            Some(json!({"id": id, "text": event.payload.get("text")?.as_str()?}))
+        })
+        .collect::<Vec<_>>();
+    bound_segment_text(&mut segments);
+    let (_, pages) = collect_evidence(state, session_id)?;
+    if segments.is_empty() {
+        bail!("selected content group has no stable segments");
+    }
+    enqueue_with_evidence(state, session_id, trigger, segments, pages, false).with_context(|| {
+        format!(
+            "failed to enqueue content group for {}",
+            session.target_language
+        )
+    })
+}
+
+fn enqueue_with_evidence(
+    state: &AppState,
+    session_id: &str,
+    trigger: &str,
+    segments: Vec<Value>,
+    pages: Vec<Value>,
+    deferred: bool,
+) -> Result<ModelJobRecord> {
+    let session = state
+        .store
+        .get_session(session_id)?
+        .context("session not found")?;
     let evidence_key = evidence_key(&segments);
     state.enqueue_job(NewModelJob {
         id: format!("job_{}", Uuid::now_v7().simple()),
         session_id: session_id.to_owned(),
         job_type: "explain".to_owned(),
         priority: 30,
-        input: explanation_input(segments, pages, &session.target_language, trigger, false),
+        input: explanation_input(segments, pages, &session.target_language, trigger, deferred),
         input_object_hash: None,
         idempotency_key: format!("explain:{session_id}:{trigger}:{evidence_key}"),
     })
@@ -131,6 +184,9 @@ pub fn activate_deferred_explanation(
         .map(Some)
 }
 
+const MAX_EXPLANATION_SEGMENTS: usize = 8;
+const MAX_EXPLANATION_CHARS: usize = 2_400;
+
 fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, Vec<Value>)> {
     let events = state.store.list_events(session_id)?;
     let has_paragraphs = events
@@ -153,9 +209,10 @@ fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, V
                 "text": event.payload.get("text")?.as_str()?
             }))
         })
-        .take(10)
+        .take(MAX_EXPLANATION_SEGMENTS)
         .collect::<Vec<_>>();
     segments.reverse();
+    bound_segment_text(&mut segments);
     let mut pages = events
         .iter()
         .rev()
@@ -175,6 +232,21 @@ fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, V
     Ok((segments, pages))
 }
 
+fn bound_segment_text(segments: &mut [Value]) {
+    let per_segment_budget = MAX_EXPLANATION_CHARS / segments.len().max(1);
+    for segment in segments {
+        let Some(text) = segment.get_mut("text") else {
+            continue;
+        };
+        let Some(raw) = text.as_str() else {
+            continue;
+        };
+        if raw.chars().count() > per_segment_budget {
+            *text = Value::String(raw.chars().take(per_segment_budget).collect());
+        }
+    }
+}
+
 fn explanation_input(
     segments: Vec<Value>,
     pages: Vec<Value>,
@@ -182,12 +254,14 @@ fn explanation_input(
     trigger: &str,
     deferred: bool,
 ) -> Value {
+    let content_group_id = format!("group_{}", evidence_key(&segments));
     json!({
         "deferred_material": deferred,
         "segments": segments,
         "asset_pages": pages,
         "target_language": target_language,
-        "trigger": trigger
+        "trigger": trigger,
+        "content_group_id": content_group_id
     })
 }
 

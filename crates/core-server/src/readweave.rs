@@ -1302,7 +1302,7 @@ fn render_explanations(events: &[aialra_event_protocol::EventEnvelope]) -> Strin
                         .collect::<String>()
                 })
                 .filter(|items| !items.is_empty())
-                .unwrap_or_else(|| "<li>本段没有需要单独解释的专业术语</li>".to_owned());
+                .unwrap_or_else(|| "<li>当前内容组没有需要单独解释的专业术语或缩写</li>".to_owned());
             let evidence = render_string_list(
                 result.get("evidence_segment_ids"),
                 "暂无字幕证据",
@@ -1312,7 +1312,7 @@ fn render_explanations(events: &[aialra_event_protocol::EventEnvelope]) -> Strin
                 "暂无课件页证据",
             );
             format!(
-                "<section><h3>{}</h3><h4>段落总结</h4><p>{}</p><h4>知识补充</h4><ul>{}</ul><p><small>字幕证据：{} · 课件证据：{} · 事件 {}</small></p></section>",
+                "<section><h3>{}</h3><h4>内容组总结</h4><p>{}</p><h4>知识补充</h4><ul>{}</ul><p><small>字幕证据：{} · 课件证据：{} · 事件 {}</small></p></section>",
                 event.ingested_at.format("%H:%M:%S"),
                 html(summary),
                 terms,
@@ -1735,6 +1735,7 @@ mod tests {
         )
         .unwrap();
         let rendered = render_explanations(&[event]);
+        assert!(rendered.contains("内容组总结"));
         assert!(rendered.contains("知识补充"));
         assert!(rendered.contains("attention"));
         assert!(rendered.contains("segment_1"));
