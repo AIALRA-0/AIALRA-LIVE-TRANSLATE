@@ -543,6 +543,10 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
 
     await _unload_ollama_model(VISION_MODEL)
     await _unload_ollama_model(SUMMARY_MODEL)
+    # Explanation is a background lane too. Keeping the dedicated ASR and MT
+    # weights resident while loading Ollama exhausts a 16 GiB GPU and stalls
+    # even short material explanations. The endpoint already holds the GPU gate.
+    await asyncio.to_thread(_release_asr_model_sync)
     segment_ids = [segment.id for segment in request.segments]
     page_ids = [page.id for page in request.asset_pages]
     system = (

@@ -416,3 +416,34 @@ def test_hymt_uses_bounded_official_context_without_metadata_labels() -> None:
     assert len(prompt) < 1400
     assert "Source language:" not in prompt
     assert "Text to translate:" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_explanation_releases_realtime_weights_before_loading_background_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def unload(_model: str) -> None:
+        pass
+
+    def release() -> None:
+        calls.append("release_realtime")
+
+    async def infer(*_args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append("infer_explanation")
+        return {"paragraph_summary": "转发减少流水线停顿。", "terms": []}
+
+    async def restore(_model: str) -> None:
+        calls.append("release_background")
+
+    monkeypatch.setattr(model_worker, "_unload_ollama_model", unload)
+    monkeypatch.setattr(model_worker, "_release_asr_model_sync", release)
+    monkeypatch.setattr(model_worker, "_ollama_json", infer)
+    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", restore)
+    model_worker._gpu_inflight = None
+    await model_worker.explain(ExplanationRequest(
+        segments=[EvidenceSegment(id="synthetic-segment", text="Forwarding reduces stalls.")],
+        asset_pages=[], target_language="zh-CN",
+    ))
+    assert calls == ["release_realtime", "infer_explanation", "release_background"]
