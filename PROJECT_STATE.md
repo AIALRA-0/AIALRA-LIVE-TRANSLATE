@@ -1,5 +1,17 @@
 # AIALRA-LIVE-TRANSLATE 项目状态
 
+## 0.2 2026-09-07 录音入口、静音门与内容组讲解收敛（已部署）
+
+当前运行版本为 `quality-v33-20260907-cb8564a`，运行代码 SHA 为 `cb8564a5b5380b03f974a3f59e8541a778c4c84e`。发布目录 `BUILD_ID`、Core `build_id` 和容器 OCI revision 完全一致；Core 为 `running/healthy`，restart count 为 `0`。GPU Worker 在线，ASR 为 `qwen3-asr:Qwen/Qwen3-ASR-1.7B@cuda`，实时翻译为 `hy-mt:tencent/HY-MT1.5-1.8B@cuda`，讲解为 `ollama:qwen2.5:7b-instruct@cuda`。
+
+本批收敛了用户已复现的入口与内容问题：页面首次检查录音状态时不再闪红或伪装成权限等待；麦克风权限只从用户操作发起，设备刷新、录音开始和麦克风测试不再并发索取设备；麦克风测试改为相对噪声底的自适应判断；ASR 在 Provider 前拒绝没有可信语音包络的静音窗口；翻译清理并拒绝源语言、目标语言、术语背景和“翻译后的文本”等元数据泄漏；自动讲解按连续稳定内容组生成，并把“内容组总结”和专业名词／缩写的一句话解释放在侧栏，不再逐段高频生成。
+
+新代码的本地快速验证全部通过：Rust workspace 70 项测试、格式和 Clippy；Python 48 项测试、Ruff 和 mypy；Web 37 项测试、TypeScript、ESLint 和生产构建；部署脚本 Bash 语法和 `git diff --check`。本地未启动 Docker、Docker Desktop 或 WSL，也未修改或停止 Paneltone。
+
+生产合成冒烟约 77 秒通过：21/21 音频块收到带 `commit_id` 的 durable ACK，同项目第二设备返回 `409`，产生 4 条稳定字幕、2 条稳定译文、1 页材料抽取和 1 张自动讲解卡；安全停止、ReadWeave 读回、队列排空和测试对象归档完成。冒烟前后累计失败数保持 `110`，活动租约、queued 和 leased 最终均为 `0`，Core 无新增重启。公网未登录入口进入 Authentik，`/internal/` 返回 `404`，伪造跨域 Origin 返回 `403`。
+
+真实 Chromium 的桌面与 390 像素检查通过：空闲录音状态不显示红色冲突，页面不会自动请求麦克风权限；根目录右键新建、独立拖拽手柄、主题切换、录音与材料入口、页面宽度边界和正文诊断过滤均正常。该自动化没有代替真实物理麦克风、静音房间、口音课程、内容质量和系统 Wake Lock 的用户验收；现在交给用户进行实机测试，后续只处理可复现的 P0/P1。
+
 ## 0.1 2026-09-06 翻译稳定性与 GPU 调度修复（已部署）
 
 本批代码已部署到 `quality-v32-20260906-8e80efc`。GitHub `main`、发布目录 `BUILD_ID`、Core `build_id` 和容器 OCI revision 均为 `8e80efc1ee0cb10fc10298c668332f48a464d484`。Core 为 `running/healthy`，restart count 为 `0`；GPU Worker 在线，ASR、实时翻译和 Ollama 均证明使用 CUDA；活动租约、排队任务和执行中任务均为 `0`。
