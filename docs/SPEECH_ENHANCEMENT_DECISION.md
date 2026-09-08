@@ -4,7 +4,7 @@
 
 ## 降噪方案比较
 
-v35 默认候选改为 GTCRN，使用已安装封装中的约 197 kB WASM，无新依赖。官方提供轻量流式实现，本项目通过 48 kHz 浏览器 AudioWorklet 实测。20 秒同输入试验中，清晰语音 SI-SDR 为 31.54 dB（RNNoise 15.07 dB），加噪语音为 12.70 dB（RNNoise 10.46 dB），更符合保留人声的方向；不据此宣称所有场景最好。[GTCRN 官方实现](https://github.com/Xiaobin-Rong/gtcrn)、[WASM 实现](https://github.com/sapphi-red/gtcrn-wasm)
+v35 默认已改为 GTCRN，使用已安装封装中的约 197 kB WASM，无新依赖。官方提供轻量流式实现，本项目通过 48 kHz 浏览器 AudioWorklet 实测。20 秒同输入试验中，清晰语音 SI-SDR 为 31.54 dB（RNNoise 15.07 dB），加噪语音为 12.70 dB（RNNoise 10.46 dB），更符合保留人声的方向；不据此宣称所有场景最好。[GTCRN 官方实现](https://github.com/Xiaobin-Rong/gtcrn)、[WASM 实现](https://github.com/sapphi-red/gtcrn-wasm)
 
 保留其他降噪和关闭选项，只加载同源静态资源，不向外部降噪服务发送音频。没有频响校准证据时不默认叠加自动 EQ；评价同时考虑人声保真、识别差异和用户听感。下表记录 v34 初始选型，RNNoise 已不再是 v35 默认值。
 

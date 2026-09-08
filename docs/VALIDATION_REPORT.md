@@ -1,12 +1,18 @@
 # AIALRA-LIVE-TRANSLATE 验证报告
 
-## 2026-09-08 v35 候选验证
+## 2026-09-08 v35 最终验证
+
+运行 `quality-v35-20260908-c6d95b1`，SHA `c6d95b16cced9295c93914f9bf78b4c2802e2ac8`；BUILD_ID、Core build_id、OCI revision 一致。Rust workspace 76 项、格式和 Clippy 通过；Python 运行代码未变，本次执行实际 CUDA 推理对照，不复用旧 Python 数字冒充新执行结果。
 
 回归覆盖不足 8 段不触发、成组去重、完整原文、16 个短段不阻塞，以及长片段／冒号／省略号等待与停止封存。Web 43 项、TypeScript、ESLint、构建通过；真实 Chromium 验证 GTCRN 默认、内容组在 GPU 前、无虚假生成提示、3 个 durable ACK、停止释放、笔记及桌面／390px 布局。
 
 20 秒清晰与加噪／混响音频分别通过 RNNoise、GTCRN 实时 AudioWorklet，4 次均无处理器错误、削波或非有限输出。相对清晰参考的语音区 SI-SDR，清晰输入分别 15.07／31.54 dB；加噪输入分别 10.46／12.70 dB，未增强基线 10.55 dB。模拟静音区衰减分别 4.45／32.85 dB。这是波形保真比较，不是听感或识别准确率。
 
-实际 CUDA 验证 4 次 ASR、3 次分句／合句翻译，输出均非空；GTCRN 与原声存在少量尾词差异，合句译文仍有术语关系错误。私有证据：`enhancement-ab.json`、`enhancement-metrics.json`、`v35-quality-metrics.json`、`v35-browser/browser-validation.json`；音轨和模型原文不进入 Git。生产尚待新 SHA 部署与冒烟。
+实际 CUDA 验证 4 次 ASR、3 次分句／合句翻译，输出均非空；GTCRN 与原声存在少量尾词差异，合句译文仍有术语关系错误。私有证据：`enhancement-ab.json`、`enhancement-metrics.json`、`v35-quality-metrics.json`、`v35-browser/browser-validation.json`；音轨和模型原文不进入 Git。
+
+生产双项目冒烟约 108 秒通过：42/42 ACK 带 commit_id，第二设备 409，8 条稳定识别、4 条译文；笔记保存／冲突／归属隔离、音频回听、材料确认后讲解、ReadWeave 可读。停止 471／282 ms、重复停止 188／180 ms，租约释放、队列排空，累计最终失败保持 121，Core healthy、重启数 0。两个专用测试项目已归档；未登录入口 302、公开 internal 404、非法 Origin 403。证据：`v35-production-smoke.json`、`v35-status.json`。
+
+本次后台整理约 57 秒，之后首次 ASR／翻译约 6.9／6.1 秒；没有把这些冷加载等待算成稳定低延迟。真实听感和新分组是否贴合课程话题，由用户接着体验。纯文档收尾与运行 SHA 分开记录，不重复部署。
 
 ## 2026-09-08 v34 最终验证
 
