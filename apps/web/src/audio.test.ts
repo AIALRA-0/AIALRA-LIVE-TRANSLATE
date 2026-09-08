@@ -76,6 +76,11 @@ describe("microphone device errors", () => {
 });
 
 describe("microphone level assessment", () => {
+  it("does not call normal continuous input weak when the user speaks during calibration", () => {
+    const result = assessMicrophoneLevels([-30, -29, -31], [-30, -28, -32, -29], 0);
+    expect(result.passed).toBe(true);
+    expect(result.message).toContain("无法区分背景噪声");
+  });
   it("accepts ordinary speech relative to a quiet room even below the old fixed peak threshold", () => {
     const result = assessMicrophoneLevels(
       [-62, -60, -61, -59, -60],

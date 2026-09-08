@@ -359,8 +359,11 @@ async def verify_model_worker(client: httpx.AsyncClient) -> dict[str, Any]:
     health = cast(dict[str, Any], response.json())
     if not health.get("asr_available") or not health.get("ollama_available"):
         raise RuntimeError("local ASR and Ollama providers must both be ready")
-    if not health.get("ollama_gpu_resident"):
+    dedicated_translation = str(health.get("translation_provider", "ollama:")).startswith("hy-mt:")
+    if not dedicated_translation and not health.get("ollama_gpu_resident"):
         raise RuntimeError("configured Ollama model is not resident on the local GPU")
+    if health.get("realtime_models_ready") is False:
+        raise RuntimeError("realtime model weights have not been warmed")
     if "translation_available" in health and not health.get("translation_available"):
         raise RuntimeError("configured translation provider is unavailable")
     asr_provider = str(health.get("asr_provider", ""))
@@ -452,6 +455,22 @@ async def renew_loop(gateway: httpx.AsyncClient, lane: Lane, job_id: str) -> Non
         response.raise_for_status()
 
 
+async def model_post(model: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+    """Busy means no inference was accepted; wait within the existing job lease.
+
+    Do not turn backpressure into three rapid failed model attempts. The lane's
+    renew loop stays active. Other HTTP failures keep the existing failure path.
+    """
+    deadline = time.monotonic() + 180
+    while True:
+        response = await model.post(url, **kwargs)
+        if response.status_code != 503 or response.headers.get("x-aialra-worker-state") != "busy":
+            return response
+        if time.monotonic() >= deadline:
+            return response
+        await asyncio.sleep(2)
+
+
 async def execute_job(
     gateway: httpx.AsyncClient,
     model: httpx.AsyncClient,
@@ -504,7 +523,7 @@ async def execute_job(
                 timings,
                 "inference_ms",
                 lambda: scheduler.run_asr(
-                    lambda: model.post(
+                    lambda: model_post(model,
                         f"{MODEL_WORKER_URL}/v1/asr/transcribe", json=model_input, timeout=180
                     )
                 ),
@@ -517,7 +536,7 @@ async def execute_job(
                 timings,
                 "inference_ms",
                 lambda: scheduler.run_translation(
-                    lambda: model.post(
+                    lambda: model_post(model,
                         f"{MODEL_WORKER_URL}/v1/translate", json=model_input, timeout=120
                     )
                 ),
@@ -530,7 +549,7 @@ async def execute_job(
                 timings,
                 "inference_ms",
                 lambda: scheduler.run_llm(
-                    lambda: model.post(
+                    lambda: model_post(model,
                         f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=180
                     )
                 ),
@@ -543,7 +562,7 @@ async def execute_job(
                 timings,
                 "inference_ms",
                 lambda: scheduler.run_exclusive(
-                    lambda: model.post(
+                    lambda: model_post(model,
                         f"{MODEL_WORKER_URL}/v1/summarize",
                         json=model_input,
                         timeout=SUMMARY_HTTP_TIMEOUT_SECONDS,
@@ -573,7 +592,7 @@ async def execute_job(
             )
 
         async def request_asset_parse() -> httpx.Response:
-            return await model.post(
+            return await model_post(model,
                 f"{MODEL_WORKER_URL}/v1/assets/parse",
                 files={
                     "file": (

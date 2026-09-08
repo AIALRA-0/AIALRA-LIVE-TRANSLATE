@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod audio;
+mod course_content;
 mod dingtalk;
 mod explanation;
 mod identity;
@@ -53,6 +54,14 @@ async fn main() -> Result<()> {
     // Versioned routes keep device and UI clients compatible across incremental releases.
     let api = Router::new()
         .route("/health", get(api::health))
+        .route(
+            "/sessions/{session_id}/notes",
+            get(course_content::get_note).put(course_content::save_note),
+        )
+        .route(
+            "/sessions/{session_id}/paragraphs/{paragraph_id}/audio",
+            get(course_content::paragraph_audio),
+        )
         .route("/runtime/status", get(api::health))
         .route("/workspace", get(workspace::workspace_snapshot))
         .route("/workspace/stream", get(workspace::stream_workspace))

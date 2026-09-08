@@ -491,3 +491,12 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
   .material-composer-heading { align-items: flex-start; flex-direction: column; }
   .workspace-drop-zone span { font-size: 7px; }
 }
+/* Content modules share bounded, readable controls in either theme. */
+.user-notes-editor { display: grid; gap: 1rem; padding: 1.25rem; }
+.user-notes-editor textarea { width: 100%; min-height: 45vh; resize: vertical; box-sizing: border-box; font: inherit; line-height: 1.75; padding: 1rem; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: .75rem; }
+.user-notes-editor > div { display: flex; flex-wrap: wrap; gap: .75rem; }
+.course-paragraph audio { width: 100%; max-width: 100%; margin-block: .75rem; }
+.paragraph-terms-section details { padding-block: .6rem; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+.paragraph-terms-section summary { cursor: pointer; font-weight: 600; }
+button:disabled, select:disabled { cursor: not-allowed; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid #2878df; outline-offset: 3px; }

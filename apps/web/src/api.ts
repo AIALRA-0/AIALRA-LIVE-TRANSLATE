@@ -51,7 +51,10 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
       recording_lease_conflict: "这个项目当前由另一台设备录音，请等待停止或租约到期后重试",
       recording_lease_expired: "本机录音租约已到期，未确认音频仍保留；请重新检查状态后继续",
       recording_capacity_unavailable: "GPU 正在处理已有课程，新项目暂时不能开始录音，请稍后重试",
-      recording_session_processing: "本次课程仍有后台任务处理中，请等待队列排空后再继续收音",
+      recording_session_processing: "课程正在收尾，音频已保留；可查看处理进度，或返回项目另建课程",
+      recording_consent_required: "请先确认录音许可，再开始录音",
+      recording_session_finished: "本次课程已结束，历史内容仍可查看；请返回项目新建课程",
+      recording_session_archived: "课程在回收站中，请先恢复后查看课程状态",
       recording_session_unavailable: "本次课程当前不能继续录音，请先查看课程状态",
       workspace_trash_blocked_active_session: "课程仍在录音或处理中，请先停止录音并等待处理完成",
       service_unavailable: "后台服务暂时不可用，请稍后重试",
@@ -74,6 +77,10 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
 // All calls use relative URLs so browser, Tauri, and the Rust static host share one client.
 export const api = {
   health: () => checked<RuntimeHealth>(fetch("/api/v1/health")),
+  note: (sessionId: string) => checked<{text: string; revision: number}>(fetch(`/api/v1/sessions/${sessionId}/notes`)),
+  saveNote: (sessionId: string, text: string, base_revision: number) => checked<{text: string; revision: number}>(fetch(`/api/v1/sessions/${sessionId}/notes`, {
+    method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify({text, base_revision}),
+  })),
   workspace: (deviceId: string) => checked<WorkspaceSnapshot>(fetch(`/api/v1/workspace?device_id=${encodeURIComponent(deviceId)}`)),
   createFolder: (input: { title: string; parent_id: string | null; sort_order?: number }) => checked<WorkspaceFolder>(fetch("/api/v1/workspace/folders", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),

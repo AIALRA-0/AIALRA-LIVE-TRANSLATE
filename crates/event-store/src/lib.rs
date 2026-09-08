@@ -1086,6 +1086,24 @@ impl EventStore {
         anyhow::bail!("event insertion was ignored by an unknown uniqueness conflict");
     }
 
+    pub fn latest_user_note(&self, session_id: &str) -> Result<Option<EventEnvelope>> {
+        self.lock()?.query_row(
+            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND source_id = 'user_notes' AND event_type = 'user.note.saved' ORDER BY sequence DESC LIMIT 1",
+            [session_id], map_event,
+        ).optional().context("read user note")
+    }
+
+    pub fn document_event(
+        &self,
+        session_id: &str,
+        document_id: &str,
+    ) -> Result<Option<EventEnvelope>> {
+        self.lock()?.query_row(
+            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND ((event_type = 'paragraph.finalized' AND json_extract(payload_json, '$.paragraph_id') = ?2) OR (event_type = 'segment.finalized' AND json_extract(payload_json, '$.segment_id') = ?2)) LIMIT 1",
+            params![session_id, document_id], map_event,
+        ).optional().context("read document event")
+    }
+
     pub fn list_events(&self, session_id: &str) -> Result<Vec<EventEnvelope>> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(

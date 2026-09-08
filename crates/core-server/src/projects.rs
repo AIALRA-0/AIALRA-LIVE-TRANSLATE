@@ -323,24 +323,12 @@ pub async fn acquire_recording(
 ) -> Result<Json<LeaseResponse>, ApiError> {
     let session = owned_project_session(&state, &user.0, &project_id, &session_id)?;
     validate_device_id(&request.device_id)?;
+    validate_recordable_state(session.state)?;
     let now = Utc::now();
     let has_active_project_lease = state
         .store
         .get_recording_lease(&project_id)?
         .is_some_and(|record| record.expires_at > now);
-    let active_model_jobs = state.store.model_queue_counts(Some(&session_id))?;
-    if !has_active_project_lease
-        && matches!(
-            session.state,
-            SessionState::Recording | SessionState::Degraded
-        )
-        && active_model_jobs.queued + active_model_jobs.leased > 0
-    {
-        return Err(ApiError::conflict_with_code(
-            "本次课程仍有后台任务处理中，请等待队列排空后再继续收音",
-            "recording_session_processing",
-        ));
-    }
     if recording_requires_admission(session.state, has_active_project_lease) {
         let admission = recording_admission(&state)?;
         if !admission.allowed {
@@ -824,12 +812,7 @@ fn recording_session_status(
         SessionState::Recording | SessionState::Degraded if has_active_lease => {
             (false, "active_recording")
         }
-        SessionState::Recording | SessionState::Degraded
-            if active_model_jobs.queued + active_model_jobs.leased == 0 =>
-        {
-            (true, "recovery_available")
-        }
-        SessionState::Recording | SessionState::Degraded => (false, "processing"),
+        SessionState::Recording | SessionState::Degraded => (true, "recovery_available"),
         SessionState::Stopping | SessionState::Processing => (false, "processing"),
         SessionState::Completed
         | SessionState::Failed
@@ -845,6 +828,28 @@ fn recording_session_status(
         reason,
         updated_at: session.updated_at,
     })
+}
+
+fn validate_recordable_state(state: SessionState) -> Result<(), ApiError> {
+    match state {
+        SessionState::Ready | SessionState::Recording | SessionState::Degraded => Ok(()),
+        SessionState::Stopping | SessionState::Processing => Err(ApiError::conflict_with_code(
+            "课程正在收尾，音频已保留；可查看处理进度，或返回项目另建课程",
+            "recording_session_processing",
+        )),
+        SessionState::Created => Err(ApiError::conflict_with_code(
+            "课程尚未确认录音许可，请先完成许可确认",
+            "recording_consent_required",
+        )),
+        SessionState::Archived => Err(ApiError::conflict_with_code(
+            "课程在回收站中，请先恢复后查看课程状态",
+            "recording_session_archived",
+        )),
+        SessionState::Completed | SessionState::Failed => Err(ApiError::conflict_with_code(
+            "课程已结束，历史内容仍可查看；请返回项目新建课程",
+            "recording_session_finished",
+        )),
+    }
 }
 
 fn session_state_name(state: SessionState) -> &'static str {
@@ -1120,8 +1125,29 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(!processing.recoverable);
-        assert_eq!(processing.reason, "processing");
+        assert!(processing.recoverable);
+        assert_eq!(processing.reason, "recovery_available");
         assert_eq!(processing.active_model_jobs, 1);
+    }
+
+    #[test]
+    fn recording_state_failures_are_actionable_before_creating_a_lease() {
+        for state in [
+            SessionState::Ready,
+            SessionState::Recording,
+            SessionState::Degraded,
+        ] {
+            assert!(validate_recordable_state(state).is_ok());
+        }
+        for state in [
+            SessionState::Created,
+            SessionState::Stopping,
+            SessionState::Processing,
+            SessionState::Completed,
+            SessionState::Failed,
+            SessionState::Archived,
+        ] {
+            assert!(validate_recordable_state(state).is_err());
+        }
     }
 }

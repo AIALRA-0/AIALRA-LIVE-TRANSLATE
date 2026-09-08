@@ -8,6 +8,7 @@ import io
 import httpx
 import numpy as np
 import pytest
+from fastapi import HTTPException
 from pptx import Presentation
 
 import workers.model_worker.main as model_worker
@@ -378,3 +379,40 @@ def test_summary_sections_drop_repeated_points_without_reordering() -> None:
         "Pipeline stalls",
         "Cache locality",
     ]
+@pytest.mark.asyncio
+async def test_cancelled_http_request_keeps_gpu_exclusive_until_actual_completion() -> None:
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    model_worker._gpu_inflight = None
+
+    @model_worker.single_gpu_call
+    async def inference() -> int:
+        entered.set()
+        await finish.wait()
+        return 7
+
+    caller = asyncio.create_task(inference())
+    await entered.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    with pytest.raises(HTTPException) as busy:
+        await inference()
+    assert busy.value.status_code == 503
+    finish.set()
+    assert model_worker._gpu_inflight is not None
+    await model_worker._gpu_inflight
+    assert await inference() == 7
+
+
+def test_hymt_uses_bounded_official_context_without_metadata_labels() -> None:
+    request = model_worker.TranslationRequest(
+        text="The voltage is not 5 V.", source_language="en", target_language="zh-CN",
+        context=["prior context " * 300], glossary=[],
+    )
+    prompt = model_worker._hymt_prompt(request)
+    assert prompt.endswith(request.text)
+    assert "不需要翻译上文" in prompt
+    assert len(prompt) < 1400
+    assert "Source language:" not in prompt
+    assert "Text to translate:" not in prompt

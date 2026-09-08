@@ -12,10 +12,11 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@sapphi-red/web-noise-suppressor": "0.4.0",
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",

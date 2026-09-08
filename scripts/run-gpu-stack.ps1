@@ -46,6 +46,9 @@ function Start-OwnedOllama {
 }
 
 function Initialize-LocalProviders {
+    # A silent ASR probe is correctly filtered before inference, so it cannot
+    # warm model weights. Load realtime providers explicitly before leasing jobs.
+    [void](Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/warmup" -Method Post -TimeoutSec 180)
     # Load ASR before the agent can lease production audio, then load the GPU LLM,
     # and run ASR once more after GPU initialization has settled.
     $silentPcm = [Convert]::ToBase64String([byte[]]::new(32000))
@@ -64,7 +67,9 @@ function Initialize-LocalProviders {
         keep_alive = -1
         options = @{ num_predict = 2; temperature = 0 }
     } | ConvertTo-Json -Depth 4 -Compress
-    [void](Invoke-RestMethod -Uri "$ollamaUrl/api/generate" -Method Post -ContentType "application/json" -Body $ollamaBody -TimeoutSec 120)
+    if ($translationProvider -eq "ollama") {
+        [void](Invoke-RestMethod -Uri "$ollamaUrl/api/generate" -Method Post -ContentType "application/json" -Body $ollamaBody -TimeoutSec 120)
+    }
     [void](Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/asr/transcribe" -Method Post -ContentType "application/json" -Body $asrBody -TimeoutSec 120)
 
     if ($translationProvider -in @("hy-mt", "hymt", "hy_mt")) {
@@ -152,6 +157,7 @@ while ($true) {
         $agent = Start-Process -FilePath $shellPath -ArgumentList @("-NoProfile", "-File", $agentScript) -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
         $restartDelaySeconds = 1
         $ollamaFailures = 0
+        $workerHealthFailures = 0
         while (!$worker.HasExited -and !$agent.HasExited) {
             Start-Sleep -Seconds 2
             $worker.Refresh()
@@ -166,11 +172,19 @@ while ($true) {
                 $ollamaFailures += 1
                 if ($ollamaFailures -ge 3) { throw "Ollama local API remained unavailable" }
             }
+            try {
+                $workerHealth = Invoke-RestMethod -Uri "http://127.0.0.1:8790/health" -TimeoutSec 5
+                if ($workerHealth.inference_overdue -eq $true) { throw "model_inference_deadline" }
+                $workerHealthFailures = 0
+            } catch {
+                $workerHealthFailures += 1
+                if ($workerHealthFailures -ge 3) { throw "本项目模型 Worker 连续无响应，监督器将重启本项目进程" }
+            }
         }
         if ($worker.HasExited) { throw "本机模型 Worker 意外退出" }
         throw "本机 GPU Agent 意外退出"
     } catch {
-        Write-Warning $_.Exception.Message
+        Write-Warning "本项目 GPU 启动或运行检查失败，将按退避策略恢复；未记录原始响应"
     } finally {
         Stop-OwnedProcessTree $agent "run-gpu-agent.ps1" "workers.gpu_agent.main"
         Stop-OwnedProcessTree $worker "run-worker.ps1" "workers.model_worker.main:app"

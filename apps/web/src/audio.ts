@@ -1,3 +1,5 @@
+import { createDenoiser, type NoiseSuppressionMode } from "./noiseSuppression";
+
 const TARGET_SAMPLE_RATE = 16_000;
 const DATABASE_NAME = "aialra-audio-outbox";
 const STORE_NAME = "frames";
@@ -285,7 +287,8 @@ export function mediaInputError(error: unknown): string {
   const name = typeof error === "object" && error !== null && "name" in error ? String((error as { name?: unknown }).name) : "";
   if (name === "NotAllowedError" || name === "SecurityError") return "麦克风权限被拒绝，请允许当前网站使用麦克风后重试";
   if (name === "NotFoundError" || name === "DevicesNotFoundError") return "没有找到可用麦克风，请连接麦克风或选择其他输入设备";
-  if (name === "NotReadableError" || name === "TrackStartError") return "麦克风正在被其他应用占用，请关闭占用它的应用后重试";
+  if (name === "NotReadableError" || name === "TrackStartError") return "系统未能打开所选麦克风，请重新选择设备并重试；若仍失败，检查系统麦克风权限、设备连接及其他应用的独占设置";
+  if (name === "AbortError") return "本次音频连接已取消，可重新开始";
   if (name === "OverconstrainedError") return "所选输入设备当前不可用，请重新选择麦克风后重试";
   return "浏览器无法读取音频输入，请检查麦克风权限和设备状态";
 }
@@ -293,6 +296,8 @@ export function mediaInputError(error: unknown): string {
 // AudioWorklet keeps capture off the UI thread while IndexedDB survives refreshes and short outages.
 export class BrowserCapture {
   private context: AudioContext | null = null;
+  private cancelled = false;
+  private denoiser: (AudioWorkletNode & { destroy(): void }) | null = null;
   private stream: MediaStream | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private worklet: AudioWorkletNode | null = null;
@@ -325,12 +330,14 @@ export class BrowserCapture {
     private readonly mode: CaptureMode = "microphone",
     private readonly deviceId?: string,
     private readonly onRevoked?: (message?: string) => void,
+    private readonly noiseMode: NoiseSuppressionMode = "rnnoise",
   ) {}
 
   // Prepare the browser input before asking Core for a recording lease.  This
   // keeps denied permissions and unsupported browsers from creating orphaned
   // server-side recording sessions.
   async prepare(): Promise<void> {
+    if (this.cancelled) throw new DOMException("Cancelled", "AbortError");
     if (this.prepared) return;
     if (!window.isSecureContext && window.location.hostname !== "localhost") {
       throw new Error("浏览器录音需要 HTTPS 安全连接");
@@ -353,18 +360,18 @@ export class BrowserCapture {
             audio: {
               channelCount: 1,
               echoCancellation: true,
-              noiseSuppression: true,
+              noiseSuppression: this.noiseMode === "browser",
               autoGainControl: true,
               ...(this.deviceId ? { deviceId: { exact: this.deviceId } } : {}),
             },
           }));
+      if (this.cancelled) throw new DOMException("Cancelled", "AbortError");
       if (this.mode === "screen") {
-        this.stream.getVideoTracks().forEach((track) => track.stop());
         if (this.stream.getAudioTracks().length === 0) {
           throw new Error("共享内容没有音频，请在浏览器共享框中勾选音频");
         }
       }
-      this.context = new AudioContext({ latencyHint: "interactive" });
+      this.context = new AudioContext({ latencyHint: "interactive", sampleRate: 48_000 });
       this.resampler = new StreamingResampler(this.context.sampleRate);
       const moduleUrl = workletModuleUrl();
       try {
@@ -377,7 +384,17 @@ export class BrowserCapture {
       this.worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
         this.acceptSamples(event.data);
       };
-      this.sourceNode.connect(this.worklet);
+      if (this.mode === "microphone" && this.noiseMode === "rnnoise") {
+        try {
+          this.denoiser = await createDenoiser(this.context);
+        } catch {
+          await this.stream.getAudioTracks()[0]?.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
+          this.onStatus("增强降噪暂不可用，已使用浏览器可用的音频处理");
+        }
+      }
+      if (this.cancelled) throw new DOMException("Cancelled", "AbortError");
+      if (this.denoiser) { this.sourceNode.connect(this.denoiser); this.denoiser.connect(this.worklet); }
+      else this.sourceNode.connect(this.worklet);
       // Keep the worklet alive without playing the microphone back through the
       // speakers, which would create an echo loop during a lecture.
       this.outputGain = this.context.createGain();
@@ -386,6 +403,9 @@ export class BrowserCapture {
       this.outputGain.connect(this.context.destination);
       await this.context.resume().catch(() => undefined);
       this.prepared = true;
+      this.stream.getAudioTracks().forEach((track) => track.addEventListener("ended", () => {
+        if (!this.stopped && !this.stopping) this.revoke("音频设备已断开或共享已结束，已确认的音频仍保留；重新连接设备后继续收音");
+      }, { once: true }));
     } catch (error) {
       this.disposeInput();
       throw new Error(this.mediaError(error));
@@ -428,6 +448,9 @@ export class BrowserCapture {
     if (this.stopped) return;
     this.stopping = true;
     this.sourceNode?.disconnect();
+    this.denoiser?.disconnect();
+    this.denoiser?.destroy();
+    this.denoiser = null;
     this.worklet?.disconnect();
     this.outputGain?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
@@ -463,6 +486,7 @@ export class BrowserCapture {
   }
 
   revoke(message?: string, notify = true): void {
+    this.cancelled = true;
     const wasActivated = this.activated;
     this.stopped = true;
     this.stopping = false;
@@ -480,6 +504,9 @@ export class BrowserCapture {
   }
 
   private disposeInput(): void {
+    this.denoiser?.disconnect();
+    this.denoiser?.destroy();
+    this.denoiser = null;
     this.sourceNode?.disconnect();
     this.worklet?.disconnect();
     this.outputGain?.disconnect();
@@ -500,7 +527,9 @@ export class BrowserCapture {
   }
 
   private acceptSamples(samples: Float32Array): void {
-    if (this.stopped || this.stopping) return;
+    // Permission/device preparation is not recording: no lease, source or
+    // sequence exists yet. Never persist preview frames under an empty source.
+    if (!this.activated || this.stopped || this.stopping) return;
     const resampled = this.resampler?.push(samples) ?? resample(samples, this.context?.sampleRate ?? 48_000);
     this.appendSamples(resampled);
   }
@@ -688,13 +717,13 @@ export function assessMicrophoneLevels(
     ? 0
     : speechLevels.filter((level) => level >= voicedThreshold).length / speechLevels.length;
   const relativeLevel = speechMedianDbfs - noiseFloorDbfs;
-  const passed = speechLevels.length > 0
-    && voicedRatio >= 0.25
-    && relativeLevel >= 8
-    && speechP95Dbfs >= -60
-    && clippingRatio <= 0.01;
+  const calibratedSpeech = voicedRatio >= 0.25 && relativeLevel >= 8 && speechP95Dbfs >= -60;
+  const sustainedInput = speechP95Dbfs >= -45 && speechMedianDbfs >= -50;
+  const passed = speechLevels.length > 0 && (calibratedSpeech || sustainedInput) && clippingRatio <= 0.01;
   const message = clippingRatio > 0.01
     ? "输入音量过高，请降低系统麦克风增益"
+    : sustainedInput && !calibratedSpeech
+      ? "输入电平正常；安静阶段也有声音，无法区分背景噪声，请试听确认清晰度"
     : voicedRatio < 0.12 || relativeLevel < 4
       ? "没有检测到持续语音，请确认麦克风已选中后再测试"
       : passed
@@ -707,6 +736,7 @@ export function assessMicrophoneLevels(
 export async function testMicrophone(
   deviceId: string | undefined,
   onProgress: (progress: MicrophoneTestProgress) => void,
+  signal?: AbortSignal,
 ): Promise<MicrophoneTestResult> {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("当前浏览器不支持麦克风测试");
   const stream = await requestMediaWithTimeout(navigator.mediaDevices.getUserMedia({
@@ -718,7 +748,13 @@ export async function testMicrophone(
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
     },
   }));
-  const context = new AudioContext({ latencyHint: "interactive" });
+  let context: AudioContext | undefined;
+  const release = () => stream.getTracks().forEach((track) => track.stop());
+  signal?.addEventListener("abort", release, { once: true });
+  try {
+  signal?.throwIfAborted();
+  context = new AudioContext({ latencyHint: "interactive" });
+  await context.resume();
   const analyser = context.createAnalyser();
   analyser.fftSize = 2048;
   const source = context.createMediaStreamSource(stream);
@@ -732,6 +768,7 @@ export async function testMicrophone(
   const started = performance.now();
   try {
     while (performance.now() - started < 4_000) {
+      signal?.throwIfAborted();
       analyser.getFloatTimeDomainData(samples);
       let squared = 0;
       for (const sample of samples) {
@@ -750,11 +787,14 @@ export async function testMicrophone(
     }
   } finally {
     source.disconnect();
-    stream.getTracks().forEach((track) => track.stop());
-    await context.close();
   }
   const peakDbfs = amplitudeDbfs(peak);
   const clippingRatio = total > 0 ? clipped / total : 0;
   const assessment = assessMicrophoneLevels(quietLevels, speechLevels, clippingRatio);
   return { ...assessment, peakDbfs, clippingRatio, sampleRate: context.sampleRate };
+  } finally {
+    signal?.removeEventListener("abort", release);
+    release();
+    if (context && context.state !== "closed") await context.close();
+  }
 }

@@ -7,11 +7,14 @@ import base64
 import gc
 import io
 import json
+import logging
 import os
 import sys
 import threading
+import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Coroutine
+from functools import wraps
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -50,6 +53,47 @@ def _register_bundled_cuda_dlls() -> None:
 _register_bundled_cuda_dlls()
 
 app = FastAPI(title="AIALRA Local Model Worker", version="1.0.0")
+
+_gpu_inflight: asyncio.Task[Any] | None = None
+_gpu_started_at = 0.0
+
+
+def single_gpu_call[**P, T](
+    function: Callable[P, Awaitable[T]],
+) -> Callable[P, Coroutine[Any, Any, T]]:
+    """Keep the actual inference alive and exclusive after an HTTP disconnect.
+
+    Cancelling asyncio.to_thread does not stop its CUDA work. Shield the entire
+    operation (including cleanup), rejecting overlaps instead of stacking more
+    threads on a timed-out request. Audio/lease traffic is served by Core.
+    """
+    @wraps(function)
+    async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
+        global _gpu_inflight, _gpu_started_at
+        if _gpu_inflight is not None and not _gpu_inflight.done():
+            raise HTTPException(503, "model_worker_busy", headers={
+                "Retry-After": "2", "X-Aialra-Worker-State": "busy",
+            })
+
+        async def invoke() -> T:
+            try:
+                return await function(*args, **kwargs)
+            except HTTPException:
+                raise
+            except Exception as error:
+                logging.getLogger(__name__).error(
+                    "model_execution_failed kind=%s", type(error).__name__,
+                )
+                raise HTTPException(503, "model_execution_failed") from None
+
+        task = asyncio.create_task(invoke())
+        _gpu_inflight = task
+        _gpu_started_at = time.monotonic()
+        # Consume an eventual exception even if the original caller disconnected.
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        return await asyncio.shield(task)
+
+    return wrapped
 
 OLLAMA_URL = os.getenv("AIALRA_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("AIALRA_OLLAMA_MODEL", "qwen2.5:7b-instruct")
@@ -104,6 +148,9 @@ class HealthResponse(BaseModel):
     llm_provider: str
     translation_available: bool
     translation_provider: str
+    inference_busy: bool = False
+    inference_overdue: bool = False
+    realtime_models_ready: bool = False
 
 
 class AsrRequest(BaseModel):
@@ -249,6 +296,7 @@ async def health() -> HealthResponse:
     ollama_available = await _ollama_available()
     ollama_gpu_resident = await _ollama_gpu_resident()
     translation_available = _configured_translation_importable()
+    busy = _gpu_inflight is not None and not _gpu_inflight.done()
     return HealthResponse(
         status="ok" if asr_available and ollama_available and translation_available else "degraded",
         asr_available=asr_available,
@@ -260,10 +308,33 @@ async def health() -> HealthResponse:
         llm_provider=f"ollama:{OLLAMA_MODEL}@{LLM_DEVICE}",
         translation_available=translation_available,
         translation_provider=_translation_provider_name(),
+        inference_busy=busy,
+        inference_overdue=busy and time.monotonic() - _gpu_started_at > 360,
+        realtime_models_ready=(_qwen_asr_model is not None or _asr_model is not None)
+        and (TRANSLATION_PROVIDER == "ollama" or _hymt_model is not None),
     )
 
 
+@app.post("/v1/warmup")
+@single_gpu_call
+async def warmup() -> dict[str, bool]:
+    """Load configured realtime weights before the Agent accepts a course."""
+    def load() -> None:
+        if ASR_PROVIDER in {"qwen3-asr", "qwen_asr", "qwen3_asr"}:
+            _get_qwen_asr_model()
+        else:
+            _get_asr_model()
+        if TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"}:
+            _get_hymt_runtime()
+    try:
+        await asyncio.to_thread(load)
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        raise HTTPException(503, "realtime_model_warmup_failed") from error
+    return {"ready": True}
+
+
 @app.post("/v1/asr/transcribe", response_model=AsrResponse)
+@single_gpu_call
 async def transcribe(request: AsrRequest) -> AsrResponse:
     """ASR runs in a worker thread so model inference never blocks the HTTP event loop."""
 
@@ -283,6 +354,7 @@ async def transcribe(request: AsrRequest) -> AsrResponse:
 
 
 @app.post("/v1/translate", response_model=TranslationResponse)
+@single_gpu_call
 async def translate(request: TranslationRequest) -> TranslationResponse:
     """Use the configured dedicated translator while keeping the old Ollama path available."""
 
@@ -465,6 +537,7 @@ def _translation_contract_ok(
 
 
 @app.post("/v1/explain", response_model=ExplanationResponse)
+@single_gpu_call
 async def explain(request: ExplanationRequest) -> ExplanationResponse:
     """The model writes bounded teaching content while trusted code attaches evidence IDs."""
 
@@ -550,7 +623,7 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
                     "evidence_segment_ids": segment_ids[-2:],
                     "asset_page_ids": page_ids,
                 }
-                for item in result.get("terms", result.get("rare_terms", []))
+                for item in (result.get("terms", result.get("rare_terms", [])) or [])
                 if isinstance(item, dict)
             ],
             "evidence_segment_ids": segment_ids,
@@ -564,6 +637,7 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
 
 
 @app.post("/v1/summarize", response_model=SummaryResponse)
+@single_gpu_call
 async def summarize(request: SummaryRequest) -> SummaryResponse:
     """The larger local model produces one evidence-bounded summary after recording stops."""
 
@@ -677,6 +751,7 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
 
 
 @app.post("/v1/assets/parse", response_model=AssetParseResponse)
+@single_gpu_call
 async def parse_asset(file: Annotated[UploadFile, File()]) -> AssetParseResponse:
     """Parsers receive in-memory bytes and never trust an uploaded path or archive member name."""
 
@@ -916,7 +991,7 @@ def _get_hymt_runtime() -> tuple[Any, Any]:
 
             if HYMT_DEVICE.casefold() == "cuda" and not torch.cuda.is_available():
                 raise RuntimeError("HY-MT CUDA is unavailable")
-            _hymt_tokenizer = AutoTokenizer.from_pretrained(HYMT_MODEL)
+            _hymt_tokenizer = AutoTokenizer.from_pretrained(HYMT_MODEL)  # type: ignore[no-untyped-call]
             _hymt_model = AutoModelForCausalLM.from_pretrained(
                 HYMT_MODEL,
                 dtype=torch.bfloat16 if HYMT_DEVICE.casefold() == "cuda" else torch.float32,
@@ -926,56 +1001,69 @@ def _get_hymt_runtime() -> tuple[Any, Any]:
         return _hymt_tokenizer, _hymt_model
 
 
+def _hymt_prompt(request: TranslationRequest) -> str:
+    """Tencent's dedicated MT template, not a general assistant conversation."""
+    languages = {"zh": "中文", "zh-cn": "简体中文", "en": "英语", "ja": "日语",
+                 "ko": "韩语", "es": "西班牙语", "fr": "法语", "de": "德语"}
+    chinese_pair = (request.source_language.casefold().startswith("zh")
+                    or request.target_language.casefold().startswith("zh"))
+    english_languages = {"en": "English", "ja": "Japanese", "ko": "Korean",
+                         "es": "Spanish", "fr": "French", "de": "German"}
+    target = (languages if chinese_pair else english_languages).get(
+        request.target_language.casefold(), request.target_language,
+    )
+    context = "\n".join(request.context[-2:])[-1200:]
+    terms = "\n".join(
+        f"{item.source} 翻译成 {item.source if item.do_not_translate else item.preferred}"
+        for item in request.glossary[:32]
+    )
+    if not chinese_pair:
+        prompt = (f"{context}\nBased on the provided information, translate the following text "
+                  f"into {target}, without translating the preceding information or adding "
+                  f"explanations:\n{request.text}" if context else
+                  f"Translate the following segment into {target}, without additional "
+                  f"explanation.\n\n{request.text}")
+    elif context:
+        prompt = (f"{context}\n参考上面的信息，把下面的文本翻译成{target}，"
+                  f"注意不需要翻译上文，也不要额外解释：\n{request.text}")
+    else:
+        prompt = (f"将以下文本翻译为{target}，注意只需要输出翻译后的结果，"
+                  f"不要额外解释：\n\n{request.text}")
+    return f"参考下面的翻译：\n{terms}\n\n{prompt}" if terms else prompt
+
+
 def _translate_hymt_sync(request: TranslationRequest) -> str:
     """Generate one plain translation and keep provider output out of ordinary logs."""
 
     import torch
 
     tokenizer, model = _get_hymt_runtime()
-    glossary = "; ".join(
-        f"{item.source} => {item.source if item.do_not_translate else item.preferred}"
-        for item in request.glossary
-    )
-    context = " | ".join(request.context[-3:])
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a professional simultaneous lecture translator. Return only the target "
-                "translation, with no labels, explanations, notes, or markdown. Preserve every "
-                "fact, number, unit, name, negation, condition, formula, and uncertainty. "
-                "Do not summarize or add information."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Source language: {request.source_language}\n"
-                f"Target language: {request.target_language}\n"
-                f"Terminology: {glossary}\n"
-                f"Previous context for terminology only: {context}\n"
-                f"Text to translate:\n{request.text}"
-            ),
-        },
-    ]
+    messages = [{"role": "user", "content": _hymt_prompt(request)}]
     inputs = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
-        add_generation_prompt=True,
+        add_generation_prompt=False,
         return_tensors="pt",
     )
     device = getattr(model, "device", None)
     if device is None:
         device = torch.device("cuda:0" if HYMT_DEVICE.casefold() == "cuda" else "cpu")
     inputs = inputs.to(device)
+    started = time.monotonic()
     with torch.inference_mode():
         generated = model.generate(
             inputs,
             max_new_tokens=512,
             do_sample=False,
             num_beams=1,
+            repetition_penalty=1.05,
+            max_time=45.0,
             pad_token_id=tokenizer.eos_token_id,
         )
+    if time.monotonic() - started >= 45.0:
+        raise RuntimeError("translation_inference_deadline")
+    if generated.shape[1] - inputs.shape[1] >= 512:
+        raise RuntimeError("translation_output_limit")
     output = str(
         tokenizer.decode(generated[0, inputs.shape[1] :], skip_special_tokens=True)
     ).strip()
@@ -1181,6 +1269,7 @@ async def _restore_realtime_translation_model(background_model: str) -> None:
     """Restore the low-latency model before a background lane releases its lock."""
 
     if TRANSLATION_PROVIDER != "ollama":
+        await _unload_ollama_model(background_model)
         return
     if background_model == TRANSLATION_MODEL:
         return
@@ -1209,10 +1298,19 @@ async def _restore_realtime_translation_model(background_model: str) -> None:
 def _release_asr_model_sync() -> None:
     """One-shot large models reclaim ASR VRAM only after the serialized queue is idle."""
 
-    global _asr_model
+    global _asr_model, _qwen_asr_model, _hymt_model, _hymt_tokenizer
     with _asr_lock:
         _asr_model = None
+    with _qwen_asr_lock:
+        _qwen_asr_model = None
+    with _hymt_lock:
+        _hymt_model = None
+        _hymt_tokenizer = None
     gc.collect()
+    if "torch" in sys.modules:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 async def _ollama_text(
@@ -1411,7 +1509,7 @@ def _has_explanation_shape(payload: dict[str, Any]) -> bool:
         and isinstance(item.get("term"), str)
         and bool(item["term"].strip())
         and isinstance(item.get("explanation", item.get("one_line")), str)
-        and bool(item.get("explanation", item.get("one_line", "")).strip())
+        and bool(str(item.get("explanation", item.get("one_line", ""))).strip())
         for item in terms
     )
 

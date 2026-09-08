@@ -1,5 +1,13 @@
 # AIALRA-LIVE-TRANSLATE 项目状态
 
+## 2026-09-08 录音与翻译可靠性修复（候选，待生产验证）
+
+本批基于 v33 处理用户新反馈，不沿用 v33 的通过结论。修复历史租约 SSE 误判、权限准备期间误写音频、测试与录音抢占输入、迟到授权资源泄漏和常亮生命周期。未完成课程恢复不再等待翻译队列排空；已结束课程保留历史，并引导新建课程。
+
+接入本地 RNNoise，保留原生降噪和关闭选项；HY-MT 使用官方专用模板，限制上下文及解码时间。Worker 在客户端取消后仍保持实际推理独占，忙碌请求在原任务租约内等待；修复专用模型显存释放、预热和本项目进程看门狗。“新建项目”只建项目；五个模块增加独立空态、个人笔记自动保存与版本冲突、音频证据回听和术语展开。
+
+本地工程与 Chromium 验证已执行，尚需新 SHA 的远端部署和真实 GPU 冒烟。没有数据库迁移、其他项目操作或本地 Docker/WSL。选型及实测边界见 `docs/SPEECH_ENHANCEMENT_DECISION.md` 和 `docs/VALIDATION_REPORT.md`。
+
 ## 0.2 2026-09-07 录音入口、静音门与内容组讲解收敛（已部署）
 
 当前运行版本为 `quality-v33-20260907-cb8564a`，运行代码 SHA 为 `cb8564a5b5380b03f974a3f59e8541a778c4c84e`。发布目录 `BUILD_ID`、Core `build_id` 和容器 OCI revision 完全一致；Core 为 `running/healthy`，restart count 为 `0`。GPU Worker 在线，ASR 为 `qwen3-asr:Qwen/Qwen3-ASR-1.7B@cuda`，实时翻译为 `hy-mt:tencent/HY-MT1.5-1.8B@cuda`，讲解为 `ollama:qwen2.5:7b-instruct@cuda`。
