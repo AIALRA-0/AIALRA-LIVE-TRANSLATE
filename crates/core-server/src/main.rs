@@ -11,6 +11,8 @@ mod jobs;
 mod pairing;
 mod projects;
 mod readweave;
+mod speakers;
+mod topics;
 mod worker;
 mod workspace;
 

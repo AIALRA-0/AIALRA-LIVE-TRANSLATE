@@ -19,12 +19,20 @@ const HEADER_BYTES: usize = 16;
 const SAMPLE_RATE: u32 = 16_000;
 const CHANNELS: u16 = 1;
 const PCM_BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * 2;
-const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 3 / 2;
-// Longer uninterrupted speech needs context to avoid cutting off words at the
-// five-second boundary; phrase pauses still close a window after the minimum.
-const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 8;
+// A fixed public-reference comparison reduced both original and weak-speech
+// errors with a four-second minimum. Transport ACKs remain one-second blocks;
+// an explicit stop seals any shorter remainder immediately.
+const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 4;
+// The 16 s candidate with short-silence protection reduced fixed-reference
+// edits from 43 to 31. Pauses still seal after the four-second minimum.
+// This favors acoustic context over latency; it is not a three-second preview.
+const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 16;
 const SILENCE_LOOKBACK_BYTES: usize = PCM_BYTES_PER_SECOND * 450 / 1_000;
-const SILENCE_MEAN_ABSOLUTE_PCM: i64 = 550;
+// A quiet phrase tail must be quiet in every 20 ms frame. Averaging 450 ms
+// at an amplitude of 550 (~-35 dBFS) classified weak speech as silence.
+// This conservative energy guard does not discard audio or claim to be a VAD.
+const SILENCE_FRAME_SAMPLES: usize = 320;
+const SILENCE_FRAME_RMS_PCM: i64 = 104; // approximately -50 dBFS
 const MAX_FRAME_BYTES: usize = PCM_BYTES_PER_SECOND * 3 + HEADER_BYTES;
 const FIRST_AUDIO_SEQUENCE: u64 = 1;
 
@@ -201,17 +209,19 @@ async fn persist_frame(
 }
 
 fn trailing_audio_is_silent(pcm: &[u8]) -> bool {
-    // A 450 ms quiet tail closes a phrase after the 1.5 second minimum window.
+    // A 450 ms quiet tail closes a phrase after the four-second minimum window.
     let lookback_start = pcm.len().saturating_sub(SILENCE_LOOKBACK_BYTES);
     let trailing = &pcm[lookback_start..];
-    let mut total = 0_i64;
-    let mut samples = 0_i64;
-    for pair in trailing.chunks_exact(2) {
-        let sample = i16::from_le_bytes([pair[0], pair[1]]) as i64;
-        total += sample.abs();
-        samples += 1;
+    if trailing.len() < SILENCE_LOOKBACK_BYTES {
+        return false;
     }
-    samples > 0 && total / samples < SILENCE_MEAN_ABSOLUTE_PCM
+    trailing.chunks(SILENCE_FRAME_SAMPLES * 2).all(|frame| {
+        let energy: i64 = frame
+            .chunks_exact(2)
+            .map(|pair| i64::from(i16::from_le_bytes([pair[0], pair[1]])).pow(2))
+            .sum();
+        energy < SILENCE_FRAME_RMS_PCM.pow(2) * (frame.len() / 2) as i64
+    })
 }
 
 /// Stopping a session seals every short tail so the final spoken phrase is not lost.
@@ -397,6 +407,19 @@ mod tests {
     }
 
     #[test]
+    fn quiet_speech_and_short_consonants_do_not_close_a_phrase() {
+        let weak_speech = 300_i16.to_le_bytes().repeat(SILENCE_LOOKBACK_BYTES / 2);
+        assert!(!trailing_audio_is_silent(&weak_speech));
+        let mut consonant = vec![0_u8; SILENCE_LOOKBACK_BYTES];
+        let burst = 900_i16.to_le_bytes().repeat(320);
+        consonant[..burst.len()].copy_from_slice(&burst);
+        assert!(!trailing_audio_is_silent(&consonant));
+        assert!(!trailing_audio_is_silent(&[0; 64]));
+        let very_quiet = 30_i16.to_le_bytes().repeat(SILENCE_LOOKBACK_BYTES / 2);
+        assert!(trailing_audio_is_silent(&very_quiet));
+    }
+
+    #[test]
     fn assembler_waits_for_a_missing_initial_frame() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
@@ -444,6 +467,10 @@ mod tests {
         state.store.insert_audio_chunk(&frame(1)).unwrap();
         assert_eq!(
             assemble_source(&state, "session_out_of_order", "browser-mic-g1", false).unwrap(),
+            0
+        );
+        assert_eq!(
+            assemble_source(&state, "session_out_of_order", "browser-mic-g1", true).unwrap(),
             1
         );
         assert_eq!(
@@ -456,7 +483,104 @@ mod tests {
     }
 
     #[test]
-    fn assembler_keeps_uninterrupted_speech_within_the_eight_second_window() {
+    fn pause_windows_wait_for_context_and_stop_preserves_every_tail_sample() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        let session_id = "session_phrase_context";
+        let source_id = "browser-mic-g1";
+        state
+            .store
+            .create_session(&NewSession {
+                id: session_id.into(),
+                title: "Synthetic phrase context".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        let mut expected = Vec::new();
+        for sequence in 1..=7_u64 {
+            let mut pcm = (sequence as i16 * 300)
+                .to_le_bytes()
+                .repeat(PCM_BYTES_PER_SECOND / 2);
+            pcm[PCM_BYTES_PER_SECOND - SILENCE_LOOKBACK_BYTES..].fill(0);
+            expected.extend_from_slice(&pcm);
+            let stored = state.objects.put(&pcm).unwrap();
+            state
+                .store
+                .insert_audio_chunk(&AudioChunkRecord {
+                    session_id: session_id.into(),
+                    source_id: source_id.into(),
+                    sequence,
+                    captured_at_ms: sequence * 1000,
+                    sample_rate: 16000,
+                    channels: 1,
+                    encoding: "pcm_s16le".into(),
+                    duration_ms: 1000,
+                    object_hash: stored.hash,
+                    size_bytes: stored.size_bytes,
+                    acknowledged_at: Utc::now(),
+                })
+                .unwrap();
+            assert_eq!(
+                assemble_source(&state, session_id, source_id, false).unwrap(),
+                usize::from(sequence == 4)
+            );
+        }
+        assert_eq!(
+            state
+                .store
+                .audio_assembly_cursor(session_id, source_id)
+                .unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            assemble_source(&state, session_id, source_id, true).unwrap(),
+            1
+        );
+        assert_eq!(
+            assemble_source(&state, session_id, source_id, true).unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .store
+                .audio_assembly_cursor(session_id, source_id)
+                .unwrap(),
+            Some(7)
+        );
+        let mut jobs = state
+            .store
+            .list_events(session_id)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "model.job.queued")
+            .map(|event| {
+                state
+                    .store
+                    .get_model_job(event.payload["job_id"].as_str().unwrap())
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        jobs.sort_by_key(|job| job.input["captured_at_ms"].as_u64().unwrap());
+        assert_eq!(jobs.len(), 2);
+        let mut actual = Vec::new();
+        for job in jobs {
+            actual.extend(
+                state
+                    .objects
+                    .read(job.input_object_hash.as_deref().unwrap())
+                    .unwrap(),
+            );
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn assembler_keeps_uninterrupted_speech_beyond_eight_seconds_and_seals_at_sixteen() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
         state
@@ -473,7 +597,7 @@ mod tests {
             .unwrap();
         let pcm = [0x10_u8, 0x27_u8].repeat(PCM_BYTES_PER_SECOND / 2);
         let stored = state.objects.put(&pcm).unwrap();
-        for sequence in 1..=9 {
+        for sequence in 1..=17 {
             state
                 .store
                 .insert_audio_chunk(&AudioChunkRecord {
@@ -490,6 +614,13 @@ mod tests {
                     acknowledged_at: Utc::now(),
                 })
                 .unwrap();
+            if sequence == 8 {
+                assert_eq!(
+                    assemble_source(&state, "session_long_speech", "browser-mic-g1", false)
+                        .unwrap(),
+                    0
+                );
+            }
         }
 
         assert_eq!(
@@ -501,9 +632,20 @@ mod tests {
                 .store
                 .audio_assembly_cursor("session_long_speech", "browser-mic-g1")
                 .unwrap(),
-            Some(8)
+            Some(16)
         );
-        assert_eq!(MAX_ASR_WINDOW_BYTES, PCM_BYTES_PER_SECOND * 8);
+        assert_eq!(MAX_ASR_WINDOW_BYTES, PCM_BYTES_PER_SECOND * 16);
+        assert_eq!(
+            assemble_source(&state, "session_long_speech", "browser-mic-g1", true).unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .store
+                .audio_assembly_cursor("session_long_speech", "browser-mic-g1")
+                .unwrap(),
+            Some(17)
+        );
     }
 
     #[test]

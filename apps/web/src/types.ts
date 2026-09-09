@@ -17,6 +17,8 @@ export interface EventEnvelope {
 
 // Session is the durable recording state returned by the local control service.
 export interface Session {
+  // Owner-scoped workspace projection, not a replacement for durable state.
+  recording_active?: boolean;
   id: string;
   title: string;
   source_language: string;
@@ -124,6 +126,7 @@ export interface RecordingLease {
   session_id: string;
   holder_device_id: string;
   generation: number;
+  acquired_at?: string;
   expires_at: string;
   lease_token: string;
 }
@@ -192,7 +195,7 @@ export interface ReadWeavePreview {
 // TimelineItem groups revisions under stable segment, card, or page identifiers.
 export interface TimelineItem {
   id: string;
-  kind: "paragraph" | "insight" | "asset" | "status" | "session-summary";
+  kind: "paragraph" | "preview" | "insight" | "asset" | "status" | "session-summary";
   title: string;
   body: string;
   evidenceIds: string[];
@@ -203,7 +206,9 @@ export interface TimelineItem {
   original?: string;
   translation?: string;
   translationMode?: "same_language";
+  groupReason?: "topic_change" | "capacity_continuation" | "recording_stopped";
+  speakerLabel?: string;
   sourceProvider?: string;
   translationProvider?: string;
-  sections?: Array<{ label: string; text: string; tone?: "neutral" | "warning" | "question" }>;
+  sections?: Array<{ label: string; text: string; backgroundReference?: string; tone?: "neutral" | "warning" | "question" }>;
 }

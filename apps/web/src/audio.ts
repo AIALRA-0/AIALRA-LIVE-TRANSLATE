@@ -1,4 +1,5 @@
 import { createDenoiser, type NoiseSuppressionMode } from "./noiseSuppression";
+import { connectCaptureBandlimit } from "./captureBandlimit";
 
 const TARGET_SAMPLE_RATE = 16_000;
 const DATABASE_NAME = "aialra-audio-outbox";
@@ -45,11 +46,16 @@ export function resample(input: Float32Array, sourceRate: number): Float32Array 
 // AudioWorklet delivers many short blocks.  Keeping the interpolation phase and
 // the final source samples across blocks prevents each callback from dropping
 // its tail and restarting the resampler at zero.
+// Capture supplies band-limited input through native Web Audio filters first.
 export class StreamingResampler {
   private buffer = new Float32Array(0);
-  private sourcePosition = 0;
+  private bufferOffset = 0;
+  private inputSamples = 0;
+  private outputSamples = 0;
 
-  constructor(private readonly sourceRate: number) {}
+  constructor(private readonly sourceRate: number) {
+    if (!Number.isFinite(sourceRate) || sourceRate <= 0) throw new RangeError("Invalid source sample rate");
+  }
 
   push(input: Float32Array): Float32Array {
     if (input.length === 0) return new Float32Array(0);
@@ -59,14 +65,25 @@ export class StreamingResampler {
     merged.set(this.buffer);
     merged.set(input, this.buffer.length);
     this.buffer = merged;
-    const ratio = this.sourceRate / TARGET_SAMPLE_RATE;
+    this.inputSamples += input.length;
+    return this.drain(false);
+  }
+
+  private drain(final: boolean): Float32Array {
     const output: number[] = [];
-    while (this.sourcePosition + 1 < this.buffer.length) {
-      const left = Math.floor(this.sourcePosition);
+    // Derive phase from integer frame counts instead of accumulating a ratio.
+    // At 44.1 kHz cumulative roundoff could emit an extra endpoint on every stop.
+    while (this.outputSamples * this.sourceRate < this.inputSamples * TARGET_SAMPLE_RATE) {
+      const sourceNumerator = this.outputSamples * this.sourceRate;
+      const sourceIndex = Math.floor(sourceNumerator / TARGET_SAMPLE_RATE);
+      const left = sourceIndex - this.bufferOffset;
+      if (!final && left + 1 >= this.buffer.length) break;
       const right = Math.min(left + 1, this.buffer.length - 1);
-      const fraction = this.sourcePosition - left;
+      // Compute the fractional phase independently of the retained block offset,
+      // so one large input and many worklet blocks produce identical samples.
+      const fraction = (sourceNumerator % TARGET_SAMPLE_RATE) / TARGET_SAMPLE_RATE;
       output.push(this.buffer[left] * (1 - fraction) + this.buffer[right] * fraction);
-      this.sourcePosition += ratio;
+      this.outputSamples += 1;
     }
     this.compact();
     return Float32Array.from(output);
@@ -76,12 +93,12 @@ export class StreamingResampler {
     if (this.sourceRate === TARGET_SAMPLE_RATE || this.buffer.length === 0) {
       return new Float32Array(0);
     }
-    // Duplicate only the final sample as an interpolation endpoint.  This does
-    // not invent speech and lets the last real sample be emitted once.
-    const endpoint = new Float32Array([this.buffer[this.buffer.length - 1]]);
-    const output = this.push(endpoint);
+    // A held final interpolation endpoint adds no time or new input sample.
+    const output = this.drain(true);
     this.buffer = new Float32Array(0);
-    this.sourcePosition = 0;
+    this.bufferOffset = 0;
+    this.inputSamples = 0;
+    this.outputSamples = 0;
     return output;
   }
 
@@ -89,10 +106,11 @@ export class StreamingResampler {
     // Retain one source sample as the interpolation anchor for the next
     // callback.  The next output position may already be past the current
     // block, so dropping all floor(sourcePosition) samples would skip audio.
-    const consumed = Math.min(Math.floor(this.sourcePosition), Math.max(0, this.buffer.length - 1));
+    const nextPosition = Math.floor(this.outputSamples * this.sourceRate / TARGET_SAMPLE_RATE) - this.bufferOffset;
+    const consumed = Math.min(nextPosition, Math.max(0, this.buffer.length - 1));
     if (consumed === 0) return;
     this.buffer = this.buffer.slice(consumed);
-    this.sourcePosition -= consumed;
+    this.bufferOffset += consumed;
   }
 }
 
@@ -300,6 +318,7 @@ export class BrowserCapture {
   private denoiser: (AudioWorkletNode & { destroy(): void }) | null = null;
   private stream: MediaStream | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
+  private bandlimitFilters: BiquadFilterNode[] = [];
   private worklet: AudioWorkletNode | null = null;
   private outputGain: GainNode | null = null;
   private socket: WebSocket | null = null;
@@ -311,6 +330,8 @@ export class BrowserCapture {
   private socketOpenTimer: number | null = null;
   private stopped = false;
   private stopping = false;
+  private inputSealed = false;
+  private ackWrites = Promise.resolve();
   private prepared = false;
   private activated = false;
   private leaseToken = "";
@@ -330,7 +351,7 @@ export class BrowserCapture {
     private readonly mode: CaptureMode = "microphone",
     private readonly deviceId?: string,
     private readonly onRevoked?: (message?: string) => void,
-    private readonly noiseMode: NoiseSuppressionMode = "rnnoise",
+    private readonly noiseMode: NoiseSuppressionMode = "off",
   ) {}
 
   // Prepare the browser input before asking Core for a recording lease.  This
@@ -357,13 +378,7 @@ export class BrowserCapture {
       this.stream = this.mode === "screen"
         ? await requestMediaWithTimeout(mediaDevices.getDisplayMedia({ audio: true, video: true }))
         : await requestMediaWithTimeout(mediaDevices.getUserMedia({
-            audio: {
-              channelCount: 1,
-              echoCancellation: true,
-              noiseSuppression: this.noiseMode === "browser",
-              autoGainControl: true,
-              ...(this.deviceId ? { deviceId: { exact: this.deviceId } } : {}),
-            },
+            audio: microphoneConstraints(this.noiseMode, this.deviceId),
           }));
       if (this.cancelled) throw new DOMException("Cancelled", "AbortError");
       if (this.mode === "screen") {
@@ -388,13 +403,14 @@ export class BrowserCapture {
         try {
           this.denoiser = await createDenoiser(this.context, this.noiseMode);
         } catch {
-          await this.stream.getAudioTracks()[0]?.applyConstraints({ noiseSuppression: true }).catch(() => undefined);
-          this.onStatus("增强降噪暂不可用，已使用浏览器可用的音频处理");
+          this.onStatus("所选降噪未能加载，本次保留原音；可以停止后重新选择处理方式");
         }
       }
       if (this.cancelled) throw new DOMException("Cancelled", "AbortError");
-      if (this.denoiser) { this.sourceNode.connect(this.denoiser); this.denoiser.connect(this.worklet); }
-      else this.sourceNode.connect(this.worklet);
+      if (this.denoiser) this.sourceNode.connect(this.denoiser);
+      this.bandlimitFilters = connectCaptureBandlimit(
+        this.context, this.denoiser ?? this.sourceNode, this.worklet,
+      );
       // Keep the worklet alive without playing the microphone back through the
       // speakers, which would create an echo loop during a lecture.
       this.outputGain = this.context.createGain();
@@ -415,6 +431,7 @@ export class BrowserCapture {
   // Activate an already prepared input with a server-issued lease.  A retry
   // after a transient WebSocket failure can reuse the same lease safely.
   async activate(leaseToken: string, leaseGeneration: number): Promise<void> {
+    if (this.stopping || this.inputSealed) throw new Error("本次录音已停止，请先完成音频保存和课程结束");
     if (!leaseToken) throw new Error("录音租约无效，请重新开始录音");
     await this.prepare();
     if (this.activated) return;
@@ -445,32 +462,33 @@ export class BrowserCapture {
   }
 
   async stop(): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped && !this.cancelled) return;
     this.stopping = true;
-    this.sourceNode?.disconnect();
-    this.denoiser?.disconnect();
-    this.denoiser?.destroy();
-    this.denoiser = null;
-    this.worklet?.disconnect();
-    this.outputGain?.disconnect();
-    this.stream?.getTracks().forEach((track) => track.stop());
-    await this.context?.close();
-    this.appendSamples(this.resampler?.flush() ?? new Float32Array(0));
-    if (this.sampleCount > 0) {
-      const tail = this.takeSamples(this.sampleCount);
-      this.writeChain = this.writeChain.then(() => this.queueFrame(tail));
+    if (!this.inputSealed) {
+      // Stop the physical input before any await or fallible graph cleanup.
+      this.stream?.getTracks().forEach((track) => track.stop());
+      this.activated = false;
+      this.appendSamples(this.resampler?.flush() ?? new Float32Array(0));
+      if (this.sampleCount > 0) {
+        const tail = this.takeSamples(this.sampleCount);
+        this.writeChain = this.writeChain.then(() => this.queueFrame(tail));
+      }
+      this.inputSealed = true;
+      this.disposeInput();
     }
     await this.writeChain;
+    if (this.cancelled) throw new Error("本机收音已停止，录音权限已失效；待确认音频保留在本机，请重试完成停止");
     const deadline = Date.now() + 30_000;
     while (this.pending.size > 0 && Date.now() < deadline) {
+      if (this.cancelled) throw new Error("本机收音已停止，录音权限已失效；待确认音频保留在本机，请重试完成停止");
       if (this.socket?.readyState !== WebSocket.OPEN) this.connect();
       this.sendPending();
       await new Promise((resolve) => window.setTimeout(resolve, 100));
     }
     if (this.pending.size > 0) {
-      this.stopping = false;
-      throw new Error(`仍有 ${this.pending.size} 个音频块等待服务器确认，请保持页面在线后再次停止`);
+      throw new Error(`麦克风已停止，仍有 ${this.pending.size} 个音频块等待服务器确认；联网后重试完成停止，不会重新收音`);
     }
+    await this.ackWrites;
     this.stopped = true;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     if (this.renewTimer !== null) window.clearInterval(this.renewTimer);
@@ -478,6 +496,20 @@ export class BrowserCapture {
     this.socket?.close();
     this.activated = false;
     this.onStatus("录音已停止，已采集音频均得到服务器确认");
+  }
+
+  // Recover the original outbox after refresh without prepare/getUserMedia.
+  // The caller renews the same holder's lease first; never acquire/take over here.
+  async finishPending(leaseToken: string, leaseGeneration: number): Promise<void> {
+    this.stopping = true;
+    this.inputSealed = true;
+    this.leaseToken = leaseToken;
+    this.leaseGeneration = leaseGeneration;
+    this.sourceId = `browser-${this.mode === "screen" ? "screen" : "mic"}-g${leaseGeneration}`;
+    const recovered = await listFrames(this.sessionId, this.sourceId);
+    recovered.forEach((item) => this.pending.set(item.sequence, item.frame));
+    this.renewTimer = window.setInterval(() => void this.renewLease(), 10_000);
+    await this.stop();
   }
 
   // Dispose a prepared input without presenting a lease-takeover message.
@@ -489,7 +521,6 @@ export class BrowserCapture {
     this.cancelled = true;
     const wasActivated = this.activated;
     this.stopped = true;
-    this.stopping = false;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     if (this.renewTimer !== null) window.clearInterval(this.renewTimer);
     if (this.socketOpenTimer !== null) window.clearTimeout(this.socketOpenTimer);
@@ -504,13 +535,13 @@ export class BrowserCapture {
   }
 
   private disposeInput(): void {
-    this.denoiser?.disconnect();
-    this.denoiser?.destroy();
-    this.denoiser = null;
-    this.sourceNode?.disconnect();
-    this.worklet?.disconnect();
-    this.outputGain?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
+    for (const node of [...this.bandlimitFilters, this.denoiser, this.sourceNode, this.worklet, this.outputGain]) {
+      try { node?.disconnect(); } catch { /* already disconnected; still release remaining resources */ }
+    }
+    try { this.denoiser?.destroy(); } catch { /* input tracks are already stopped */ }
+    this.denoiser = null;
+    this.bandlimitFilters = [];
     const context = this.context;
     if (context) void context.close().catch(() => undefined);
     this.sourceNode = null;
@@ -576,6 +607,7 @@ export class BrowserCapture {
 
   private connect(): void {
     if (this.stopped || !this.leaseToken) return;
+    if (this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -597,7 +629,7 @@ export class BrowserCapture {
       if (this.socketOpenTimer !== null) window.clearTimeout(this.socketOpenTimer);
       this.socketOpenTimer = null;
       this.inFlight.clear();
-      this.onStatus(`${this.mode === "screen" ? "共享音频" : "麦克风"}已连接，等待服务器确认音频块`);
+      this.onStatus(this.stopping ? "收音已停止，正在补传待确认音频" : `${this.mode === "screen" ? "共享音频" : "麦克风"}已连接，等待服务器确认音频块`);
       this.sendPending();
     };
     this.socket.onmessage = (event) => {
@@ -612,8 +644,9 @@ export class BrowserCapture {
       if (isDurableAudioAck(message)) {
         this.inFlight.delete(message.sequence);
         this.pending.delete(message.sequence);
-        void deleteFrame(`${this.sessionId}:${this.sourceId}:${message.sequence}`);
-        if (this.pending.size === 0) this.onStatus("收音正常，服务器已确认全部音频块");
+        const key = `${this.sessionId}:${this.sourceId}:${message.sequence}`;
+        this.ackWrites = this.ackWrites.then(() => deleteFrame(key));
+        if (this.pending.size === 0) this.onStatus(this.stopping ? "收音已停止，服务器已确认全部音频块" : "收音正常，服务器已确认全部音频块");
         this.sendPending();
       } else if (message.type === "audio.ack") {
         this.onStatus("服务器返回了非持久确认，音频块继续保留并等待重试");
@@ -657,6 +690,7 @@ export class BrowserCapture {
     let response: Response;
     try {
       response = await fetch(`/api/v1/projects/${this.projectId}/sessions/${this.sessionId}/recording/renew`, {
+        signal: AbortSignal.timeout(10_000),
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ device_id: this.recorderDeviceId, lease_token: this.leaseToken }),
@@ -733,32 +767,55 @@ export function assessMicrophoneLevels(
 }
 
 // The preflight test reads the selected microphone locally and never opens a recording lease or network request.
+// Test and recording must observe the same input processing. Raw mode never
+// silently enables browser gain, echo removal or a second denoising pass.
+export function microphoneConstraints(mode: NoiseSuppressionMode, deviceId?: string): MediaTrackConstraints {
+  return {
+    channelCount: 1,
+    echoCancellation: mode === "browser",
+    noiseSuppression: mode === "browser",
+    autoGainControl: mode === "browser",
+    ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+  };
+}
+
 export async function testMicrophone(
   deviceId: string | undefined,
   onProgress: (progress: MicrophoneTestProgress) => void,
   signal?: AbortSignal,
+  noiseMode: NoiseSuppressionMode = "off",
 ): Promise<MicrophoneTestResult> {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("当前浏览器不支持麦克风测试");
   const stream = await requestMediaWithTimeout(navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-    },
+    audio: microphoneConstraints(noiseMode, deviceId),
   }));
   let context: AudioContext | undefined;
+  let denoiser: (AudioWorkletNode & { destroy(): void }) | undefined;
+  let silentOutput: GainNode | undefined;
+  let bandlimitFilters: BiquadFilterNode[] = [];
   const release = () => stream.getTracks().forEach((track) => track.stop());
   signal?.addEventListener("abort", release, { once: true });
   try {
   signal?.throwIfAborted();
-  context = new AudioContext({ latencyHint: "interactive" });
+  context = new AudioContext({ latencyHint: "interactive", sampleRate: 48_000 });
   await context.resume();
   const analyser = context.createAnalyser();
   analyser.fftSize = 2048;
   const source = context.createMediaStreamSource(stream);
-  source.connect(analyser);
+  if (noiseMode === "gtcrn" || noiseMode === "rnnoise") {
+    try {
+      denoiser = await createDenoiser(context, noiseMode);
+    } catch {
+      throw new Error("所选降噪未能加载，未完成该模式的音量测试；请切换原音或重试");
+    }
+    signal?.throwIfAborted();
+    source.connect(denoiser);
+  }
+  bandlimitFilters = connectCaptureBandlimit(context, denoiser ?? source, analyser);
+  silentOutput = context.createGain();
+  silentOutput.gain.value = 0;
+  analyser.connect(silentOutput);
+  silentOutput.connect(context.destination);
   const samples = new Float32Array(analyser.fftSize);
   const quietLevels: number[] = [];
   const speechLevels: number[] = [];
@@ -795,6 +852,9 @@ export async function testMicrophone(
   } finally {
     signal?.removeEventListener("abort", release);
     release();
+    silentOutput?.disconnect();
+    for (const filter of bandlimitFilters) filter.disconnect();
+    try { denoiser?.disconnect(); denoiser?.destroy(); } catch { /* tracks are stopped */ }
     if (context && context.state !== "closed") await context.close();
   }
 }

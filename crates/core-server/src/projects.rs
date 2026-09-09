@@ -91,6 +91,7 @@ pub struct LeaseResponse {
     session_id: String,
     holder_device_id: String,
     generation: u64,
+    acquired_at: chrono::DateTime<Utc>,
     expires_at: chrono::DateTime<Utc>,
     lease_token: String,
 }
@@ -324,6 +325,12 @@ pub async fn acquire_recording(
     let session = owned_project_session(&state, &user.0, &project_id, &session_id)?;
     validate_device_id(&request.device_id)?;
     validate_recordable_state(session.state)?;
+    if !session.consent_confirmed {
+        return Err(ApiError::conflict_with_code(
+            "请先确认课程录音许可，再开始或续录",
+            "recording_consent_required",
+        ));
+    }
     let now = Utc::now();
     let has_active_project_lease = state
         .store
@@ -363,6 +370,11 @@ pub async fn acquire_recording(
             .store
             .transition_session(&session_id, SessionState::Recording)?;
         let _ = state.emit(&session_id, "core", "session.recording.started", 0, &format!("lease_{}", lease.generation), None, json!({"visible_recording_required": true, "holder_device_id": request.device_id, "generation": lease.generation}));
+    } else if matches!(
+        session.state,
+        SessionState::Completed | SessionState::Failed
+    ) {
+        let _ = state.emit(&session_id, "core", "session.recording.started", 0, &format!("lease_{}", lease.generation), None, json!({"visible_recording_required": true, "resumed": true, "generation": lease.generation}));
     } else if !matches!(
         session.state,
         SessionState::Recording | SessionState::Degraded
@@ -777,6 +789,7 @@ fn lease_response(lease: RecordingLeaseRecord, token: String) -> LeaseResponse {
         session_id: lease.session_id,
         holder_device_id: lease.holder_device_id,
         generation: lease.generation,
+        acquired_at: lease.heartbeat_at,
         expires_at: lease.expires_at,
         lease_token: token,
     }
@@ -814,10 +827,8 @@ fn recording_session_status(
         }
         SessionState::Recording | SessionState::Degraded => (true, "recovery_available"),
         SessionState::Stopping | SessionState::Processing => (false, "processing"),
-        SessionState::Completed
-        | SessionState::Failed
-        | SessionState::Created
-        | SessionState::Archived => (false, "not_recordable"),
+        SessionState::Completed | SessionState::Failed => (true, "recovery_available"),
+        SessionState::Created | SessionState::Archived => (false, "not_recordable"),
     };
     Ok(RecordingSessionStatus {
         session_id: session.id,
@@ -832,9 +843,13 @@ fn recording_session_status(
 
 fn validate_recordable_state(state: SessionState) -> Result<(), ApiError> {
     match state {
-        SessionState::Ready | SessionState::Recording | SessionState::Degraded => Ok(()),
+        SessionState::Ready
+        | SessionState::Recording
+        | SessionState::Degraded
+        | SessionState::Completed
+        | SessionState::Failed => Ok(()),
         SessionState::Stopping | SessionState::Processing => Err(ApiError::conflict_with_code(
-            "课程正在收尾，音频已保留；可查看处理进度，或返回项目另建课程",
+            "课程正在保存尾音和收尾，完成后可在本课程继续录音",
             "recording_session_processing",
         )),
         SessionState::Created => Err(ApiError::conflict_with_code(
@@ -844,10 +859,6 @@ fn validate_recordable_state(state: SessionState) -> Result<(), ApiError> {
         SessionState::Archived => Err(ApiError::conflict_with_code(
             "课程在回收站中，请先恢复后查看课程状态",
             "recording_session_archived",
-        )),
-        SessionState::Completed | SessionState::Failed => Err(ApiError::conflict_with_code(
-            "课程已结束，历史内容仍可查看；请返回项目新建课程",
-            "recording_session_finished",
         )),
     }
 }
@@ -1136,6 +1147,8 @@ mod tests {
             SessionState::Ready,
             SessionState::Recording,
             SessionState::Degraded,
+            SessionState::Completed,
+            SessionState::Failed,
         ] {
             assert!(validate_recordable_state(state).is_ok());
         }
@@ -1143,11 +1156,132 @@ mod tests {
             SessionState::Created,
             SessionState::Stopping,
             SessionState::Processing,
-            SessionState::Completed,
-            SessionState::Failed,
             SessionState::Archived,
         ] {
             assert!(validate_recordable_state(state).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_course_can_resume_repeatedly_without_old_stop_ending_new_recording() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_project(&NewProject {
+                id: "project_resume".into(),
+                owner_subject: "owner".into(),
+                title: "Resume fixture".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+            })
+            .unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_resume".into(),
+                title: "Resume fixture".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .store
+            .attach_session_to_project("project_resume", "session_resume", "owner", "recorder")
+            .unwrap();
+        state
+            .store
+            .transition_session("session_resume", SessionState::Ready)
+            .unwrap();
+        state.store.heartbeat_worker(&WorkerHeartbeat {
+            id: "resume-worker".into(), capabilities: vec!["asr".into()],
+            model_metadata: json!({"status":"ok", "asr_available":true, "asr_provider":"fixture@cuda"}),
+            active_job_id: None,
+        }).unwrap();
+        let mut old_token: Option<String> = None;
+        let mut previous_events = Vec::new();
+        for cycle in 1..=3 {
+            let Json(lease) = acquire_recording(
+                State(state.clone()),
+                Extension(CurrentUser("owner".into())),
+                Path(("project_resume".into(), "session_resume".into())),
+                Json(AcquireLeaseRequest {
+                    device_id: "recorder".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(lease.generation, cycle);
+            assert_eq!(
+                state
+                    .store
+                    .get_session("session_resume")
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                SessionState::Recording
+            );
+            if let Some(token) = &old_token {
+                assert!(
+                    stop_recording(
+                        State(state.clone()),
+                        Extension(CurrentUser("owner".into())),
+                        Path(("project_resume".into(), "session_resume".into())),
+                        Json(LeaseSecretRequest {
+                            device_id: "recorder".into(),
+                            lease_token: token.clone()
+                        })
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(
+                    state
+                        .store
+                        .get_session("session_resume")
+                        .unwrap()
+                        .unwrap()
+                        .state,
+                    SessionState::Recording
+                );
+            }
+            let Json(stopped) = stop_recording(
+                State(state.clone()),
+                Extension(CurrentUser("owner".into())),
+                Path(("project_resume".into(), "session_resume".into())),
+                Json(LeaseSecretRequest {
+                    device_id: "recorder".into(),
+                    lease_token: lease.lease_token.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(stopped.state, SessionState::Completed);
+            let status = recording_session_status(&state, stopped, None).unwrap();
+            assert!(status.recoverable);
+            let events = state.store.list_events("session_resume").unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.event_type == "session.completed")
+                    .count(),
+                cycle as usize
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.event_type == "session.recording.started")
+                    .count(),
+                cycle as usize
+            );
+            for id in &previous_events {
+                assert!(events.iter().any(|event| &event.event_id == id));
+            }
+            previous_events = events.iter().map(|event| event.event_id).collect();
+            old_token = Some(lease.lease_token);
         }
     }
 }

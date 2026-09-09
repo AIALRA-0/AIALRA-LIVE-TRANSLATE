@@ -28,12 +28,18 @@ export function applyLeaseAcquired(session: Session): Session {
 }
 
 // A fresh EventSource replays durable history, so state events may arrive after a newer session snapshot.
-export function applySessionStateEvent(session: Session, eventType: string): Session {
+export function applySessionStateEvent(session: Session, eventType: string, ingestedAt?: string, resumed = false): Session {
   const nextState = SESSION_STATE_BY_EVENT[eventType];
   if (!nextState) return session;
+  const timestamp = ingestedAt ? Date.parse(ingestedAt) : NaN;
+  const fresh = Number.isFinite(timestamp) && timestamp >= Date.parse(session.updated_at);
+  if (ingestedAt && !fresh) return session;
+  if (fresh && resumed && eventType === "session.recording.started" && ["completed", "failed"].includes(session.state)) {
+    return { ...session, state: "recording", updated_at: ingestedAt! };
+  }
   const currentRank = SESSION_STATE_RANK[session.state] ?? 0;
   const nextRank = SESSION_STATE_RANK[nextState] ?? 0;
-  return nextRank > currentRank ? { ...session, state: nextState } : session;
+  return nextRank > currentRank ? { ...session, state: nextState, updated_at: fresh ? ingestedAt! : session.updated_at } : session;
 }
 
 const READWEAVE_CONTENT_EVENTS = new Set([

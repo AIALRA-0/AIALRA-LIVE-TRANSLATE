@@ -169,8 +169,11 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 .new-items-button { position: sticky; z-index: 2; top: 8px; display: block; margin: -10px auto 12px; padding: 8px 13px; border: 1px solid #3978ff; border-radius: 999px; color: #fff; background: #3978ff; box-shadow: 0 5px 16px rgba(0, 0, 0, .16); font-size: 10px; font-weight: 800; }
 .course-paragraph { max-width: 920px; margin: 0 auto; padding: 19px 0 23px; border-bottom: 1px solid var(--line); }
 .course-paragraph header { display: flex; justify-content: space-between; color: #7a7a7a; font-size: 9px; }
+.course-paragraph .speaker-label { font-size: 12px; font-weight: 600; color: var(--ink); }
 .course-paragraph p { margin: 10px 0 0; white-space: pre-wrap; }
 .source-text { color: var(--ink); font-size: 17px; line-height: 1.65; }
+.source-preview { border-bottom-style: dashed; }
+.source-preview header { color: var(--ink); font-size: 12px; opacity: 0.75; }
 .translation-text { color: #4f4f4f; font-size: 15px; line-height: 1.75; }
 .course-paragraph small, .insight-block small { display: block; margin-top: 8px; color: #777; font-family: "Cascadia Code", Consolas, monospace; font-size: 9px; }
 .insight-block { max-width: 920px; margin: 18px auto; padding: 15px 17px; border: 1px solid #c5c5c5; border-left: 4px solid #555; background: #f7f7f7; }
@@ -207,6 +210,7 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 .paragraph-insight-source { display: block; max-height: 4.8em; overflow: auto; color: var(--muted); line-height: 1.55; }
 .paragraph-summary-section, .paragraph-terms-section { display: grid; gap: 5px; padding-top: 10px; border-top: 1px solid var(--line); }
 .paragraph-summary-section strong, .paragraph-terms-section > strong { color: var(--ink); font-size: 10px; }
+.paragraph-summary-section p { white-space: pre-wrap; }
 .paragraph-terms-section p { line-height: 1.55; }
 .paragraph-terms-section b { color: var(--ink); }
 .capture-copy strong { color: var(--ink); font-size: 11px; }

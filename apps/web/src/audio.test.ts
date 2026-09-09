@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { StreamingResampler, assessMicrophoneLevels, encodeFrame, isDurableAudioAck, mediaInputError, nextFramesToSend, recoverNextSequence, resample } from "./audio";
+import { StreamingResampler, assessMicrophoneLevels, encodeFrame, isDurableAudioAck, mediaInputError, microphoneConstraints, nextFramesToSend, recoverNextSequence, resample } from "./audio";
+
+describe("explicit microphone processing", () => {
+  it("keeps raw input raw, including the level test", () => {
+    expect(microphoneConstraints("off", "chosen-device")).toEqual({
+      channelCount: 1, echoCancellation: false, noiseSuppression: false,
+      autoGainControl: false, deviceId: { exact: "chosen-device" },
+    });
+  });
+  it("never stacks browser processing on the selected neural denoiser", () => {
+    for (const mode of ["gtcrn", "rnnoise"] as const) {
+      expect(microphoneConstraints(mode)).toEqual(microphoneConstraints("off"));
+    }
+    expect(microphoneConstraints("browser")).toMatchObject({
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+    });
+  });
+});
 
 describe("audio transport", () => {
   it("encodes sequence and capture time as big-endian unsigned integers", () => {
@@ -15,6 +32,27 @@ describe("audio transport", () => {
     const input = new Float32Array(48_000);
     const output = resample(input, 48_000);
     expect(output).toHaveLength(16_000);
+  });
+
+  it("preserves exact 44.1 kHz duration across blocks and repeated seals", () => {
+    const input = Float32Array.from({ length: 44_100 }, (_, i) => Math.sin(i / 100));
+    const whole = resample(input, 44_100);
+    expect(whole).toHaveLength(16_000);
+    const converter = new StreamingResampler(44_100);
+    for (let run = 0; run < 3; run += 1) {
+      const parts: number[] = [];
+      for (let offset = 0; offset < input.length; offset += 128) {
+        parts.push(...converter.push(input.subarray(offset, offset + 128)));
+      }
+      parts.push(...converter.flush());
+      expect(parts).toHaveLength(16_000);
+      expect(Float32Array.from(parts)).toEqual(whole);
+      expect(converter.flush()).toHaveLength(0);
+    }
+  });
+
+  it("rejects a sample rate that cannot advance the conversion", () => {
+    for (const rate of [0, -1, NaN, Infinity]) expect(() => new StreamingResampler(rate)).toThrow(RangeError);
   });
 
   it("keeps the resampling phase and duration across AudioWorklet blocks", () => {

@@ -9,11 +9,14 @@ pub struct AsrResponse {
     pub confidence: f32,
     pub duration_ms: u64,
     pub provider: String,
+    #[serde(default)]
+    pub speaker_observation: Option<crate::speakers::Observation>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TranslationResponse {
-    pub source_text: Option<String>,
+    // An optional legacy source_text in the wire result is deliberately ignored.
+    // Core binds the original text from the persisted translation job instead.
     pub text: String,
     pub provider: String,
     #[serde(default)]
@@ -39,6 +42,8 @@ pub struct ExplanationTerm {
     pub explanation: String,
     pub evidence_segment_ids: Vec<String>,
     pub asset_page_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_reference: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -47,6 +52,61 @@ pub struct RareTerm {
     pub one_line: String,
     pub evidence_segment_ids: Vec<String>,
     pub asset_page_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_reference: Option<String>,
+}
+
+/// Background references are separate from lecturer evidence and never fetched by Core.
+pub fn valid_background_reference(reference: Option<&str>) -> bool {
+    let Some(reference) = reference else {
+        return true;
+    };
+    let Ok(url) = reqwest::Url::parse(reference) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && matches!(
+            url.host_str(),
+            Some(
+                "ocw.mit.edu"
+                    | "docs.amd.com"
+                    | "www.nist.gov"
+                    | "www.ti.com"
+                    | "developerhelp.microchip.com"
+                    | "www.intel.com"
+                    | "www.rfc-editor.org"
+                    | "limsk.ece.gatech.edu"
+                    | "rocmdocs.amd.com"
+            )
+        )
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::valid_background_reference;
+
+    #[test]
+    fn background_links_reject_private_or_executable_destinations() {
+        assert!(valid_background_reference(None));
+        assert!(valid_background_reference(Some(
+            "https://www.rfc-editor.org/rfc/rfc3385"
+        )));
+        for value in [
+            "javascript:alert(1)",
+            "file:///private",
+            "https://127.0.0.1/",
+            "https://www.rfc-editor.org.evil.test/",
+            "https://secret@www.rfc-editor.org/",
+            "https://www.rfc-editor.org/?token=secret",
+            "https://www.rfc-editor.org:8443/",
+        ] {
+            assert!(!valid_background_reference(Some(value)));
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

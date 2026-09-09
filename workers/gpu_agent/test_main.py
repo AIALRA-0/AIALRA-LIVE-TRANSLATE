@@ -1,6 +1,7 @@
 """Unit tests cover identifiers, lanes, and latency-sensitive GPU scheduling."""
 
 import asyncio
+import hashlib
 import json
 
 import httpx
@@ -29,6 +30,41 @@ def test_worker_identifier_removes_network_and_path_punctuation() -> None:
 
 def test_worker_identifier_is_bounded() -> None:
     assert len(sanitize_worker_id("x" * 100)) == 64
+
+
+def test_audio_digest_is_required_and_checked_before_inference() -> None:
+    async def scenario() -> None:
+        pcm = b"\x00\x00" * 160
+        model_calls = 0
+
+        def infer(_: httpx.Request) -> httpx.Response:
+            nonlocal model_calls
+            model_calls += 1
+            return httpx.Response(200, json={
+                "text": "Synthetic input", "provider": "qwen3-asr:test@cuda",
+            })
+
+        for digest, expected_kind in [
+            ("", "input_digest_missing"), ("a" * 64, "input_digest_mismatch"),
+            (hashlib.sha256(pcm).hexdigest(), None),
+        ]:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda _, value=digest: httpx.Response(
+                    200, content=pcm, headers={"x-aialra-content-sha256": value},
+                )
+            )) as gateway, httpx.AsyncClient(transport=httpx.MockTransport(infer)) as model:
+                try:
+                    await execute_job(gateway, model, {
+                        "id": "synthetic-audio", "idempotency_key": "synthetic-audio",
+                        "job_type": "asr", "input": {},
+                    }, GpuScheduler(asr_uses_gpu=False), "test-worker")
+                    assert expected_kind is None
+                except JobExecutionError as error:
+                    assert error.report.error_kind == expected_kind
+                    assert error.report.response_sha256 is None
+        assert model_calls == 1
+
+    asyncio.run(scenario())
 
 
 def test_failure_diagnostics_cover_all_stages_and_keep_a_fixed_wire_shape() -> None:
@@ -174,7 +210,29 @@ def test_latency_sensitive_model_jobs_have_independent_lanes() -> None:
     capabilities = {lane.suffix: lane.capabilities for lane in LANES}
     assert capabilities["asr"] == ("asr",)
     assert capabilities["translate"] == ("translate",)
-    assert capabilities["explain"] == ("explain", "summarize", "asset_parse")
+    assert capabilities["explain"] == ("topic", "explain", "summarize", "asset_parse")
+
+
+def test_topic_job_uses_background_endpoint_and_preserves_source_payload() -> None:
+    async def scenario() -> None:
+        payload = {"segments": [{"id": "source-1", "text": "Synthetic paragraph"}], "force": True}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/topics"
+            assert json.loads(request.content) == payload
+            return httpx.Response(200, json={"boundaries": [], "provider": "ollama:model@cuda"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as model:
+            result = await execute_job(model, model, {
+                "id": "job_topic_test", "job_type": "topic", "input": payload,
+                "idempotency_key": "stable-topic-key",
+            }, GpuScheduler(asr_uses_gpu=False), "test-worker")
+        assert result == {"boundaries": [], "provider": "ollama:model@cuda"}
+        assert "pcm_s16le_base64" not in payload
+
+    asyncio.run(scenario())
+    assert provider_proves_local_execution("topic", "ollama:model@cuda")
+    assert not provider_proves_local_execution("topic", "ollama:model@cpu")
 
 
 def test_provider_gate_allows_cpu_asr_but_requires_cuda_llm() -> None:

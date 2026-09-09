@@ -67,7 +67,9 @@ function Initialize-LocalProviders {
         keep_alive = -1
         options = @{ num_predict = 2; temperature = 0 }
     } | ConvertTo-Json -Depth 4 -Compress
-    if ($translationProvider -eq "ollama") {
+    # Shared mode is already warmed at the worker's exact context size. A second
+    # unconfigured generate call can reload its runner with a different KV cache.
+    if ($translationProvider -eq "ollama" -and $env:AIALRA_SHARED_RESIDENT_MODELS -notin @("1", "true")) {
         [void](Invoke-RestMethod -Uri "$ollamaUrl/api/generate" -Method Post -ContentType "application/json" -Body $ollamaBody -TimeoutSec 120)
     }
     [void](Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/asr/transcribe" -Method Post -ContentType "application/json" -Body $asrBody -TimeoutSec 120)

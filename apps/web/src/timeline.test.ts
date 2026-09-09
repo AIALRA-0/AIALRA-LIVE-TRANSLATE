@@ -22,6 +22,17 @@ function event(eventType: string, payload: Record<string, unknown>): EventEnvelo
 }
 
 describe("timeline mapping", () => {
+  it("keeps reviewed background separate from course evidence and rejects unsafe links", () => {
+    const reference = "https://www.rfc-editor.org/rfc/rfc3385";
+    const [item] = buildCourseDocument([event("explanation.card.created", { result: {
+      paragraph_summary: "合成说明", evidence_segment_ids: ["p1"], asset_page_ids: [],
+      terms: [reference, "javascript:alert(1)", "https://127.0.0.1/", "https://secret@www.rfc-editor.org/"]
+        .map((url) => ({ term: "校验", explanation: "背景定义", background_reference: url })),
+    } })]);
+    expect(item.evidenceIds).toEqual(["p1"]);
+    expect(item.sections?.slice(1).map((section) => section.backgroundReference))
+      .toEqual([reference, undefined, undefined, undefined]);
+  });
   it("keeps segment and page evidence on explanation cards", () => {
     const items = buildCourseDocument([
       event("explanation.card.created", {
@@ -37,12 +48,12 @@ describe("timeline mapping", () => {
     expect(items[0]?.evidenceIds).toEqual(["seg-1", "page-2"]);
   });
 
-  it("pairs translations with their source paragraph", () => {
+  it("pairs translations without allowing their echoed source to rewrite recognition", () => {
     const source = event("segment.finalized", { segment_id: "seg-1", text: "attention", provider: "asr" });
     const translation = { ...event("translation.finalized", { segment_id: "seg-1", source_text: "Attention uses context.", text: "注意力使用上下文", provider: "llm" }), event_id: "evt-translation" };
     const [paragraph] = buildCourseDocument([source, translation]);
     expect(paragraph.kind).toBe("paragraph");
-    expect(paragraph.original).toBe("Attention uses context.");
+    expect(paragraph.original).toBe("attention");
     expect(paragraph.translation).toBe("注意力使用上下文");
   });
 
@@ -77,6 +88,31 @@ describe("timeline mapping", () => {
     expect(items[0]?.original).toBe("Attention uses context.");
   });
 
+  it("previews only unconsumed recognition and removes it when the paragraph arrives", () => {
+    const fragment = event("segment.finalized", { segment_id: "s1", text: "The value", display_mode: "internal_fragment" });
+    const next = { ...fragment, event_id: "second", payload: { ...fragment.payload, segment_id: "s2", text: "is ready." } };
+    const diagnostic = event("model.job.stage", { job_id: "j1", stage: "inferring", text: "internal diagnostic" });
+    const preview = buildCourseDocument([fragment, next, fragment, diagnostic]).filter(isRenderableDocumentItem);
+    expect(preview).toHaveLength(1);
+    expect(preview[0].kind).toBe("preview");
+    expect(preview[0].original).toBe("The value is ready.");
+    expect(preview[0].translation).toBeUndefined();
+    const paragraph = event("paragraph.finalized", { paragraph_id: "p1", segment_ids: ["s1", "s2"], text: "The value is ready." });
+    const completed = buildCourseDocument([fragment, next, paragraph]).filter(isRenderableDocumentItem);
+    expect(completed).toHaveLength(1);
+    expect(completed[0].kind).toBe("paragraph");
+    const later = { ...fragment, event_id: "later", payload: { ...fragment.payload, segment_id: "s3", text: "A new statement" } };
+    expect(buildCourseDocument([fragment, next, paragraph, later]).at(-1)?.original).toBe("A new statement");
+  });
+
+  it("does not strip literal language-label speech from source or previews", () => {
+    const literal = "源语言：我们正在讨论翻译格式";
+    const paragraph = event("paragraph.finalized", { paragraph_id: "p1", text: literal });
+    expect(buildCourseDocument([paragraph])[0].original).toBe(literal);
+    const fragment = event("segment.finalized", { segment_id: "s1", text: literal, display_mode: "internal_fragment" });
+    expect(buildCourseDocument([fragment])[0].original).toBe(literal);
+  });
+
   it("keeps one teaching block instead of bursting into many cards", () => {
     const [item] = buildCourseDocument([event("explanation.card.created", {
       card_id: "card-2",
@@ -85,6 +121,34 @@ describe("timeline mapping", () => {
     expect(item.kind).toBe("insight");
     expect(item.sections).toHaveLength(2);
     expect(item.sections?.map((section) => section.label)).toEqual(["当前内容组总结", "知识补充 · token"]);
+  });
+
+  it("labels capacity continuation without displaying internal grouping events", () => {
+    const events = [
+      event("content.group.created", {
+        paragraph_ids: ["para-1", "para-2"], reason: "capacity_continuation",
+      }),
+      event("topic.window.checked", { paragraph_ids: ["para-1", "para-2"] }),
+      event("explanation.card.created", {
+        card_id: "card-topic",
+        result: { paragraph_summary: "同主题内容", evidence_segment_ids: ["para-1", "para-2"] },
+      }),
+    ];
+    const items = buildCourseDocument(events);
+    expect(items).toHaveLength(1);
+    expect(items[0].groupReason).toBe("capacity_continuation");
+    expect(items[0].evidenceIds).toEqual(["para-1", "para-2"]);
+  });
+
+  it("renders anonymous course labels and retains uncertainty without guessing names", () => {
+    const labels = [{ status: "assigned", index: 2 }, { status: "unconfirmed", index: null },
+      { status: "assigned", index: 999 }, null];
+    const items = buildCourseDocument(labels.map((speaker, i) => event("paragraph.finalized", {
+      paragraph_id: `para-speaker-${i}`, text: "Synthetic speech", speaker,
+    })));
+    expect(items.map((item) => item.speakerLabel)).toEqual([
+      "说话人 2", "说话人待确认", "说话人待确认", undefined,
+    ]);
   });
 
   it("shows a retryable summary failure without inventing summary text", () => {
@@ -168,5 +232,24 @@ describe("timeline mapping", () => {
     const twice = appendEvent(once, input);
     expect(twice.events).toHaveLength(1);
     expect(twice.items).toHaveLength(1);
+  });
+
+  it("joins preview punctuation and Chinese fragments without inserting stray spaces", () => {
+    const fragments = ["Context", ".", "下一个", "概念"].map((value, index) => event("segment.finalized", {
+      segment_id: `preview-punctuation-${index}`, display_mode: "internal_fragment", text: value,
+    }));
+    const [preview] = buildCourseDocument(fragments);
+    expect(preview.body).toBe("Context.下一个概念");
+  });
+
+  it("preserves same-language content rather than treating literal labels as translator headers", () => {
+    const original = "源语言：中文；今天讨论信号";
+    const [item] = buildCourseDocument([
+      event("paragraph.finalized", {paragraph_id:"same-language",text:original}),
+      event("translation.finalized", {paragraph_id:"same-language",text:original,translation_mode:"same_language"}),
+    ]);
+    expect(item.original).toBe(original);
+    expect(item.translation).toBe(original);
+    expect(item.translationMode).toBe("same_language");
   });
 });

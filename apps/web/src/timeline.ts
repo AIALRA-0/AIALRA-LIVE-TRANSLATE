@@ -16,6 +16,18 @@ function evidence(value: unknown): string[] {
   return strings(value).filter(Boolean);
 }
 
+function backgroundReference(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    const hosts = ["ocw.mit.edu", "docs.amd.com", "www.nist.gov", "www.ti.com",
+      "developerhelp.microchip.com", "www.intel.com", "www.rfc-editor.org",
+      "limsk.ece.gatech.edu", "rocmdocs.amd.com"];
+    return url.protocol === "https:" && !url.username && !url.password && !url.port
+      && !url.search && hosts.includes(url.hostname) ? url.href : undefined;
+  } catch { return undefined; }
+}
+
 function cleanTranslationDisplay(value: unknown): string {
   if (typeof value !== "string") return "";
   const labels = [
@@ -59,6 +71,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
   const hasParagraphs = events.some((event) => event.event_type === "paragraph.finalized");
   const usesInternalFragments = events.some((event) => event.event_type === "segment.finalized" && event.payload.display_mode === "internal_fragment");
   const activeStages = new Map<string, EventEnvelope>();
+  const contentGroups = events.filter((event) => event.event_type === "content.group.created");
 
   const items: TimelineItem[] = [];
   for (const event of events) {
@@ -81,10 +94,17 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
     if (event.event_type === "paragraph.finalized" || (event.event_type === "segment.finalized" && !hasParagraphs && !usesInternalFragments)) {
       const segmentId = text(payload.paragraph_id) || text(payload.segment_id) || event.event_id;
       const translation = translations.get(segmentId);
-      const original = cleanTranslationDisplay(translation?.payload.source_text) || cleanTranslationDisplay(payload.text);
+      // Recognized source is content, even when a lecturer literally says a
+      // phrase resembling a provider label. Only translations need label cleanup.
+      const original = text(payload.text) || text(translation?.payload.source_text);
+      const speaker = object(payload.speaker);
+      const speakerLabel = speaker.status === "assigned" && Number.isInteger(speaker.index) && Number(speaker.index) > 0 && Number(speaker.index) <= 64
+        ? `说话人 ${speaker.index}` : speaker.status ? "说话人待确认" : undefined;
       items.push({
         id: segmentId, kind: "paragraph", title: "课程段落", body: original,
-        original, translation: translation ? cleanTranslationDisplay(translation.payload.text) : undefined,
+        original, translation: translation?.payload.translation_mode === "same_language" ? original
+          : translation ? cleanTranslationDisplay(translation.payload.text) : undefined,
+        speakerLabel,
         translationMode: translation?.payload.translation_mode === "same_language" ? "same_language" : undefined,
         sourceProvider: text(payload.provider), translationProvider: translation ? text(translation.payload.provider) : undefined,
         evidenceIds: [segmentId], occurredAt: event.captured_at_wall,
@@ -99,15 +119,22 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       const cardId = text(payload.card_id) || event.event_id;
       const sharedEvidence = [...evidence(result.evidence_segment_ids), ...evidence(result.asset_page_ids)];
       const provider = text(result.provider);
+      const sourceIds = evidence(result.evidence_segment_ids);
+      const group = contentGroups.find((entry) => {
+        const ids = evidence(entry.payload.paragraph_ids);
+        return ids.length === sourceIds.length && ids.every((id, i) => id === sourceIds[i]);
+      });
+      const reason = text(group?.payload.reason);
+      const groupReason = reason === "topic_change" || reason === "capacity_continuation" || reason === "recording_stopped" ? reason : undefined;
       const sections: NonNullable<TimelineItem["sections"]> = [];
       const summary = text(result.paragraph_summary) || text(result.summary);
       if (summary) sections.push({ label: "当前内容组总结", text: summary });
       const terms = Array.isArray(result.terms) ? result.terms : Array.isArray(result.rare_terms) ? result.rare_terms : [];
       terms.forEach((entry) => {
         const value = object(entry); const term = text(value.term); const explanation = text(value.explanation) || text(value.one_line);
-        if (term || explanation) sections.push({ label: term ? `知识补充 · ${term}` : "知识补充", text: explanation });
+        if (term || explanation) sections.push({ label: term ? `知识补充 · ${term}` : "知识补充", text: explanation, backgroundReference: backgroundReference(value.background_reference) });
       });
-      if (sections.length) items.push({ id: cardId, kind: "insight", title: "知识补充", body: "", sections, evidenceIds: sharedEvidence, occurredAt: event.captured_at_wall, provider });
+      if (sections.length) items.push({ id: cardId, kind: "insight", title: "知识补充", body: "", sections, evidenceIds: sharedEvidence, occurredAt: event.captured_at_wall, provider, groupReason });
       continue;
     }
 
@@ -189,6 +216,27 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       evidenceIds: [],
       occurredAt: event.captured_at_wall,
     });
+  }
+  // A saved recognition fragment need not wait for translation sentence assembly
+  // to become visible. One non-final preview consumes no new model work, and is
+  // removed only when a durable paragraph explicitly references those fragments.
+  const consumed = new Set(events.filter((event) => event.event_type === "paragraph.finalized")
+    .flatMap((event) => evidence(event.payload.segment_ids)));
+  const pending = new Map<string, EventEnvelope>();
+  for (const event of events) {
+    const id = text(event.payload.segment_id);
+    if (event.event_type === "segment.finalized" && event.payload.display_mode === "internal_fragment"
+      && id && !consumed.has(id) && !pending.has(id) && text(event.payload.text).trim()) pending.set(id, event);
+  }
+  const fragments = [...pending.values()];
+  if (fragments.length) {
+    const original = fragments.map((event) => text(event.payload.text).trim()).reduce((joined, part) => {
+      const space = joined && !/[\u3400-\u9fff，。？！]$/.test(joined) && !/^[\u3400-\u9fff，。？！.,!?;:)]/.test(part) ? " " : "";
+      return joined + space + part;
+    }, "");
+    items.push({ id: `preview-${fragments[0].payload.segment_id}`, kind: "preview",
+      title: "原文预览 · 等待成段", body: original, original, evidenceIds: [],
+      occurredAt: fragments[0].captured_at_wall });
   }
   return items;
 }

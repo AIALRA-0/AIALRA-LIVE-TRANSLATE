@@ -19,6 +19,9 @@ from typing import Any, cast
 
 import httpx
 
+from workers.gpu_agent.course_summary import COMPILED_PROVIDER, compile_course
+from workers.gpu_agent.teaching import assemble_explanation
+
 GATEWAY_URL = os.getenv("AIALRA_GPU_GATEWAY_URL", "http://127.0.0.1:8787").rstrip("/")
 MODEL_WORKER_URL = os.getenv("AIALRA_MODEL_WORKER_URL", "http://127.0.0.1:8790").rstrip("/")
 WORKER_TOKEN = os.getenv("AIALRA_WORKER_TOKEN", "")
@@ -57,7 +60,7 @@ LANES = (
     # leases also make the server-side pickup metric reflect actual worker
     # availability instead of the duration of the previous LLM generation.
     Lane("translate", ("translate",)),
-    Lane("explain", ("explain", "summarize", "asset_parse")),
+    Lane("explain", ("topic", "explain", "summarize", "asset_parse")),
 )
 
 
@@ -286,7 +289,9 @@ def provider_proves_local_execution(job_type: str, provider: str) -> bool:
             (provider.startswith("faster-whisper:") or provider.startswith("qwen3-asr:"))
             and provider.endswith(("@cpu", "@cuda"))
         )
-    if job_type in {"translate", "explain", "summarize"}:
+    if job_type in {"translate", "topic", "explain", "summarize"}:
+        if job_type == "summarize" and provider == COMPILED_PROVIDER:
+            return True
         if job_type == "translate" and provider.startswith("identity:"):
             return provider.endswith("@cpu")
         return (
@@ -486,7 +491,7 @@ async def execute_job(
     if (
         not isinstance(job_id, str)
         or not job_id
-        or job_type not in {"asr", "translate", "explain", "summarize", "asset_parse"}
+        or job_type not in {"asr", "translate", "topic", "explain", "summarize", "asset_parse"}
         or not isinstance(model_input_value, dict)
         or not isinstance(idempotency_key, str)
         or not idempotency_key
@@ -513,7 +518,11 @@ async def execute_job(
                 "gateway_response", "gateway_response_invalid", binary, include_digest=False
             )
         expected = binary.headers.get("x-aialra-content-sha256", "")
-        if expected and hashlib.sha256(binary.content).hexdigest() != expected:
+        if not expected:
+            raise response_failure(
+                "gateway_response", "input_digest_missing", binary, include_digest=False
+            )
+        if hashlib.sha256(binary.content).hexdigest() != expected:
             raise response_failure(
                 "gateway_response", "input_digest_mismatch", binary, include_digest=False
             )
@@ -543,14 +552,46 @@ async def execute_job(
             )
         except httpx.HTTPError as error:
             raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
-    elif job_type == "explain":
+    elif (job_type == "explain" and
+          os.getenv("AIALRA_SHARED_RESIDENT_MODELS", "false").casefold() == "true") or (
+        job_type == "summarize" and model_input.get("summary_contract") == "complete_groups_v1"
+    ):
+        async def part(body: dict[str, Any]) -> dict[str, Any]:
+            part_response = await scheduler.run_llm(lambda: model_post(
+                model, f"{MODEL_WORKER_URL}/v1/explain/part", json=body, timeout=120,
+            ))
+            if part_response.status_code >= 400:
+                raise response_failure("model_http", "model_http_error", part_response)
+            try:
+                value = part_response.json()
+            except ValueError as error:
+                raise response_failure("model_json", "model_json_invalid", part_response) from error
+            if not isinstance(value, dict):
+                raise response_failure("model_json", "model_json_invalid", part_response)
+            return value
+
+        started = time.monotonic()
+        try:
+            result = await (compile_course(model_input, part) if job_type == "summarize"
+                            else assemble_explanation(model_input, part))
+        except httpx.HTTPError as error:
+            raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
+        except ValueError as error:
+            raise JobExecutionError(
+                FailureReport("model_json", "teaching_contract_invalid")
+            ) from error
+        if timings is not None:
+            timings["inference_ms"] = int((time.monotonic() - started) * 1000)
+        return result
+    elif job_type in {"topic", "explain"}:
         try:
             response = await _timed_request(
                 timings,
                 "inference_ms",
                 lambda: scheduler.run_llm(
                     lambda: model_post(model,
-                        f"{MODEL_WORKER_URL}/v1/explain", json=model_input, timeout=180
+                        f"{MODEL_WORKER_URL}/v1/{'topics' if job_type == 'topic' else 'explain'}",
+                        json=model_input, timeout=180
                     )
                 ),
             )

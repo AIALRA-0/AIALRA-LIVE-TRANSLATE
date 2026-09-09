@@ -221,10 +221,11 @@ impl EventStore {
         current.state.transition(next)?;
         let now = Utc::now();
         let connection = self.lock()?;
-        connection.execute(
-            "UPDATE sessions SET state = ?2, updated_at = ?3 WHERE id = ?1",
-            params![session_id, state_name(next), now.to_rfc3339()],
+        let changed = connection.execute(
+            "UPDATE sessions SET state = ?2, updated_at = ?3 WHERE id = ?1 AND state = ?4 AND updated_at = ?5",
+            params![session_id, state_name(next), now.to_rfc3339(), state_name(current.state), current.updated_at.to_rfc3339()],
         )?;
+        anyhow::ensure!(changed == 1, "session state changed concurrently");
         drop(connection);
         self.get_session(session_id)?
             .context("session disappeared after transition")
@@ -1104,6 +1105,14 @@ impl EventStore {
         ).optional().context("read document event")
     }
 
+    /// Stable-key emitters recover the original sequence and timestamps on retry.
+    pub fn get_event(&self, event_id: &str) -> Result<Option<EventEnvelope>> {
+        self.lock()?.query_row(
+            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE event_id = ?1",
+            [event_id], map_event,
+        ).optional().context("read event by id")
+    }
+
     pub fn list_events(&self, session_id: &str) -> Result<Vec<EventEnvelope>> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
@@ -1392,10 +1401,27 @@ impl EventStore {
         if let Some(record) = existing.as_ref().filter(|record| record.expires_at > now) {
             return Ok(LeaseAcquireOutcome::Conflict(record.clone()));
         }
-        let generation = existing.map(|record| record.generation + 1).unwrap_or(1);
+        // Older releases deleted the lease on stop. Recover their last fence
+        // from immutable start events before allocating a fresh audio source.
+        let historical_generation: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(CAST(json_extract(e.payload_json, '$.generation') AS INTEGER)), 0) FROM events e JOIN project_sessions ps ON ps.session_id = e.session_id WHERE ps.project_id = ?1 AND e.event_type = 'session.recording.started'",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        let generation = existing
+            .map(|record| record.generation)
+            .unwrap_or(0)
+            .max(historical_generation)
+            + 1;
         transaction.execute(
             "INSERT INTO recording_leases(project_id, session_id, holder_device_id, lease_token_hash, generation, heartbeat_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(project_id) DO UPDATE SET session_id = excluded.session_id, holder_device_id = excluded.holder_device_id, lease_token_hash = excluded.lease_token_hash, generation = excluded.generation, heartbeat_at = excluded.heartbeat_at, expires_at = excluded.expires_at",
             params![project_id, session_id, device_id, token_hash, generation, now.to_rfc3339(), expires_at.to_rfc3339()],
+        )?;
+        // Explicit acquisition, not a late model result, may reopen a course.
+        // Persist the new lease and projection together; retain every old fact.
+        transaction.execute(
+            "UPDATE sessions SET state = 'recording', updated_at = ?2 WHERE id = ?1 AND state IN ('completed', 'failed') AND consent_confirmed = 1",
+            params![session_id, now.to_rfc3339()],
         )?;
         transaction.commit()?;
         Ok(LeaseAcquireOutcome::Acquired(RecordingLeaseRecord {
@@ -1468,7 +1494,7 @@ impl EventStore {
     ) -> Result<bool> {
         let connection = self.lock()?;
         Ok(connection.execute(
-            "DELETE FROM recording_leases WHERE project_id = ?1 AND session_id = ?2 AND lease_token_hash = ?3",
+            "UPDATE recording_leases SET expires_at = '1970-01-01T00:00:00+00:00', lease_token_hash = '' WHERE project_id = ?1 AND session_id = ?2 AND lease_token_hash = ?3",
             params![project_id, session_id, token_hash],
         )? == 1)
     }
@@ -1767,6 +1793,9 @@ impl EventStore {
         lease_seconds: i64,
         requested_job_id: Option<&str>,
     ) -> Result<Option<ModelJobRecord>> {
+        if capabilities.is_empty() {
+            return Ok(None);
+        }
         let now = Utc::now();
         let expires = now + chrono::Duration::seconds(lease_seconds.clamp(15, 300));
         let mut connection = self.lock()?;
@@ -1776,20 +1805,34 @@ impl EventStore {
             [now.to_rfc3339()],
         )?;
         let selected_id = {
-            let mut statement = transaction.prepare(
-                "SELECT id, job_type, input_json FROM model_jobs WHERE status = 'queued' AND available_at <= ?1 AND (?2 IS NULL OR id = ?2) ORDER BY priority DESC, created_at, id LIMIT 100",
-            )?;
+            // Apply lane eligibility before the bounded scan. Otherwise 100
+            // queued ASR jobs hide every translation from its dedicated lane,
+            // even when the GPU scheduler deliberately yields to translation.
+            let placeholders = (0..capabilities.len())
+                .map(|index| format!("?{}", index + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = transaction.prepare(&format!(
+                "SELECT id, job_type, input_json FROM model_jobs WHERE status = 'queued' AND available_at <= ?1 AND (?2 IS NULL OR id = ?2) AND job_type IN ({placeholders}) ORDER BY priority DESC, created_at, id LIMIT 100"
+            ))?;
+            let mut parameters = vec![
+                rusqlite::types::Value::Text(now.to_rfc3339()),
+                requested_job_id.map_or(rusqlite::types::Value::Null, |id| id.to_owned().into()),
+            ];
+            parameters.extend(
+                capabilities
+                    .iter()
+                    .cloned()
+                    .map(rusqlite::types::Value::Text),
+            );
             let candidates = statement
-                .query_map(
-                    rusqlite::params![now.to_rfc3339(), requested_job_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )?
+                .query_map(rusqlite::params_from_iter(parameters), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             candidates
                 .into_iter()
@@ -1941,7 +1984,7 @@ impl EventStore {
             let (job_type, input_json) = row?;
             if matches!(
                 job_type.as_str(),
-                "summarize" | "translate" | "explain" | "asset_parse"
+                "summarize" | "translate" | "topic" | "explain" | "asset_parse"
             ) {
                 continue;
             }
@@ -3345,6 +3388,65 @@ mod tests {
     }
 
     #[test]
+    fn translation_lane_is_not_hidden_behind_a_hundred_asr_jobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        store.create_session(&test_session()).unwrap();
+        for index in 0..105 {
+            store
+                .enqueue_model_job(&NewModelJob {
+                    id: format!("asr-backlog-{index}"),
+                    session_id: "session_test".to_owned(),
+                    job_type: "asr".to_owned(),
+                    priority: 100,
+                    input: json!({}),
+                    input_object_hash: None,
+                    idempotency_key: format!("asr-backlog-{index}"),
+                })
+                .unwrap();
+        }
+        store
+            .enqueue_model_job(&NewModelJob {
+                id: "translation-backlog".to_owned(),
+                session_id: "session_test".to_owned(),
+                job_type: "translate".to_owned(),
+                priority: 70,
+                input: json!({}),
+                input_object_hash: None,
+                idempotency_key: "translation-backlog".to_owned(),
+            })
+            .unwrap();
+        assert!(
+            store
+                .lease_model_job("no-capability", &[], 60)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .lease_model_job_for(
+                    "translation-worker",
+                    &["translate".to_owned()],
+                    60,
+                    Some("asr-backlog-0")
+                )
+                .unwrap()
+                .is_none()
+        );
+        let translated = store
+            .lease_model_job("translation-worker", &["translate".to_owned()], 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(translated.id, "translation-backlog");
+        let asr = store
+            .lease_model_job("asr-worker", &["asr".to_owned()], 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(asr.id, "asr-backlog-0");
+        assert_eq!(store.model_queue_counts(None).unwrap().leased, 2);
+    }
+
+    #[test]
     fn confirmed_material_explanation_waits_until_dependencies_are_activated() {
         let temp = tempfile::tempdir().unwrap();
         let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
@@ -3755,8 +3857,8 @@ mod tests {
             panic!("released lease must allow takeover")
         };
         assert_eq!(
-            takeover.generation, 1,
-            "a clean release removes the expired generation record"
+            takeover.generation, 2,
+            "clean release preserves the generation fence for future recordings"
         );
 
         store
@@ -3775,7 +3877,7 @@ mod tests {
             .renew_recording_lease("project_test", "session_two", "laptop", "hash_two", 45)
             .unwrap()
             .expect("the same recorder may recover after a long outage when no takeover occurred");
-        assert_eq!(resumed.generation, 1);
+        assert_eq!(resumed.generation, 2);
         assert!(matches!(
             store
                 .acquire_recording_lease("project_test", "session_one", "phone", "hash_three", 45,)
@@ -3800,7 +3902,7 @@ mod tests {
         let LeaseAcquireOutcome::Acquired(expired_takeover) = expired_takeover else {
             panic!("expired lease must allow takeover")
         };
-        assert_eq!(expired_takeover.generation, 2);
+        assert_eq!(expired_takeover.generation, 3);
         assert!(
             store
                 .validate_recording_lease("session_two", "hash_two")

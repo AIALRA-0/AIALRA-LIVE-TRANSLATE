@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canDropWorkspaceTarget, formatAudioInputLabel, isFolderDescendant, isRecordingResumable, resumeSessionLabel, workspaceTargetKey } from "./uiState";
+import { canDropWorkspaceTarget, formatAudioInputLabel, isFolderDescendant, isRecordingResumable, recordingDisplayState, resumeSessionLabel, workspaceTargetKey } from "./uiState";
 
 describe("workspace drag targets", () => {
   const parents = { root_folder: null, child_folder: "root_folder" };
@@ -20,10 +20,22 @@ describe("workspace drag targets", () => {
 });
 
 describe("recording continuity and input labels", () => {
-  it("marks only an unfinished session as resumable", () => {
+  it("never treats durable recording history as proof of live microphone activity", () => {
+    expect(recordingDisplayState("recording", false)).toBe("recording_interrupted");
+    expect(recordingDisplayState("degraded", false)).toBe("recording_interrupted");
+    expect(recordingDisplayState("recording")).toBe("recording_checking");
+    expect(recordingDisplayState("recording", true)).toBe("recording");
+    expect(recordingDisplayState("completed", true)).toBe("completed");
+    expect(recordingDisplayState("processing", false)).toBe("processing");
+  });
+  it("allows further recording after completion without reopening trash or a sealing tail", () => {
     expect(isRecordingResumable("recording")).toBe(true);
     expect(isRecordingResumable("ready")).toBe(true);
     expect(isRecordingResumable("processing")).toBe(false);
+    expect(isRecordingResumable("completed")).toBe(true);
+    expect(isRecordingResumable("failed")).toBe(true);
+    expect(isRecordingResumable("archived")).toBe(false);
+    expect(resumeSessionLabel("completed")).toBe("续录本次课程");
     expect(resumeSessionLabel("recording")).toBe("继续本次收音");
   });
 

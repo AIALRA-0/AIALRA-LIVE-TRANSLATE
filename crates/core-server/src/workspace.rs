@@ -111,16 +111,36 @@ pub async fn workspace_snapshot(
     };
     let projects = state.store.list_projects(&user.0)?;
     let mut session_projects = serde_json::Map::new();
+    let now = Utc::now();
+    let mut active_recordings = HashSet::new();
     for project in &projects {
+        if let Some(lease) = state.store.get_recording_lease(&project.id)?
+            && lease.expires_at > now
+        {
+            active_recordings.insert(lease.session_id);
+        }
         for session in state.store.list_project_sessions(&project.id)? {
             session_projects.insert(session.id, json!(project.id));
         }
     }
+    let sessions = state
+        .store
+        .list_sessions_for_owner(&user.0)?
+        .into_iter()
+        .map(|session| {
+            let active = active_recordings.contains(&session.id);
+            let mut value = json!(session);
+            // Projection only: do not rewrite interrupted recording history.
+            // No device identifier, token, or other owner's lease is exposed.
+            value["recording_active"] = json!(active);
+            value
+        })
+        .collect::<Vec<_>>();
     Ok(Json(json!({
         "folders": state.store.list_workspace_folders(&user.0)?,
         "projects": projects,
         "project_placements": state.store.list_workspace_project_placements(&user.0)?,
-        "sessions": state.store.list_sessions_for_owner(&user.0)?,
+        "sessions": sessions,
         "session_projects": session_projects,
         "session_metadata": state.store.list_workspace_session_metadata(&user.0)?,
         "trash": state.store.list_workspace_trash(&user.0)?,

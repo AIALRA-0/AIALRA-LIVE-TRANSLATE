@@ -1,13 +1,14 @@
-import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type RuntimeHealth } from "./api";
 import { BrowserCapture, listAudioInputs, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
 import { applySessionStateEvent } from "./sessionState";
 import { RecordingWakeLock } from "./wakeLock";
+import { clearStopIntent, readStopIntent, saveStopIntent, type RecordingStopIntent } from "./recordingStop";
 import { UserNotes } from "./UserNotes";
 import type { NoiseSuppressionMode } from "./noiseSuppression";
 import { appendEvent, isRenderableDocumentItem } from "./timeline";
 import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, RecordingProjectStatus, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
-import { canDropWorkspaceTarget, formatAudioInputLabel, formatLocalTimestamp, isFolderDescendant, isRecordingResumable, resumeSessionLabel, type WorkspaceDragTarget, type WorkspaceDropTarget } from "./uiState";
+import { canDropWorkspaceTarget, formatAudioInputLabel, formatLocalTimestamp, isFolderDescendant, isRecordingResumable, recordingDisplayState, resumeSessionLabel, type WorkspaceDragTarget, type WorkspaceDropTarget } from "./uiState";
 
 const LEASE_STORAGE_KEY = "aialra-active-recording-lease";
 const TIMELINE_PAGE_SIZE = 160;
@@ -87,6 +88,8 @@ function currentLocalLease(): RecordingLease | null {
 }
 
 function stateLabel(state: string): string {
+  if (state === "recording_interrupted") return "录音已中断，可恢复";
+  if (state === "recording_checking") return "正在确认收音状态";
   return ({ ready: "已就绪", recording: "录音中", degraded: "降级录音中", stopping: "正在停止", processing: "后台收尾中", completed: "已完成", failed: "失败", archived: "已归档" } as Record<string, string>)[state] ?? state;
 }
 
@@ -532,7 +535,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
                 onDragEnd={endDrag}
                 onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}
               >
-                <button className="tree-item-button" onClick={() => onSelectSession(project, session)}><span aria-hidden="true">◫</span><span>{session.title}</span><i className={`tiny-dot ${stateTone(session.state)}`} aria-label={stateLabel(session.state)} /></button>
+                <button className="tree-item-button" onClick={() => onSelectSession(project, session)}><span aria-hidden="true">◫</span><span>{session.title}</span><i className={`tiny-dot ${stateTone(recordingDisplayState(session.state, session.recording_active))}`} aria-label={stateLabel(recordingDisplayState(session.state, session.recording_active))} /></button>
                 <button className="tree-drag-handle" draggable aria-label={"拖动课程 " + session.title} title="拖动课程" onClick={(event) => event.stopPropagation()} onDragStart={(event) => beginDrag(event, { entityType: "session", entityId: session.id, projectId: project.id })}>⠿</button>
                 {renderDropZone(sessionTarget, "before")}
                 {renderDropZone(sessionTarget, "after")}
@@ -661,7 +664,7 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
             <div><p>继续已有课程会话</p><strong>{resumableSession.title}</strong><small>最近活动：{formatLocalTimestamp(resumableSession.updated_at)} · 已确认历史会按时间戳继续保留</small></div>
             <button className="primary-button" onClick={() => navigate(project.id, resumableSession.id)}>{resumeSessionLabel(resumableSession.state)}</button>
           </div>}
-          {sessions.length ? sessions.map((session) => <button className="recent-session-row" key={session.id} onClick={() => navigate(project.id, session.id)}><span><strong>{session.title}</strong><small>最近活动：{formatLocalTimestamp(session.updated_at)}</small></span><StatusBadge tone={stateTone(session.state)}>{stateLabel(session.state)}</StatusBadge></button>) : <p>还没有课程会话</p>}
+          {sessions.length ? sessions.map((session) => <button className="recent-session-row" key={session.id} onClick={() => navigate(project.id, session.id)}><span><strong>{session.title}</strong><small>最近活动：{formatLocalTimestamp(session.updated_at)}</small></span><StatusBadge tone={stateTone(recordingDisplayState(session.state, session.recording_active))}>{stateLabel(recordingDisplayState(session.state, session.recording_active))}</StatusBadge></button>) : <p>还没有课程会话</p>}
         </section>
         <form className="overview-card new-session" onSubmit={create}>
           <h2>新建独立课程会话</h2>
@@ -686,13 +689,19 @@ function DocumentItem({ item, languageView, sessionId }: { item: TimelineItem; l
   const [playing, setPlaying] = useState(false);
   const [playError, setPlayError] = useState(false);
   const time = new Date(item.occurredAt).toLocaleTimeString("zh-CN", { hour12: false });
+  if (item.kind === "preview") {
+    return <article className="course-paragraph source-preview" data-testid="source-preview">
+      <header><span>{item.title}</span><time>{time}</time></header>
+      <p className="source-text">{item.original}</p>
+    </article>;
+  }
   if (item.kind === "paragraph") {
     return (
       <article id={`evidence-${item.id}`} className="course-paragraph" data-testid="course-paragraph">
-        <header><time>{time}</time><button type="button" className="text-link-button" onClick={() => { setPlaying((current) => !current); setPlayError(false); }}>{playing ? "关闭回放" : "回听这段"}</button></header>
+        <header>{item.speakerLabel && <span className="speaker-label">{item.speakerLabel}</span>}<time>{time}</time><button type="button" className="text-link-button" onClick={() => { setPlaying((current) => !current); setPlayError(false); }}>{playing ? "关闭回放" : "回听这段"}</button></header>
         {playing && <audio controls autoPlay preload="none" src={`/api/v1/sessions/${sessionId}/paragraphs/${item.id}/audio`} onPlay={(event) => { document.querySelectorAll("audio").forEach((audio) => { if (audio !== event.currentTarget) audio.pause(); }); }} onError={() => setPlayError(true)} />}
         {playError && <small role="status">这段音频暂时无法播放，请检查网络；旧版导入内容可能没有原始音频。</small>}
-        {languageView !== "translation" && <p className="source-text">{item.original}</p>}
+        {(languageView !== "translation" || item.translationMode === "same_language") && <p className="source-text">{item.original}</p>}
         {languageView !== "source" && <p className="translation-text">{item.translationMode === "same_language" ? "原文，无需翻译" : item.translation || "等待真实模型翻译"}</p>}
       </article>
     );
@@ -701,7 +710,7 @@ function DocumentItem({ item, languageView, sessionId }: { item: TimelineItem; l
     <aside id={`evidence-${item.id}`} className={`insight-block ${item.kind}${item.statusTone ? ` ${item.statusTone}` : ""}`} data-testid={`insight-${item.kind}`}>
       <header><strong>{item.title}</strong><time>{time}</time></header>
       {item.imageUrl && <img src={item.imageUrl} alt={item.title} />}
-      {item.sections?.length ? <div className="insight-sections">{item.sections.map((section, index) => <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p></section>)}</div> : <p>{item.body || "正在解析内容"}</p>}
+      {item.sections?.length ? <div className="insight-sections">{item.sections.map((section, index) => <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p>{section.backgroundReference && <a href={section.backgroundReference} target="_blank" rel="noopener noreferrer">已核对的背景资料 ↗</a>}</section>)}</div> : <p>{item.body || "正在解析内容"}</p>}
       {item.evidenceIds.length > 0 && <footer>{item.evidenceIds.slice(0, 6).map((id) => <button key={id} className="evidence-link" type="button" title={`回到证据 ${id}`} onClick={() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}>证据 · {id.slice(-6)}</button>)}</footer>}
     </aside>
   );
@@ -739,9 +748,10 @@ function ParagraphInsightPanel({ items, documentRef }: { items: TimelineItem[]; 
   return (
     <section className="side-card paragraph-insight-panel" data-testid="paragraph-insight-panel">
       <div className="card-heading"><h3>当前内容组</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "积累内容"}</StatusBadge></div>
+      {insight?.groupReason === "capacity_continuation" && <p className="form-help">同主题续接：这一组达到单次整理容量，后续内容会继续保留，不代表老师已经换话题</p>}
       {groupParagraphs.length ? <details className="paragraph-insight-source"><summary>{insight ? "本组覆盖" : "尚未整理"} {groupParagraphs.length} 个段落 · 查看原文</summary><p>{groupParagraphs.map((item) => item.original).join(" ")}</p></details> : <p>积累一大段课程内容后，这里会显示总结和知识补充。</p>}
-      <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "通常积累至少 8 段、约 1800 字符后统一整理；短句较多时合并到 16 段，不逐句总结。"}</p></section>
-      <section className="paragraph-terms-section"><strong>知识补充</strong>{terms.length ? terms.map((term, index) => <details key={`${term.label}:${index}`}><summary>{term.label.replace("知识补充 · ", "")}</summary><p>{term.text}</p></details>) : <p>当前内容组还没有检测到需要解释的专业名词或缩写。</p>}</section>
+      <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "相似内容会保持在一起，确认话题转折后再统一整理；停止录音时会整理尚未完成的内容，不逐句总结"}</p></section>
+      <section className="paragraph-terms-section"><strong>知识补充</strong><p className="form-help">以下为帮助理解的背景解释，不是老师原话；有资料链接的词条已经过来源核对</p>{terms.length ? terms.map((term, index) => <details key={`${term.label}:${index}`}><summary>{term.label.replace("知识补充 · ", "")}</summary><p>{term.text}</p>{term.backgroundReference && <a href={term.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}</details>) : <p>当前内容组还没有检测到需要解释的专业名词或缩写</p>}</section>
     </section>
   );
 }
@@ -812,9 +822,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [micResult, setMicResult] = useState<MicrophoneTestResult | null>(null);
   const [micTesting, setMicTesting] = useState(false);
   const micTestAbort = useRef<AbortController | null>(null);
-  const [noiseMode, setNoiseMode] = useState<NoiseSuppressionMode>("gtcrn");
+  const [noiseMode, setNoiseMode] = useState<NoiseSuppressionMode>("off");
   const inputOperation = useRef(false);
-  const [stopPending, setStopPending] = useState(false);
+  const stopIntent = useRef<RecordingStopIntent | null>(readStopIntent(project.id, initial.id));
+  const [stopPending, setStopPending] = useState(() => readStopIntent(project.id, initial.id) !== null);
   const [runtime, setRuntime] = useState<RuntimeHealth | null>(null);
   const [readWeave, setReadWeave] = useState<ReadWeaveStatus | null>(null);
   const [readWeavePreview, setReadWeavePreview] = useState<ReadWeavePreview | null>(null);
@@ -839,6 +850,14 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       setRecordingStatus(next);
       setRecordingStatusReady(true);
       setStatusClock(new Date(next.server_time).getTime());
+      if (stopIntent.current) {
+        // Status polling/SSE must not undo an explicit stop, even after expiry.
+        if (next.lease?.holder === "other") {
+          capture.current?.dispose();
+          setCaptureNotice("本机已停止收音，其他设备目前持有项目录音权限；待确认音频仍保留，不会抢占或重新收音。");
+        }
+        return next;
+      }
       if (next.lease?.holder === "other") {
         capture.current?.revoke();
         capture.current = null;
@@ -854,7 +873,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           setCaptureNotice("本次课程没有活动录音租约；确认后接续历史。未完成的翻译不会阻止继续收音。");
         } else if (currentStatus?.reason === "processing") {
           setCapturePhase("processing");
-          setCaptureNotice("录音已停止，音频已保存，正在整理结果。需要继续录制新内容，可返回项目另建课程。");
+          setCaptureNotice("录音已停止，正在保存尾音和整理结果。收尾完成后可在本课程继续录音，不需要新建课程。");
         } else {
           setCapturePhase((current) => {
             if (!["blocked", "recoverable", "processing"].includes(current)) return current;
@@ -900,6 +919,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
 
   function reportCaptureStatus(message: string): void {
     setCaptureStatus(message);
+    if (stopIntent.current) return;
     if (message.includes("已连接")) {
       setCapturePhase("recording");
       setCaptureNotice("");
@@ -915,7 +935,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   useEffect(() => {
     return subscribeEvents(initial.id, (event) => {
       dispatch({ type: "append", event });
-      setSession((current) => applySessionStateEvent(current, event.event_type));
+      setSession((current) => applySessionStateEvent(current, event.event_type, event.ingested_at, event.payload.resumed === true));
       const eventTime = event.ingested_at || event.captured_at_wall;
       if (eventTime) setLastActivityAt((current) => new Date(eventTime).getTime() >= new Date(current).getTime() ? eventTime : current);
     }, setStreamConnected);
@@ -973,6 +993,15 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   useEffect(() => {
     let active = true;
     const restored = restoredLocalLease(project.id, initial.id);
+    if (stopIntent.current) {
+      const pending = stopIntent.current;
+      const timer = window.setTimeout(() => {
+        setLease(pending.lease);
+        setCapturePhase("stopping");
+        setCaptureStatus("本机收音已停止，尚未确认课程结束；重试只补传音频，不会打开麦克风");
+      }, 0);
+      return () => { active = false; window.clearTimeout(timer); };
+    }
     if (!restored) return () => { active = false; };
     const timer = window.setTimeout(() => {
       void refreshRecordingStatus().then((status) => {
@@ -1046,7 +1075,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     setMicTesting(true); setMicResult(null); setCaptureNotice("");
     try {
       const requestedDeviceId = selectedAudioInput && selectedAudioInput !== "default" && selectedAudioInput !== "communications" ? selectedAudioInput : undefined;
-      setMicResult(await testMicrophone(requestedDeviceId, setMicProgress, controller.signal));
+      setMicResult(await testMicrophone(requestedDeviceId, setMicProgress, controller.signal, noiseMode));
       await refreshAudioInputs(false).catch(() => undefined);
     }
     catch (caught) { if (!controller.signal.aborted) setCaptureNotice(caught instanceof Error ? caught.message : "麦克风测试失败"); }
@@ -1054,6 +1083,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }
 
   async function startCapture(acquired: RecordingLease, preparedCapture?: BrowserCapture): Promise<void> {
+    if (stopIntent.current) throw new Error("本机已停止收音，请先完成本次停止");
     const next = preparedCapture ?? capture.current ?? new BrowserCapture(
       project.id,
       session.id,
@@ -1085,7 +1115,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }
 
   async function continueCapture(): Promise<void> {
-    if (!lease || inputOperation.current || audioPermissionPending || busy) return;
+    if (stopIntent.current || !lease || inputOperation.current || audioPermissionPending || busy) return;
     inputOperation.current = true;
     setBusy(true);
     setCaptureNotice("");
@@ -1095,7 +1125,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }
 
   async function begin(): Promise<void> {
-    if (inputOperation.current || audioPermissionPending || busy) return;
+    if (stopIntent.current || inputOperation.current || audioPermissionPending || busy) return;
     inputOperation.current = true;
     setBusy(true);
     setNotice("");
@@ -1113,9 +1143,9 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         return;
       }
       const currentStatus = status?.sessions?.find((item) => item.session_id === initial.id);
-      if (["completed", "failed", "archived"].includes(session.state)) {
+      if (session.state === "archived") {
         setCapturePhase("idle");
-        setCaptureNotice("本次课程已结束，历史内容仍可查看。请返回项目新建课程；这不是麦克风占用。");
+        setCaptureNotice("本次课程在回收站中，请先恢复课程再续录；这不是麦克风占用。");
         return;
       }
       if (currentStatus?.reason === "processing") {
@@ -1123,7 +1153,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         setCaptureNotice("本次课程仍有后台任务处理中，请等待队列排空后再继续收音。");
         return;
       }
-      if (currentStatus?.recoverable && !window.confirm("本次课程已有历史内容。确认后将接续原课程，新的录音按时间戳追加，不会覆盖历史。")) {
+      if ((currentStatus?.recoverable || ["completed", "failed"].includes(session.state)) && !window.confirm("本次课程已有历史内容。确认后将接续原课程，新的录音按时间戳追加，不会覆盖历史。")) {
         setCapturePhase("recoverable");
         setCaptureNotice("已保留本次课程历史；确认后才会重新获取录音租约。");
         return;
@@ -1162,7 +1192,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       setLease(acquired);
       saveLocalLease(acquired);
       setLastActivityAt(new Date().toISOString());
-      setSession((current) => ({ ...current, state: "recording" }));
+      const acquiredAt = acquired.acquired_at;
+      setSession((current) => ({ ...current, state: "recording", updated_at: acquiredAt ?? current.updated_at }));
       void refreshRecordingStatus();
       await startCapture(acquired, preparedCapture);
     } catch (caught) {
@@ -1186,26 +1217,59 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }
 
   async function stop(): Promise<void> {
+    if (busy) return;
     setBusy(true);
     setCaptureNotice("");
     setCapturePhase("stopping");
+    setCaptureActive(false);
+    const existing = stopIntent.current;
+    const intent = existing ?? (lease ? { lease, mode: captureMode, audioAcknowledged: false } : null);
+    stopIntent.current = intent;
+    setStopPending(true);
+    // Stop physical capture synchronously before storage or network operations.
+    const draining = !existing ? capture.current?.stop() : undefined;
+    const remember = (pending: RecordingStopIntent) => {
+      try { saveStopIntent(pending); }
+      catch { setCaptureNotice("浏览器无法保存停止恢复状态，请保持本页打开，直到课程结束得到确认"); }
+    };
     try {
-      try { await capture.current?.stop(); } catch (caught) {
-        setCapturePhase("error");
-        setCaptureNotice(caught instanceof Error ? caught.message : "浏览器音频尚未全部确认，请保持页面在线后重试");
-        return;
+      if (!intent) throw new Error("缺少本次录音凭据，无法确认课程结束；本机收音已停止");
+      // The intent is saved before waiting for ACKs, not after draining succeeds.
+      remember(intent);
+      if (!intent.audioAcknowledged) {
+        if (draining) {
+          await draining;
+        } else {
+          capture.current?.dispose();
+          capture.current = null;
+          await api.renewRecording(project.id, session.id, recorderDeviceId(), intent.lease.lease_token);
+          const pending = new BrowserCapture(project.id, session.id, recorderDeviceId(), reportCaptureStatus, intent.mode);
+          capture.current = pending;
+          await pending.finishPending(intent.lease.lease_token, intent.lease.generation);
+        }
+        stopIntent.current = { ...intent, audioAcknowledged: true };
+        remember(stopIntent.current);
       }
-      capture.current = null; setCaptureActive(false);
-      setStopPending(true);
-      if (!lease) throw new Error("本机不是当前录音设备");
-      const next = await api.stopRecording(project.id, session.id, recorderDeviceId(), lease.lease_token);
+      capture.current = null;
+      let next: Session;
+      try {
+        next = await api.stopRecording(project.id, session.id, recorderDeviceId(), intent.lease.lease_token);
+      } catch (caught) {
+        if ((caught as Error & { code?: string }).code !== "recording_lease_expired") throw caught;
+        // Renew the original holder only. Never acquire a new generation or
+        // steal another device's lease to finalize an interrupted stop.
+        await api.renewRecording(project.id, session.id, recorderDeviceId(), intent.lease.lease_token);
+        next = await api.stopRecording(project.id, session.id, recorderDeviceId(), intent.lease.lease_token);
+      }
       setSession(next); setLease(null); saveLocalLease(null);
+      clearStopIntent(project.id, session.id);
+      stopIntent.current = null;
       setStopPending(false);
       setCapturePhase(next.state === "processing" ? "processing" : "idle");
       void refreshRecordingStatus();
     } catch (caught) {
       setCapturePhase("error");
-      setCaptureNotice(caught instanceof Error ? caught.message : "停止录音失败");
+      setCaptureNotice("本机收音已停止，课程结束尚未确认；联网后点击“重试完成停止”，不会重新打开麦克风。" + (caught instanceof Error ? ` ${caught.message}` : ""));
       const code = (caught as Error & { code?: string })?.code;
       if (code === "recording_lease_conflict" || code === "recording_lease_expired") void refreshRecordingStatus();
     }
@@ -1245,10 +1309,17 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }
 
   const isRecording = ["recording", "degraded"].includes(session.state);
-  const latestSummaryEvent = [...timeline.events].reverse().find((event) => event.event_type === "session.summary.created" || event.event_type === "session.summary.failed");
+  const latestStartIndex = timeline.events.reduce((last, event, index) => event.event_type === "session.recording.started" ? index : last, -1);
+  const latestStart = timeline.events[latestStartIndex];
+  const currentRunEvents = timeline.events.slice(Math.max(0, latestStartIndex));
+  const latestSummaryEvent = [...currentRunEvents].reverse().find((event) => {
+    if (event.event_type !== "session.summary.created" && event.event_type !== "session.summary.failed") return false;
+    const run = event.payload.recording_run;
+    return typeof run === "string" ? run === latestStart?.event_id : latestStart?.payload.resumed !== true;
+  });
   const summaryRetryable = latestSummaryEvent?.event_type === "session.summary.failed";
-  const latestCompletedEvent = [...timeline.events].reverse().find((event) => event.event_type === "session.completed");
-  const summaryPending = latestCompletedEvent?.payload.summary_pending === true;
+  const latestCompletedEvent = [...currentRunEvents].reverse().find((event) => event.event_type === "session.completed");
+  const summaryPending = latestCompletedEvent?.payload.summary_pending === true && !latestSummaryEvent;
   const translationDegraded = latestCompletedEvent?.payload.translation_degraded === true;
   const latestTranslationEventIndex = timeline.events.reduce((latest, event, index) => event.event_type === "translation.finalized" ? index : latest, -1);
   const latestTranslationIssueIndex = timeline.events.reduce((latest, event, index) => (
@@ -1256,12 +1327,13 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       && event.payload.job_type === "translate" ? index : latest
   ), -1);
   const translationIssue = translationDegraded || latestTranslationIssueIndex > latestTranslationEventIndex;
-  const visibleCaptureStatus = session.state === "processing"
+  const visibleCaptureStatus = stopPending ? "本机不再收音；确认音频保存和课程结束后，才会完成本次停止"
+    : session.state === "processing"
     ? "录音已停止，音频已保存，后台正在生成结果"
     : session.state === "completed" && summaryPending ? "录音已完成，课程总结正在后台生成"
       : session.state === "completed" ? "录音和模型处理均已完成" : captureStatus;
-  const captureTone = capturePhaseTone(capturePhase, session.state, Boolean(lease), recordingStatusReady);
-  const captureLabel = capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode, recordingStatusReady);
+  const captureTone = stopPending ? "yellow" : capturePhaseTone(capturePhase, session.state, Boolean(lease), recordingStatusReady);
+  const captureLabel = stopPending ? busy ? "正在完成停止" : "待完成停止" : capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode, recordingStatusReady);
   const currentRecordingStatus = recordingStatus?.sessions?.find((item) => item.session_id === initial.id);
   const conflictingLeaseSeconds = recordingStatus?.lease?.holder === "other"
     ? Math.max(0, Math.ceil((new Date(recordingStatus.lease.expires_at).getTime() - statusClock) / 1_000))
@@ -1283,7 +1355,9 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     ? "这是同一课程会话；刷新或再次进入会沿用已确认历史，本设备保留租约后可继续收音，新的片段会按时间戳追加。"
     : session.state === "ready"
       ? "这是同一课程会话；开始后再次进入会回到这里，不会覆盖已有历史。"
-      : "录音已进入收尾或完成阶段；历史内容按时间戳保留，不能重新打开并覆盖本次会话。";
+      : ["completed", "failed"].includes(session.state)
+        ? "可继续录制同一课程，不限续录次数；新音频按时间戳追加，历史内容和笔记保持不变。"
+        : "正在保存尾音和收尾；完成后可继续录制同一课程，历史内容保持不变。";
   const readWeaveTone = !readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : readWeave.syncing > 0 || readWeave.queued > 0 ? "yellow" : "green";
   const modelQueueDepth = (runtime?.model_queue?.queued ?? 0) + (runtime?.model_queue?.leased ?? 0);
   const modelStatusTone = summaryRetryable ? "red" : translationIssue || modelQueueDepth > 0 ? "yellow" : "green";
@@ -1291,7 +1365,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const readWeaveNodeType = section === "user-notes" ? "user_notes" : section;
   const readWeaveUrl = readWeave?.targets?.find((target) => target.local_id === `${session.id}:${section === "user-notes" ? "user" : section}` || (!section && target.node_type === "session" && target.local_id === session.id))?.note_url ?? readWeave?.note_url;
   const visibleItems = timeline.items.filter(isRenderableDocumentItem).filter((item) => {
-    if (!section || section === "transcript") return section ? item.kind === "paragraph" : item.kind !== "insight";
+    if (item.kind === "preview" && languageView === "translation") return false;
+    if (!section || section === "transcript") return section ? item.kind === "paragraph" || item.kind === "preview" : item.kind !== "insight";
     if (section === "overview") return item.kind === "session-summary";
     if (section === "explanations") return item.kind === "insight";
     if (section === "assets") return item.kind === "asset";
@@ -1299,23 +1374,28 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   });
   const renderedItems = visibleItems.slice(-visibleItemLimit);
   const hiddenItemCount = visibleItems.length - renderedItems.length;
+  // A translation can arrive above the trailing preview. Track visible text,
+  // not only item count or the final item's body, without following diagnostics.
+  const documentContent = JSON.stringify(renderedItems.map(({ id, body, translation }) => [id, body, translation]));
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = documentRef.current;
     if (!element || renderedItems.length === 0) return;
     if (followDocumentRef.current) {
-      element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+      // Position before paint: a smooth animation races delayed translations
+      // and reports an intermediate scroll as if the reader scrolled upwards.
+      element.scrollTo({ top: element.scrollHeight, behavior: "instant" });
       setNewItemsPending(false);
     } else {
       setNewItemsPending(true);
     }
-  }, [renderedItems.length, section]);
+  }, [renderedItems.length, documentContent, section]);
 
   return (
     <div className="session-workspace">
       <header className="session-header">
         <div><p className="eyebrow">{project.title}</p><h1>{session.title}</h1><div className="session-meta"><span>建立：{formatLocalTimestamp(session.created_at)}</span><span>最近活动：{formatLocalTimestamp(lastActivityAt)}</span></div></div>
-        <div className="header-status"><StatusBadge tone={streamConnected ? "green" : "yellow"}>{streamConnected ? "多端已同步" : "正在恢复同步"}</StatusBadge><StatusBadge tone={stateTone(session.state)}>{stateLabel(session.state)}</StatusBadge></div>
+        <div className="header-status"><StatusBadge tone={streamConnected ? "green" : "yellow"}>{streamConnected ? "多端已同步" : "正在恢复同步"}</StatusBadge><StatusBadge tone={stopPending ? "yellow" : stateTone(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}>{stopPending ? "本机已停麦，待完成停止" : stateLabel(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}</StatusBadge></div>
       </header>
       <main className="session-layout">
         <section className="document-panel">
@@ -1337,7 +1417,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               if (followDocumentRef.current) setNewItemsPending(false);
             }}
           >
-            {newItemsPending && <button className="new-items-button" type="button" onClick={() => { followDocumentRef.current = true; setNewItemsPending(false); const element = documentRef.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: "smooth" }); }}>有新内容，回到底部</button>}
+            {newItemsPending && <button className="new-items-button" type="button" onClick={() => { followDocumentRef.current = true; setNewItemsPending(false); const element = documentRef.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: "instant" }); }}>有新内容，回到底部</button>}
             {hiddenItemCount > 0 && (
               <button
                 className="load-earlier-button"
@@ -1373,11 +1453,12 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         <aside className="session-sidebar">
            <section className="side-card capture-card">
              <div className="card-heading"><h3>录音</h3><StatusBadge tone={captureTone}>{captureLabel}</StatusBadge></div>
-             <div className="session-continuity"><strong>{isRecordingResumable(session.state) ? "可继续本次课程" : "本次课程历史"}</strong><span>{sessionContinuity}</span></div>
+             <div className="session-continuity"><strong>{stopPending ? "本机收音已停止" : isRecordingResumable(session.state) ? "可继续本次课程" : "本次课程历史"}</strong><span>{stopPending ? "已记住本次停止操作。重试只补传尚未确认的音频并结束课程，不会重新打开麦克风。" : sessionContinuity}</span></div>
              <label>音频来源<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as CaptureMode)} disabled={isRecording || busy || micTesting || audioPermissionPending}><option value="microphone">麦克风</option><option value="screen">浏览器标签或共享音频</option></select></label>
              {captureMode === "microphone" && <>
                <label>输入设备<select value={selectedAudioInput} onChange={(event) => { setSelectedAudioInput(event.target.value); setMicResult(null); }} disabled={isRecording || busy || micTesting || audioPermissionPending}><option value="">{defaultAudioLabel}</option>{audioInputs.filter((device) => device.deviceId !== "default" && device.deviceId !== "communications").map((device) => <option key={device.deviceId} value={device.deviceId}>{formatAudioInputLabel(device)}</option>)}</select></label>
-               <label>降噪<select value={noiseMode} disabled={isRecording || busy || micTesting || audioPermissionPending} onChange={(event) => setNoiseMode(event.target.value as NoiseSuppressionMode)}><option value="gtcrn">清晰人声（本机 GTCRN）</option><option value="rnnoise">传统降噪（本机 RNNoise）</option><option value="browser">浏览器降噪</option><option value="off">关闭降噪（清晰音源）</option></select></label>
+               <label>降噪<select value={noiseMode} disabled={isRecording || busy || micTesting || audioPermissionPending} onChange={(event) => { setNoiseMode(event.target.value as NoiseSuppressionMode); setMicResult(null); }}><option value="off">保留原音（默认）</option><option value="gtcrn">本机降噪（GTCRN）</option><option value="rnnoise">本机降噪（RNNoise）</option><option value="browser">浏览器音频处理</option></select></label>
+               <small>默认不额外降噪或自动增益，避免削弱轻声和词尾；背景噪声大时可选降噪并重新测试</small>
               <div className="audio-device-row"><span><strong>当前设备</strong><small>{selectedAudioLabel}</small></span><button className="text-link-button" type="button" disabled={isRecording || micTesting || audioPermissionPending} onClick={() => void refreshAudioInputs(true).catch(() => undefined)}>{audioPermissionPending ? "正在等待系统权限" : audioInputsReady ? "刷新设备" : "允许权限并刷新设备"}</button></div>
                {audioDeviceNotice && <small className="audio-device-notice" role="status">{audioDeviceNotice}</small>}
              </>}
@@ -1391,16 +1472,16 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             {keepScreenAwake && wakeLockNotice && <button type="button" className="text-link-button wake-lock-notice" onClick={() => void screenWake.request()}>{wakeLockNotice}</button>}
             {conflictingLeaseSeconds !== null && <div className="recording-lease-status" role="status"><strong>其他设备正在录制本项目</strong><span>{recordingStatus?.lease?.session_title ? `课程“${recordingStatus.lease.session_title}”` : "当前课程会话"} · 租约约 {conflictingLeaseSeconds} 秒后到期</span></div>}
             {capacityBlocked && <div className="recording-capacity-status" role="status"><strong>暂不接纳新的项目录音</strong><span>原因：{recordingStatus?.admission.reason === "asr_backlog" ? "ASR 队列积压" : recordingStatus?.admission.reason === "asr_degraded" ? "ASR/CUDA 状态降级" : "ASR Worker 暂时离线"} · 约 {recordingStatus?.admission.retry_after_seconds ?? 5} 秒后自动复查</span></div>}
-            {currentRecordingStatus?.recoverable && !lease && <div className="recording-recovery-status" role="status"><strong>发现可继续的历史收音</strong><span>服务端确认没有活动租约或排队任务；点击下方按钮并确认后，会在原课程中按时间戳追加。</span></div>}
+            {currentRecordingStatus?.recoverable && !lease && !stopPending && <div className="recording-recovery-status" role="status"><strong>可在本课程继续录音</strong><span>已确认的音频和历史内容仍保留。点击下方按钮并确认后续录，尚未完成的翻译会在后台处理。</span></div>}
             {recordingWaitsForQueue && <div className="recording-capacity-status" role="status"><strong>本次课程正在收尾</strong><span>还有 {currentRecordingStatus?.active_model_jobs ?? 0} 个后台任务；完成后会自动恢复继续入口。</span></div>}
             {captureNotice && <div className={capturePhase === "error" || capturePhase === "blocked" ? "capture-inline-alert" : "recording-recovery-status"} role="status">{captureNotice}</div>}
             <p className="capture-copy" aria-live="polite"><strong>{captureLabel}</strong> · {visibleCaptureStatus}</p>
-            {["completed", "failed", "archived"].includes(session.state) ? (
-              <a className="secondary-button" href={`/app/projects/${project.id}`}>本次课程已结束，返回项目新建课程</a>
-            ) : stopPending && lease ? (
-              <button className="stop-button" disabled={busy} onClick={() => void stop()}>音频已保存，重试结束课程</button>
+            {stopPending ? (
+              <button className="stop-button" disabled={busy} onClick={() => void stop()}>{busy ? "正在保存音频并结束课程" : "重试完成停止"}</button>
+            ) : session.state === "archived" ? (
+              <a className="secondary-button" href={`/app/projects/${project.id}`}>请先从回收站恢复课程</a>
             ) : !isRecording ? (
-              <button className="primary-button" disabled={busy || micTesting || audioPermissionPending || capacityBlocked || capturePhase === "processing" || session.state === "processing"} onClick={() => void begin()}>{captureActionLabel(capturePhase, Boolean(lease), captureMode)}</button>
+              <button className="primary-button" disabled={busy || micTesting || audioPermissionPending || capacityBlocked || capturePhase === "processing" || session.state === "processing"} onClick={() => void begin()}>{["completed", "failed"].includes(session.state) ? "续录本次课程" : captureActionLabel(capturePhase, Boolean(lease), captureMode)}</button>
             ) : lease && captureActive ? (
               <button className="stop-button" disabled={busy} onClick={() => void stop()}>停止并完成处理</button>
             ) : lease ? (
@@ -1468,8 +1549,13 @@ export default function App() {
       if (!selected.projectId && next.preference?.active_project_id) navigate(next.preference.active_project_id, next.preference.active_session_id);
       else if (!selected.projectId && next.projects[0]) navigate(next.projects[0].id, null);
     }).catch((caught) => setError(caught instanceof Error ? caught.message : "工作区加载失败"));
-    const unsubscribe = subscribeWorkspace(() => void refresh(), () => undefined);
-    return () => { window.removeEventListener("popstate", updateRoute); unsubscribe(); };
+    const refreshQuietly = () => { void refresh().catch(() => undefined); };
+    const unsubscribe = subscribeWorkspace(refreshQuietly, () => undefined);
+    // Lease expiry produces no new durable session event. Refresh the activity
+    // projection even when SSE is healthy, without rewriting course history.
+    const timer = window.setInterval(refreshQuietly, 10_000);
+    window.addEventListener("focus", refreshQuietly);
+    return () => { window.removeEventListener("popstate", updateRoute); window.removeEventListener("focus", refreshQuietly); window.clearInterval(timer); unsubscribe(); };
   }, [deviceId, refresh]);
 
   const activeProject = snapshot?.projects.find((project) => {

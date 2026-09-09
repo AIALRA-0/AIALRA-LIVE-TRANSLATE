@@ -111,6 +111,20 @@ impl AppState {
             .sequence_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("sequence lock poisoned"))?;
+        let event_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, stable_key.as_bytes());
+        if let Some(existing) = self.store.get_event(&event_id.to_string())? {
+            anyhow::ensure!(
+                existing.session_id == session_id
+                    && existing.source_id == source_id
+                    && existing.event_type == event_type
+                    && existing.correlation_id == correlation_id
+                    && existing.causation_id == causation_id
+                    && existing.captured_at_monotonic_ns == monotonic_ns
+                    && existing.content_hash == aialra_event_protocol::hash_payload(&payload)?,
+                "stable event key already has different content or lineage"
+            );
+            return Ok(existing);
+        }
         let sequence = self.store.next_sequence(session_id, source_id)?;
         let mut event = EventEnvelope::new(
             session_id,
@@ -122,7 +136,7 @@ impl AppState {
             causation_id,
             payload,
         )?;
-        event.event_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, stable_key.as_bytes());
+        event.event_id = event_id;
         if self.store.insert_event(&event)? {
             let _ = self.events.send(event.clone());
             self.record_session_event_update(&event)?;
@@ -377,5 +391,208 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use aialra_event_store::NewSession;
+    use serde_json::json;
+
+    fn fixture(path: &std::path::Path) -> AppState {
+        let state = AppState::open(path).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_event_retry".into(),
+                title: "Synthetic event retry".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn stable_event_retry_preserves_sequence_and_timestamps_across_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = fixture(temp.path());
+        let emit = |state: &AppState| {
+            state
+                .emit_idempotent(
+                    "synthetic-stable-key",
+                    "session_event_retry",
+                    "synthetic_worker",
+                    "test.result",
+                    42,
+                    "synthetic-job",
+                    None,
+                    json!({"value": 1}),
+                )
+                .unwrap()
+        };
+        let first = emit(&state);
+        state
+            .emit(
+                "session_event_retry",
+                "synthetic_worker",
+                "test.intervening",
+                43,
+                "synthetic-other-job",
+                None,
+                json!({"value": 2}),
+            )
+            .unwrap();
+        assert_eq!(emit(&state), first);
+        drop(state);
+        let reopened = AppState::open(temp.path()).unwrap();
+        assert_eq!(emit(&reopened), first);
+        assert_eq!(
+            reopened
+                .store
+                .next_sequence("session_event_retry", "synthetic_worker")
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn stable_event_retry_rejects_changed_payload_or_lineage() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = fixture(temp.path());
+        state
+            .emit_idempotent(
+                "synthetic-key",
+                "session_event_retry",
+                "worker",
+                "test.result",
+                42,
+                "job",
+                None,
+                json!({"value": 1}),
+            )
+            .unwrap();
+        for (session, source, kind, timestamp, correlation, cause, value) in [
+            ("other_session", "worker", "test.result", 42, "job", None, 1),
+            (
+                "session_event_retry",
+                "other_worker",
+                "test.result",
+                42,
+                "job",
+                None,
+                1,
+            ),
+            (
+                "session_event_retry",
+                "worker",
+                "test.other",
+                42,
+                "job",
+                None,
+                1,
+            ),
+            (
+                "session_event_retry",
+                "worker",
+                "test.result",
+                43,
+                "job",
+                None,
+                1,
+            ),
+            (
+                "session_event_retry",
+                "worker",
+                "test.result",
+                42,
+                "other_job",
+                None,
+                1,
+            ),
+            (
+                "session_event_retry",
+                "worker",
+                "test.result",
+                42,
+                "job",
+                Some("other_cause"),
+                1,
+            ),
+            (
+                "session_event_retry",
+                "worker",
+                "test.result",
+                42,
+                "job",
+                None,
+                2,
+            ),
+        ] {
+            assert!(
+                state
+                    .emit_idempotent(
+                        "synthetic-key",
+                        session,
+                        source,
+                        kind,
+                        timestamp,
+                        correlation,
+                        cause.map(str::to_owned),
+                        json!({"value": value})
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            state
+                .store
+                .list_events("session_event_retry")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn concurrent_stable_retries_emit_only_one_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = fixture(temp.path());
+        let handles = (0..4)
+            .map(|_| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    state
+                        .emit_idempotent(
+                            "concurrent-key",
+                            "session_event_retry",
+                            "worker",
+                            "test.result",
+                            42,
+                            "job",
+                            None,
+                            json!({"value": 1}),
+                        )
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let events = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(events.iter().all(|event| event == &events[0]));
+        assert_eq!(
+            state
+                .store
+                .list_events("session_event_retry")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

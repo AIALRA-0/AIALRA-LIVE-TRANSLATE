@@ -194,7 +194,7 @@ fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, V
     let has_paragraphs = events
         .iter()
         .any(|event| event.event_type == "paragraph.finalized");
-    let mut segments = events
+    let segments = events
         .iter()
         .rev()
         .filter_map(|event| {
@@ -213,8 +213,7 @@ fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, V
         })
         .take(MAX_EXPLANATION_SEGMENTS)
         .collect::<Vec<_>>();
-    segments.reverse();
-    bound_segment_text(&mut segments);
+    let segments = complete_recent_segments(segments);
     let mut pages = events
         .iter()
         .rev()
@@ -234,19 +233,22 @@ fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, V
     Ok((segments, pages))
 }
 
-fn bound_segment_text(segments: &mut [Value]) {
-    let per_segment_budget = MAX_EXPLANATION_CHARS / segments.len().max(1);
-    for segment in segments {
-        let Some(text) = segment.get_mut("text") else {
-            continue;
-        };
-        let Some(raw) = text.as_str() else {
-            continue;
-        };
-        if raw.chars().count() > per_segment_budget {
-            *text = Value::String(raw.chars().take(per_segment_budget).collect());
+fn complete_recent_segments(newest_first: Vec<Value>) -> Vec<Value> {
+    // Recent-material requests have a bounded context, not permission to cut
+    // every paragraph at an equal character quota. Keep a contiguous suffix
+    // of complete sources, including one oversized latest paragraph intact.
+    let mut selected = Vec::new();
+    let mut characters = 0;
+    for segment in newest_first {
+        let length = segment["text"].as_str().unwrap_or_default().chars().count();
+        if !selected.is_empty() && characters + length > MAX_EXPLANATION_CHARS {
+            break;
         }
+        characters += length;
+        selected.push(segment);
     }
+    selected.reverse();
+    selected
 }
 
 fn explanation_input(
@@ -263,7 +265,8 @@ fn explanation_input(
         "asset_pages": pages,
         "target_language": target_language,
         "trigger": trigger,
-        "content_group_id": content_group_id
+        "content_group_id": content_group_id,
+        "coverage_contract": "all_sources_v1"
     })
 }
 
@@ -281,6 +284,24 @@ mod tests {
     use crate::app::AppState;
     use aialra_event_store::{NewModelJob, NewSession};
     use serde_json::json;
+
+    #[test]
+    fn recent_material_context_preserves_complete_contiguous_paragraphs() {
+        let recent = json!({"id": "recent", "text": "后".repeat(900)});
+        let middle = json!({"id": "middle", "text": "中".repeat(1300)});
+        let old = json!({"id": "old", "text": "前".repeat(400)});
+        let oldest = json!({"id": "oldest", "text": "short"});
+        assert_eq!(
+            super::complete_recent_segments(vec![recent.clone(), middle.clone(), old, oldest]),
+            vec![middle, recent]
+        );
+        let oversized = json!({"id": "large", "text": "完整条件不能丢".repeat(600)});
+        assert_eq!(
+            super::complete_recent_segments(vec![oversized.clone()]),
+            vec![oversized]
+        );
+        assert!(super::complete_recent_segments(vec![]).is_empty());
+    }
 
     fn session() -> NewSession {
         NewSession {

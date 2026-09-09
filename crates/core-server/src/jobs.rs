@@ -352,6 +352,16 @@ pub async fn complete_job(
             "completed model job could not activate a waiting explanation"
         );
     }
+    // A topic check or explanation may finish after the last translated
+    // paragraph arrives. Revisit that tail without requiring another utterance.
+    if matches!(job.job_type.as_str(), "topic" | "explain")
+        && let Err(_error) = maybe_enqueue_coherent_explanation(&state, &job.session_id, &job.id)
+    {
+        tracing::warn!(
+            error_kind = "topic_followup_enqueue_failed",
+            "topic followup pending"
+        );
+    }
     finish_session_if_drained(&state, &job.session_id)?;
     Ok(Json(json!({"accepted": true, "duplicate": false})))
 }
@@ -421,6 +431,7 @@ pub async fn fail_job(
             None,
             json!({
                 "job_id": job_id,
+                "recording_run": job.input.get("recording_run"),
                 "error_kind": error_kind,
                 "manual_retry_available": true,
             }),
@@ -462,6 +473,7 @@ fn apply_result(
         "asr" => apply_asr_result(state, job, result, elapsed_ms),
         "translate" => apply_translation_result(state, job, result, elapsed_ms),
         "explain" => apply_explanation_result(state, job, result, elapsed_ms),
+        "topic" => crate::topics::apply_result(state, job, result).map_err(Into::into),
         "summarize" => apply_summary_result(state, job, result, elapsed_ms),
         "asset_parse" => apply_asset_result(state, job, result, elapsed_ms),
         _ => Err(ApiError::bad_request("unsupported model job type")),
@@ -499,6 +511,19 @@ fn apply_asr_result(
         .and_then(Value::as_u64)
         .unwrap_or_default();
     let segment_id = format!("seg_{}", job.id.trim_start_matches("job_"));
+    let speaker = crate::speakers::label_for_asr(
+        state,
+        &job.session_id,
+        &job.id,
+        asr.speaker_observation.as_ref(),
+    )
+    .unwrap_or_else(|_| {
+        tracing::warn!(
+            error_kind = "speaker_profile_unavailable",
+            "speaker assignment pending"
+        );
+        Some(crate::speakers::Label::unconfirmed())
+    });
     let partial = state.emit_idempotent(
         &format!("{}:asr_partial", job.id),
         &job.session_id,
@@ -526,6 +551,7 @@ fn apply_asr_result(
             "provider": asr.provider,
             "elapsed_ms": elapsed_ms,
             "display_mode": "internal_fragment"
+            ,"speaker": speaker
         }),
     )?;
     maybe_finalize_paragraph(state, &job.session_id, false)?;
@@ -552,6 +578,12 @@ fn apply_translation_result(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::bad_request("model job input is missing paragraph_id"))?
         .to_owned();
+    let source_text = job
+        .input
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| ApiError::bad_request("translation job input is missing text"))?;
     state.emit_idempotent(
         &format!("{}:translation_final", job.id),
         &job.session_id,
@@ -564,7 +596,8 @@ fn apply_translation_result(
             "paragraph_id": paragraph_id,
             "segment_id": paragraph_id,
             "translation_id": format!("tr_{paragraph_id}"),
-            "source_text": translation.source_text,
+            // Bind the displayed original to the persisted job, not model prose.
+            "source_text": source_text,
             "text": translation.text,
             "source_language": translation
                 .source_language
@@ -617,6 +650,43 @@ fn apply_explanation_result(
             "explanation returned an invalid evidence reference",
         ));
     }
+    if job.input["coverage_contract"] == "all_sources_v1"
+        && (explanation
+            .evidence_segment_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>()
+            != allowed_segments
+            || explanation
+                .asset_page_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>()
+                != allowed_pages)
+    {
+        return Err(ApiError::bad_request(
+            "explanation source coverage is incomplete",
+        ));
+    }
+    if explanation.paragraph_summary.trim().is_empty()
+        || explanation.terms.iter().any(|term| {
+            term.term.trim().is_empty()
+                || term.explanation.trim().is_empty()
+                || !crate::worker::valid_background_reference(term.background_reference.as_deref())
+                || term
+                    .evidence_segment_ids
+                    .iter()
+                    .any(|id| !allowed_segments.contains(id.as_str()))
+                || term
+                    .asset_page_ids
+                    .iter()
+                    .any(|id| !allowed_pages.contains(id.as_str()))
+        })
+    {
+        return Err(ApiError::bad_request(
+            "explanation content or term evidence is invalid",
+        ));
+    }
     state.emit_idempotent(
         &format!("{}:explanation_card", job.id),
         &job.session_id,
@@ -630,6 +700,7 @@ fn apply_explanation_result(
             "fact_type": "background_explanation",
             "trigger": job.input.get("trigger").cloned().unwrap_or(json!("manual")),
             "elapsed_ms": elapsed_ms,
+            "coverage_contract": job.input.get("coverage_contract"),
             "result": explanation
         }),
     )?;
@@ -643,7 +714,11 @@ fn apply_summary_result(
     elapsed_ms: u64,
 ) -> Result<(), ApiError> {
     let summary: SummaryResponse = serde_json::from_value(result.clone())?;
-    require_provider(&summary.provider, "ollama:", &["@cuda"])?;
+    let compiled = job.input["summary_contract"] == "complete_groups_v1"
+        && summary.provider == "compiled:content-groups-v1@cpu";
+    if !compiled {
+        require_provider(&summary.provider, "ollama:", &["@cuda"])?;
+    }
     let allowed_segments = job
         .input
         .get("segments")
@@ -673,6 +748,44 @@ fn apply_summary_result(
             "summary returned an invalid evidence reference",
         ));
     }
+    if job.input["summary_contract"] == "complete_groups_v1"
+        && (!compiled
+            || summary
+                .evidence_segment_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>()
+                != allowed_segments
+            || summary
+                .asset_page_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>()
+                != allowed_pages)
+    {
+        return Err(ApiError::bad_request(
+            "summary source coverage is incomplete",
+        ));
+    }
+    if summary.overview.trim().is_empty()
+        || summary.terminology.iter().any(|term| {
+            term.term.trim().is_empty()
+                || term.one_line.trim().is_empty()
+                || !crate::worker::valid_background_reference(term.background_reference.as_deref())
+                || term
+                    .evidence_segment_ids
+                    .iter()
+                    .any(|id| !allowed_segments.contains(id.as_str()))
+                || term
+                    .asset_page_ids
+                    .iter()
+                    .any(|id| !allowed_pages.contains(id.as_str()))
+        })
+    {
+        return Err(ApiError::bad_request(
+            "summary content or term evidence is invalid",
+        ));
+    }
     state.emit_idempotent(
         &format!("{}:session_summary", job.id),
         &job.session_id,
@@ -681,7 +794,7 @@ fn apply_summary_result(
         0,
         &job.id,
         None,
-        json!({"summary_id": format!("summary_{}", job.id.trim_start_matches("job_")), "elapsed_ms": elapsed_ms, "result": summary}),
+        json!({"summary_id": format!("summary_{}", job.id.trim_start_matches("job_")), "recording_run": job.input.get("recording_run"), "elapsed_ms": elapsed_ms, "result": summary}),
     )?;
     Ok(())
 }
@@ -747,6 +860,9 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
     if maybe_finalize_paragraph(state, session_id, true)?.is_some() {
         return Ok(());
     }
+    if crate::topics::enqueue_pending(state, session_id, true)? {
+        return Ok(());
+    }
     let events = state.store.list_events(session_id)?;
     let has_segments = events.iter().any(|event| {
         matches!(
@@ -754,9 +870,8 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
             "paragraph.finalized" | "segment.finalized"
         )
     });
-    let has_summary = events
-        .iter()
-        .any(|event| event.event_type == "session.summary.created");
+    let run = latest_recording_run(&events);
+    let has_summary = has_summary_for_run(&events, &run);
     let failed_non_summary = state.store.has_failed_non_summary_job(session_id)?;
     let failed_projection_count = counts.failed;
     let mut summary_pending = false;
@@ -794,7 +909,10 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
     };
     state.store.transition_session(session_id, next)?;
     state.emit_idempotent(
-        &format!("{session_id}:{event_type}"),
+        &format!(
+            "{session_id}:{event_type}:{}",
+            session.updated_at.to_rfc3339()
+        ),
         session_id,
         "core",
         event_type,
@@ -882,10 +1000,8 @@ pub fn enqueue_summary(
         .get_session(session_id)?
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let events = state.store.list_events(session_id)?;
-    if events
-        .iter()
-        .any(|event| event.event_type == "session.summary.created")
-    {
+    let run = latest_recording_run(&events);
+    if has_summary_for_run(&events, &run) {
         return Err(ApiError::conflict("session summary already exists"));
     }
     let has_paragraphs = events
@@ -909,7 +1025,7 @@ pub fn enqueue_summary(
             }))
         })
         .collect::<Vec<_>>();
-    let segments = sample_with_boundaries(&all_segments, 64, 8);
+    let segments = all_segments;
     if segments.is_empty() {
         return Err(ApiError::bad_request(
             "stable transcript is required before summary",
@@ -921,34 +1037,30 @@ pub fn enqueue_summary(
             if event.event_type != "asset.page.extracted" {
                 return None;
             }
+            let text = event.payload.get("text")?.as_str()?;
+            if text.trim().is_empty() {
+                return None;
+            }
             Some(json!({
                 "id": event.payload.get("page_id")?.as_str()?,
                 "title": event.payload.get("title").and_then(Value::as_str).unwrap_or(""),
-                "text": event.payload.get("text").and_then(Value::as_str).unwrap_or(""),
+                "text": text,
             }))
         })
         .collect::<Vec<_>>();
-    let pages = sample_with_boundaries(&all_pages, 24, 4);
-    let all_rolling_summaries = events
+    let pages = all_pages;
+    let complete_groups = events
         .iter()
         .filter(|event| event.event_type == "explanation.card.created")
-        .filter_map(|event| {
-            event
-                .payload
-                .get("result")?
-                .get("paragraph_summary")
-                .or_else(|| event.payload.get("result")?.get("summary"))?
-                .as_str()
-                .map(str::to_owned)
-        })
+        .filter(|event| event.payload["coverage_contract"] == "all_sources_v1")
+        .map(|event| json!({"coverage_contract": "all_sources_v1", "result": event.payload["result"]}))
         .collect::<Vec<_>>();
-    let rolling_summaries = sample_with_boundaries(&all_rolling_summaries, 24, 4);
     let evidence_key = segments
         .iter()
         .filter_map(|item| item.get("id").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join(":");
-    let idempotency_key = format!("summarize:{session_id}:{evidence_key}");
+    let idempotency_key = format!("summarize:{session_id}:{run}:{evidence_key}");
     if let Some(existing) = state.store.get_model_job_by_key(&idempotency_key)?
         && existing.status == "failed"
     {
@@ -961,18 +1073,36 @@ pub fn enqueue_summary(
         session_id: session_id.to_owned(),
         job_type: "summarize".to_owned(),
         priority: 20,
-        input: json!({"segments": segments, "asset_pages": pages, "rolling_summaries": rolling_summaries, "target_language": session.target_language, "trigger": trigger}),
+        input: json!({"summary_contract": "complete_groups_v1", "segments": segments, "asset_pages": pages, "complete_groups": complete_groups, "target_language": session.target_language, "trigger": trigger, "recording_run": run}),
         input_object_hash: None,
         idempotency_key,
     })?)
 }
 
+fn latest_recording_run(events: &[aialra_event_protocol::EventEnvelope]) -> String {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == "session.recording.started")
+        .map(|event| event.event_id.to_string())
+        .unwrap_or_else(|| "legacy".to_owned())
+}
+
+fn has_summary_for_run(events: &[aialra_event_protocol::EventEnvelope], run: &str) -> bool {
+    events.iter().any(|event| {
+        event.event_type == "session.summary.created"
+            && event
+                .payload
+                .get("recording_run")
+                .and_then(Value::as_str)
+                .unwrap_or("legacy")
+                == run
+    })
+}
+
 const PARAGRAPH_MIN_TERMINAL_CHARS: usize = 100;
 const PARAGRAPH_HARD_CHARS: usize = 600;
 const PARAGRAPH_HARD_SEGMENTS: usize = 4;
-const AUTO_EXPLAIN_MIN_PARAGRAPHS: usize = 8;
-const AUTO_EXPLAIN_MIN_CHARS: usize = 1_800;
-const AUTO_EXPLAIN_MAX_PARAGRAPHS: usize = 16;
 
 fn paragraph_ready(text: &str, fragments: usize, force: bool) -> bool {
     // A colon introduces the next clause; character count alone must not turn
@@ -1086,7 +1216,8 @@ fn maybe_finalize_paragraph(
             "text": text,
             "detected_language": detected_language,
             "provider": provider,
-            "assembly": "sentence-boundary-v2"
+            "assembly": "sentence-boundary-v2",
+            "speaker": crate::speakers::paragraph_label(pending.iter().map(|(event, _, _, _)| *event))
         }),
     )?;
     let same_language =
@@ -1205,58 +1336,7 @@ fn maybe_enqueue_coherent_explanation(
     {
         return Ok(());
     }
-    let events = state.store.list_events(session_id)?;
-    let paragraphs = events
-        .iter()
-        .filter(|event| event.event_type == "paragraph.finalized")
-        .filter_map(|event| {
-            Some((
-                event.payload.get("paragraph_id")?.as_str()?.to_owned(),
-                event.payload.get("text")?.as_str()?.to_owned(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    // Explanation evidence uses the same stable IDs as the input window.  Once a
-    // coherent paragraph exists those IDs are paragraph IDs, not the internal
-    // acoustic fragment IDs.  Comparing the wrong namespace made every later
-    // translation look like unexplained content and caused a card burst.
-    let last_explained = events
-        .iter()
-        .filter(|event| event.event_type == "explanation.card.created")
-        .filter_map(|event| event.payload.get("result"))
-        .filter_map(|result| result.get("evidence_segment_ids"))
-        .filter_map(Value::as_array)
-        .flat_map(|ids| ids.iter().filter_map(Value::as_str))
-        .filter_map(|id| {
-            paragraphs
-                .iter()
-                .position(|(paragraph_id, _)| paragraph_id == id)
-        })
-        .max();
-    let pending = &paragraphs[last_explained.map_or(0, |index| index + 1)..];
-    let mut group = Vec::new();
-    let mut chars = 0;
-    for (paragraph_id, text) in pending {
-        if group.len() >= AUTO_EXPLAIN_MAX_PARAGRAPHS {
-            break;
-        }
-        group.push(paragraph_id.clone());
-        chars += text.chars().count();
-        if group.len() >= AUTO_EXPLAIN_MIN_PARAGRAPHS && chars >= AUTO_EXPLAIN_MIN_CHARS {
-            break;
-        }
-    }
-    if group.len() < AUTO_EXPLAIN_MAX_PARAGRAPHS
-        && (group.len() < AUTO_EXPLAIN_MIN_PARAGRAPHS || chars < AUTO_EXPLAIN_MIN_CHARS)
-    {
-        return Ok(());
-    }
-    crate::explanation::enqueue_explanation_for_paragraphs(
-        state,
-        session_id,
-        "coherent_content_group",
-        &group,
-    )?;
+    crate::topics::enqueue_pending(state, session_id, false)?;
     Ok(())
 }
 
@@ -1297,34 +1377,6 @@ fn is_cjk_character(character: char) -> bool {
             | 0xf900..=0xfaff
             | 0xac00..=0xd7af
     )
-}
-
-fn evenly_sample<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
-    if items.len() <= limit {
-        return items.to_vec();
-    }
-    if limit <= 1 {
-        return items.first().cloned().into_iter().collect();
-    }
-    (0..limit)
-        .map(|index| {
-            let source_index = index * (items.len() - 1) / (limit - 1);
-            items[source_index].clone()
-        })
-        .collect()
-}
-
-fn sample_with_boundaries<T: Clone>(items: &[T], limit: usize, boundary: usize) -> Vec<T> {
-    if items.len() <= limit || boundary == 0 || limit <= boundary * 2 {
-        return evenly_sample(items, limit);
-    }
-    let edge = boundary.min(items.len() / 2);
-    let middle_limit = limit - edge * 2;
-    let mut output = items[..edge].to_vec();
-    let middle = evenly_sample(&items[edge..items.len() - edge], middle_limit);
-    output.extend(middle);
-    output.extend_from_slice(&items[items.len() - edge..]);
-    output
 }
 
 fn authorize(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -1420,7 +1472,7 @@ fn allowed_capabilities(values: Vec<String>) -> Vec<String> {
         .filter(|value| {
             matches!(
                 value.as_str(),
-                "asr" | "translate" | "explain" | "summarize" | "asset_parse"
+                "asr" | "translate" | "explain" | "topic" | "summarize" | "asset_parse"
             )
         })
         .collect()
@@ -1506,12 +1558,104 @@ use axum::response::IntoResponse;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn translation_cannot_replace_the_persisted_source_and_retries_are_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_source_binding".to_owned(),
+                title: "Synthetic source binding".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        let original = "Do not accept the request before the data is valid.";
+        let job = state
+            .enqueue_job(aialra_event_store::NewModelJob {
+                id: "job_source_binding".to_owned(),
+                session_id: "session_source_binding".to_owned(),
+                job_type: "translate".to_owned(),
+                priority: 70,
+                input: json!({"text": original, "paragraph_id": "paragraph_source_binding",
+                "source_language": "en", "target_language": "zh-CN"}),
+                input_object_hash: None,
+                idempotency_key: "synthetic-source-binding".to_owned(),
+            })
+            .unwrap();
+        let result = json!({
+            "source_text": "Accept the request immediately.",
+            "text": "数据有效之前不要接受请求",
+            "provider": "ollama:synthetic@cuda",
+        });
+        super::apply_translation_result(&state, &job, &result, 10).unwrap();
+        super::apply_translation_result(&state, &job, &result, 10).unwrap();
+        let events = state.store.list_events("session_source_binding").unwrap();
+        let translations = events
+            .iter()
+            .filter(|event| event.event_type == "translation.finalized")
+            .collect::<Vec<_>>();
+        assert_eq!(translations.len(), 1);
+        assert_eq!(translations[0].payload["source_text"], original);
+        assert_eq!(
+            translations[0].payload["paragraph_id"],
+            "paragraph_source_binding"
+        );
+    }
+
+    #[test]
+    fn summaries_from_previous_recordings_do_not_complete_the_new_run() {
+        use aialra_event_protocol::EventEnvelope;
+        use serde_json::json;
+        let old_start = EventEnvelope::new(
+            "session_fixture",
+            "core",
+            1,
+            "session.recording.started",
+            0,
+            "old",
+            None,
+            json!({}),
+        )
+        .unwrap();
+        let new_start = EventEnvelope::new(
+            "session_fixture",
+            "core",
+            2,
+            "session.recording.started",
+            0,
+            "new",
+            None,
+            json!({"resumed": true}),
+        )
+        .unwrap();
+        let delayed = EventEnvelope::new(
+            "session_fixture",
+            "gpu_summarizer",
+            1,
+            "session.summary.created",
+            0,
+            "summary",
+            None,
+            json!({"recording_run": old_start.event_id.to_string()}),
+        )
+        .unwrap();
+        let events = vec![old_start, new_start.clone(), delayed];
+        let run = super::latest_recording_run(&events);
+        assert_eq!(run, new_start.event_id.to_string());
+        assert!(!super::has_summary_for_run(&events, &run));
+    }
+
     use super::{
         PARAGRAPH_HARD_SEGMENTS, asr_initial_prompt, detected_language_for_paragraph,
-        enqueue_summary, evenly_sample, join_caption_fragments, languages_match_for_translation,
+        enqueue_summary, join_caption_fragments, languages_match_for_translation,
         maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, normalize_language_code,
-        paragraph_ready, require_provider, require_provider_prefixes, sample_with_boundaries,
-        validate_diagnostic_id, validate_error_stage, validate_model_stage,
+        paragraph_ready, require_provider, require_provider_prefixes, validate_diagnostic_id,
+        validate_error_stage, validate_model_stage,
     };
     use crate::app::AppState;
     use aialra_event_store::NewSession;
@@ -1610,14 +1754,51 @@ mod tests {
     }
 
     #[test]
-    fn summary_sampling_covers_the_whole_timeline_in_order() {
-        let sampled = evenly_sample(&(0..100).collect::<Vec<_>>(), 5);
-        assert_eq!(sampled, vec![0, 24, 49, 74, 99]);
-        assert_eq!(evenly_sample(&[3, 5, 8], 5), vec![3, 5, 8]);
-        assert_eq!(
-            sample_with_boundaries(&(0..100).collect::<Vec<_>>(), 10, 2),
-            vec![0, 1, 2, 21, 40, 59, 78, 97, 98, 99]
-        );
+    fn summary_retains_every_paragraph_and_page_and_rejects_missing_coverage() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "summary-complete".to_owned(),
+                title: "Synthetic summary".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for i in 0..100 {
+            state.emit("summary-complete", "test", "paragraph.finalized", i, "test", None,
+                json!({"paragraph_id": format!("p{i}"), "text": format!("Synthetic paragraph {i}")})).unwrap();
+        }
+        for i in 0..30 {
+            state
+                .emit(
+                    "summary-complete",
+                    "test",
+                    "asset.page.extracted",
+                    i,
+                    "test",
+                    None,
+                    json!({"page_id": format!("page{i}"), "text": format!("Synthetic page {i}")}),
+                )
+                .unwrap();
+        }
+        let job = enqueue_summary(&state, "summary-complete", "stop").unwrap();
+        assert_eq!(job.input["segments"].as_array().unwrap().len(), 100);
+        assert_eq!(job.input["asset_pages"].as_array().unwrap().len(), 30);
+        assert_eq!(job.input["summary_contract"], "complete_groups_v1");
+        let mut result = json!({"overview": "Complete course", "key_points": [], "terminology": [],
+            "open_questions": [], "evidence_segment_ids": (0..100).map(|i| format!("p{i}")).collect::<Vec<_>>(),
+            "asset_page_ids": (0..30).map(|i| format!("page{i}")).collect::<Vec<_>>(),
+            "provider": "compiled:content-groups-v1@cpu"});
+        let all_ids = result["evidence_segment_ids"].clone();
+        result["evidence_segment_ids"] = json!(["p0"]);
+        assert!(super::apply_summary_result(&state, &job, &result, 1).is_err());
+        result["evidence_segment_ids"] = all_ids;
+        super::apply_summary_result(&state, &job, &result, 1).unwrap();
     }
 
     #[test]
@@ -1825,7 +2006,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_explanation_waits_for_a_large_coherent_passage() {
+    fn automatic_grouping_waits_for_context_without_forcing_an_explanation() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
         state
@@ -1882,23 +2063,26 @@ mod tests {
         );
         let job = state
             .store
-            .lease_model_job("test-worker", &["explain".to_owned()], 60)
+            .lease_model_job("test-worker", &["topic".to_owned()], 60)
             .unwrap()
             .unwrap();
-        assert_eq!(job.job_type, "explain");
-        assert_eq!(
-            job.input.get("trigger").and_then(|value| value.as_str()),
-            Some("coherent_content_group")
-        );
+        assert_eq!(job.job_type, "topic");
         assert_eq!(
             job.input
                 .get("segments")
                 .and_then(|value| value.as_array())
                 .map(Vec::len),
-            Some(8)
+            Some(12)
         );
         assert_eq!(job.input["segments"][0]["id"], "para-1");
-        assert_eq!(job.input["segments"][7]["id"], "para-8");
+        assert_eq!(job.input["segments"][11]["id"], "para-12");
+        assert!(
+            state
+                .store
+                .lease_model_job("explain-worker", &["explain".to_owned()], 60)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1917,7 +2101,7 @@ mod tests {
                 demo_mode: false,
             })
             .unwrap();
-        let paragraph_text = "A coherent technical passage explains a mechanism, its assumptions, and the evidence needed to compare it in a lecture setting. ".repeat(8);
+        let paragraph_text = "A coherent technical passage explains a mechanism, its assumptions, and the evidence needed to compare it in a lecture setting. ".repeat(3);
         for index in 1..=8 {
             state
                 .emit_idempotent(
@@ -1940,7 +2124,7 @@ mod tests {
         .unwrap();
         let first_job = state
             .store
-            .lease_model_job("explain-worker", &["explain".to_owned()], 60)
+            .lease_model_job("explain-worker", &["topic".to_owned()], 60)
             .unwrap()
             .unwrap();
         assert_eq!(first_job.input["segments"][0]["text"], paragraph_text);
@@ -2022,7 +2206,7 @@ mod tests {
                 demo_mode: false,
             })
             .unwrap();
-        for index in 1..=16 {
+        for index in 1..=20 {
             state.emit_idempotent(&format!("short-{index}"), "session_short_group", "test",
                 "paragraph.finalized", index, &format!("short-{index}"), None,
                 json!({"paragraph_id": format!("para-short-{index}"), "text": "Short but stable."})).unwrap();
@@ -2033,7 +2217,7 @@ mod tests {
                     .model_queue_counts(Some("session_short_group"))
                     .unwrap()
                     .queued,
-                if index == 16 { 1 } else { 0 }
+                if index == 20 { 1 } else { 0 }
             );
         }
     }

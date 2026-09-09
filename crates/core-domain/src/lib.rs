@@ -78,8 +78,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn completed_session_cannot_resume_recording() {
-        // A completed course remains immutable unless a new session is created.
+    fn generic_transition_cannot_reopen_completed_session_without_explicit_lease() {
+        // Explicit owner-scoped lease acquisition reopens the projection in
+        // its own transaction. Late model results may not use this path.
         let result = SessionState::Completed.transition(SessionState::Recording);
         assert!(result.is_err());
     }

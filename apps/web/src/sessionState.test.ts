@@ -26,6 +26,13 @@ describe("project lease replay", () => {
 });
 
 describe("session event replay", () => {
+  it("observes an explicit new run but rejects old completion replay", () => {
+    const resumed = applySessionStateEvent(session("completed"), "session.recording.started", "2026-01-01T01:00:00Z", true);
+    expect(resumed.state).toBe("recording");
+    expect(applySessionStateEvent(resumed, "session.completed", "2026-01-01T00:00:01Z").state).toBe("recording");
+    expect(applySessionStateEvent(resumed, "session.processing", "2026-01-01T01:01:00Z").state).toBe("processing");
+    expect(applySessionStateEvent(session("archived"), "session.recording.started", "2026-01-01T01:00:00Z", true).state).toBe("archived");
+  });
   it("does not regress a completed snapshot while old events replay", () => {
     expect(applySessionStateEvent(session("completed"), "session.recording.started").state).toBe("completed");
     expect(applySessionStateEvent(session("completed"), "session.processing").state).toBe("completed");

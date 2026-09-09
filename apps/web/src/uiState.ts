@@ -1,5 +1,11 @@
 import type { Session } from "./types";
 
+export function recordingDisplayState(state: string, active?: boolean): string {
+  if (state !== "recording" && state !== "degraded") return state;
+  if (active === undefined) return "recording_checking";
+  return active ? state : "recording_interrupted";
+}
+
 export type WorkspaceEntityType = "folder" | "project" | "session";
 
 export interface WorkspaceDragTarget {
@@ -55,12 +61,13 @@ export function formatAudioInputLabel(device: Pick<MediaDeviceInfo, "deviceId" |
 }
 
 export function isRecordingResumable(state: Session["state"] | string): boolean {
-  return state === "ready" || state === "recording" || state === "degraded";
+  return ["ready", "recording", "degraded", "completed", "failed"].includes(state);
 }
 
 export function resumeSessionLabel(state: Session["state"] | string): string {
   if (state === "recording" || state === "degraded") return "继续本次收音";
   if (state === "ready") return "进入本次录音台";
+  if (state === "completed" || state === "failed") return "续录本次课程";
   return "查看本次课程";
 }
 

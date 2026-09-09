@@ -124,10 +124,12 @@ export const api = {
     })),
   renewRecording: (projectId: string, sessionId: string, deviceId: string, leaseToken: string) =>
     checked<Record<string, unknown>>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/recording/renew`, {
+      signal: AbortSignal.timeout(10_000),
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: leaseToken }),
     })),
   stopRecording: (projectId: string, sessionId: string, deviceId: string, leaseToken: string) =>
     checked<Session>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/recording/stop`, {
+      signal: AbortSignal.timeout(10_000),
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: leaseToken }),
     })),
   createDevicePairing: (projectId: string, sessionId: string) =>
