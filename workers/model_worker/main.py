@@ -16,7 +16,7 @@ import unicodedata
 from collections.abc import Awaitable, Callable, Coroutine
 from functools import wraps
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 import numpy as np
@@ -200,6 +200,7 @@ class AsrRequest(BaseModel):
     sample_rate: int = Field(ge=8_000, le=48_000)
     language: str = Field(min_length=2, max_length=32)
     initial_prompt: str = Field(default="", max_length=4_000)
+    result_mode: Literal["interim", "stable"] = "stable"
 
 
 class AsrResponse(BaseModel):
@@ -522,6 +523,8 @@ async def transcribe(request: AsrRequest) -> AsrResponse:
         raise HTTPException(status_code=400, detail="PCM must contain complete 16-bit samples")
     audio = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
     try:
+        if request.result_mode == "interim":
+            return await asyncio.to_thread(_transcribe_sync, audio, request)
         result, observation = await asyncio.gather(
             asyncio.to_thread(_transcribe_sync, audio, request),
             asyncio.to_thread(observe_speaker, audio.copy(), request.sample_rate),
@@ -549,6 +552,7 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
     if (
         source_language.split("-", 1)[0] == target_language.split("-", 1)[0]
         and source_language not in {"auto", "mixed", "zh-en"}
+        and not _text_requires_translation(request.text, target_language)
     ):
         return TranslationResponse(
             source_text=request.text,
@@ -572,7 +576,9 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
         if not _translation_text_contract_ok(
             translation_text, request.source_language, request.target_language
         ):
-            raise HTTPException(status_code=503, detail="dedicated translation result is invalid")
+            raise HTTPException(
+                status_code=503, detail="dedicated translation language contract is invalid"
+            )
         return TranslationResponse(
             source_text=request.text,
             text=translation_text,
@@ -680,6 +686,26 @@ def _language_matches(text: str, language: str) -> bool:
     if base_language in {"en", "es", "fr", "de"}:
         return counts["latin"] >= max(1, significant // 2) and counts["cjk"] < counts["latin"]
     return True
+
+
+def _text_requires_translation(text: str, target_language: str) -> bool:
+    """Detect a sustained foreign-script passage inside a nominally same-language course."""
+
+    counts = _script_counts(text)
+    target = target_language.casefold().replace("_", "-").split("-", 1)[0]
+    if target == "zh":
+        return counts["kana"] > 0 or counts["hangul"] > 0 or counts["latin"] > max(
+            24, counts["cjk"] * 3
+        )
+    if target == "ja":
+        return counts["hangul"] > 0 or counts["latin"] > max(12, counts["kana"] * 2)
+    if target == "ko":
+        return counts["kana"] > 0 or counts["latin"] > max(12, counts["hangul"] * 2)
+    if target == "en":
+        return counts["cjk"] + counts["kana"] + counts["hangul"] > max(
+            12, counts["latin"] * 2
+        )
+    return False
 
 
 def _translation_contract_ok(
@@ -1262,20 +1288,33 @@ def _hymt_prompt(request: TranslationRequest) -> str:
     target = (languages if chinese_pair else english_languages).get(
         request.target_language.casefold(), request.target_language,
     )
-    # Free-form history made the model import quantities and claims from a
-    # previous paragraph into the current translation. Core already assembles
-    # coherent source paragraphs. Keep the request compatible, but translate
-    # only its source text; explicitly confirmed glossary terms remain usable.
+    # Context is a bounded discourse hint, not another source to translate.
+    # Keeping it in a separate, explicit section lets the dedicated model
+    # resolve pronouns and terminology without concatenating prior facts into
+    # the current source field.
     terms = "\n".join(
         f"{item.source} 翻译成 {item.source if item.do_not_translate else item.preferred}"
         for item in request.glossary[:32]
     )
+    context = "\n".join(item.strip() for item in request.context[-2:] if item.strip())
+    context = context[-1_200:]
     if not chinese_pair:
         prompt = (f"Translate the following segment into {target}, without additional "
                   f"explanation.\n\n{request.text}")
+        if context:
+            prompt = (
+                "Previous lecture context is only for resolving pronouns and terminology. "
+                "Do not translate, repeat, or import facts from it.\n"
+                f"Previous context:\n{context}\n\n{prompt}"
+            )
     else:
         prompt = (f"将以下文本翻译为{target}，注意只需要输出翻译后的结果，"
                   f"不要额外解释：\n\n{request.text}")
+        if context:
+            prompt = (
+                "以下上文只用于理解当前文本中的代词和术语；不得翻译、复述或带入上文事实。\n"
+                f"上文：\n{context}\n\n{prompt}"
+            )
     return f"参考下面的翻译：\n{terms}\n\n{prompt}" if terms else prompt
 
 

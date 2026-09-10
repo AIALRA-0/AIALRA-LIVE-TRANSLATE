@@ -3,6 +3,16 @@ $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path #
 $shellPath = (Get-Process -Id $PID).Path # Child scripts use the same PowerShell runtime.
 $workerScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-worker.ps1") # Quote paths because the workspace may contain spaces.
 $agentScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-gpu-agent.ps1")
+$speakerKeys = @("AIALRA_SPEAKER_MODEL_PATH", "AIALRA_SPEAKER_SEGMENTATION_PATH")
+foreach ($speakerKey in $speakerKeys) {
+    $currentValue = [Environment]::GetEnvironmentVariable($speakerKey, "Process")
+    if ([string]::IsNullOrWhiteSpace($currentValue)) {
+        $savedValue = [Environment]::GetEnvironmentVariable($speakerKey, "User")
+        if (![string]::IsNullOrWhiteSpace($savedValue)) {
+            [Environment]::SetEnvironmentVariable($speakerKey, $savedValue, "Process")
+        }
+    }
+}
 $restartDelaySeconds = 1
 $ollamaUrl = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_URL)) { "http://127.0.0.1:11434" } else { $env:AIALRA_OLLAMA_URL.TrimEnd("/") }
 $ollamaModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_MODEL)) { "qwen2.5:7b-instruct" } else { $env:AIALRA_OLLAMA_MODEL }

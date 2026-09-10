@@ -1696,6 +1696,24 @@ impl EventStore {
         )? == 1)
     }
 
+    /// Drop queued interim ASR snapshots that have already been replaced by a
+    /// newer snapshot or a stable audio window. Leased work is never touched.
+    pub fn supersede_queued_asr_previews(
+        &self,
+        session_id: &str,
+        source_id: &str,
+        through_source_version: u64,
+    ) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "UPDATE model_jobs SET status = 'completed', last_error_kind = 'newer_asr_snapshot', updated_at = ?4, completed_at = ?4 WHERE session_id = ?1 AND job_type = 'asr' AND status = 'queued' AND json_extract(input_json, '$.result_mode') = 'interim' AND json_extract(input_json, '$.source_id') = ?2 AND CAST(json_extract(input_json, '$.source_version') AS INTEGER) <= ?3",
+                params![session_id, source_id, through_source_version, now],
+            )
+            .context("supersede queued ASR previews")
+    }
+
     /// Activate a deferred explanation only after Core has materialized a
     /// stable transcript/material snapshot.  The update is atomic with the
     /// queued-state check so a worker cannot observe a half-activated job.

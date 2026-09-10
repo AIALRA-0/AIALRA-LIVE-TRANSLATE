@@ -505,11 +505,60 @@ fn apply_asr_result(
         )?;
         return Ok(());
     }
+    let result_mode = job
+        .input
+        .get("result_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("stable");
     let captured_at_ms = job
         .input
         .get("captured_at_ms")
         .and_then(Value::as_u64)
         .unwrap_or_default();
+    let source_id = job
+        .input
+        .get("source_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let source_version = job
+        .input
+        .get("source_version")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let audio_end_ms = job
+        .input
+        .get("audio_end_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| captured_at_ms.saturating_add(asr.duration_ms));
+    if result_mode == "interim" {
+        if state
+            .store
+            .audio_assembly_cursor(&job.session_id, source_id)?
+            .is_some_and(|cursor| cursor >= source_version)
+        {
+            return Ok(());
+        }
+        state.emit_idempotent(
+            &format!("{}:transcript_interim", job.id),
+            &job.session_id,
+            "gpu_asr",
+            "transcript.interim",
+            captured_at_ms.saturating_mul(1_000_000),
+            &job.id,
+            None,
+            json!({
+                "source_id": source_id,
+                "source_version": source_version,
+                "text": asr.text,
+                "language": asr.language,
+                "audio_start_ms": captured_at_ms,
+                "audio_end_ms": audio_end_ms,
+                "provider": asr.provider,
+                "elapsed_ms": elapsed_ms
+            }),
+        )?;
+        return Ok(());
+    }
     let segment_id = format!("seg_{}", job.id.trim_start_matches("job_"));
     let speaker = crate::speakers::label_for_asr(
         state,
@@ -524,15 +573,25 @@ fn apply_asr_result(
         );
         Some(crate::speakers::Label::unconfirmed())
     });
-    let partial = state.emit_idempotent(
-        &format!("{}:asr_partial", job.id),
+    let stable = state.emit_idempotent(
+        &format!("{}:transcript_stable", job.id),
         &job.session_id,
         "gpu_asr",
-        "asr.partial.updated",
+        "transcript.stable",
         captured_at_ms.saturating_mul(1_000_000),
         &job.id,
         None,
-        json!({"segment_id": segment_id, "text": asr.text, "provider": asr.provider, "elapsed_ms": elapsed_ms}),
+        json!({
+            "segment_id": segment_id,
+            "source_id": source_id,
+            "source_version": source_version,
+            "text": asr.text,
+            "language": asr.language,
+            "audio_start_ms": captured_at_ms,
+            "audio_end_ms": audio_end_ms,
+            "provider": asr.provider,
+            "elapsed_ms": elapsed_ms
+        }),
     )?;
     state.emit_idempotent(
         &format!("{}:segment_final", job.id),
@@ -541,15 +600,20 @@ fn apply_asr_result(
         "segment.finalized",
         captured_at_ms.saturating_mul(1_000_000),
         &job.id,
-        Some(partial.event_id.to_string()),
+        Some(stable.event_id.to_string()),
         json!({
             "segment_id": segment_id,
+            "source_id": source_id,
+            "source_version": source_version,
             "text": asr.text,
             "language": asr.language,
             "confidence": asr.confidence,
             "duration_ms": asr.duration_ms,
             "provider": asr.provider,
             "elapsed_ms": elapsed_ms,
+            "audio_start_ms": captured_at_ms,
+            "audio_end_ms": audio_end_ms,
+            "transcript_state": "stable",
             "display_mode": "internal_fragment"
             ,"speaker": speaker
         }),
@@ -606,6 +670,8 @@ fn apply_translation_result(
                 .target_language
                 .or_else(|| job.input.get("target_language").and_then(Value::as_str).map(str::to_owned)),
             "provider": translation.provider,
+            "source_version": job.input.get("source_version").cloned().unwrap_or(Value::Null),
+            "context_paragraphs": job.input.get("context").and_then(Value::as_array).map_or(0, Vec::len),
             "elapsed_ms": elapsed_ms
         }),
     )?;
@@ -924,15 +990,26 @@ fn finish_session_if_drained(state: &AppState, session_id: &str) -> Result<(), A
     Ok(())
 }
 
-pub fn enqueue_asr(
+pub struct AsrWindow<'a> {
+    pub captured_at_ms: u64,
+    pub audio_end_ms: u64,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub result_mode: &'a str,
+}
+
+pub fn enqueue_asr_window(
     state: &AppState,
     session_id: &str,
     source_id: &str,
-    captured_at_ms: u64,
+    window: AsrWindow<'_>,
     pcm: &[u8],
 ) -> anyhow::Result<()> {
     if pcm.is_empty() {
         return Ok(());
+    }
+    if !matches!(window.result_mode, "interim" | "stable") {
+        anyhow::bail!("ASR result mode is invalid");
     }
     let stored = state.objects.put(pcm)?;
     let session = state
@@ -947,15 +1024,20 @@ pub fn enqueue_asr(
         priority: 100,
         input: json!({
             "source_id": source_id,
-            "captured_at_ms": captured_at_ms,
+            "captured_at_ms": window.captured_at_ms,
+            "audio_end_ms": window.audio_end_ms,
+            "first_sequence": window.first_sequence,
+            "last_sequence": window.last_sequence,
+            "source_version": window.last_sequence,
+            "result_mode": window.result_mode,
             "sample_rate": 16_000,
             "language": session.source_language,
             "initial_prompt": initial_prompt
         }),
         input_object_hash: Some(stored.hash.clone()),
         idempotency_key: format!(
-            "asr:{session_id}:{source_id}:{captured_at_ms}:{}",
-            stored.hash
+            "asr:{}:{session_id}:{source_id}:{}:{}:{}",
+            window.result_mode, window.captured_at_ms, window.last_sequence, stored.hash
         ),
     })?;
     Ok(())
@@ -1100,14 +1182,15 @@ fn has_summary_for_run(events: &[aialra_event_protocol::EventEnvelope], run: &st
     })
 }
 
-const PARAGRAPH_MIN_TERMINAL_CHARS: usize = 100;
-const PARAGRAPH_HARD_CHARS: usize = 600;
+const PARAGRAPH_MIN_TERMINAL_CHARS: usize = 140;
+const PARAGRAPH_SINGLE_WINDOW_TERMINAL_CHARS: usize = 220;
+const PARAGRAPH_HARD_CHARS: usize = 700;
 const PARAGRAPH_HARD_SEGMENTS: usize = 4;
 
 fn paragraph_ready(text: &str, fragments: usize, force: bool) -> bool {
-    // A colon introduces the next clause; character count alone must not turn
-    // one acoustic fragment into an independent translation. Keep the existing
-    // four-fragment upper bound so incomplete speech cannot wait indefinitely.
+    // Stable ASR fragments are acoustic windows, not semantic sentences. Keep
+    // a longer thought together unless punctuation closes it; the upper bound
+    // prevents an uninterrupted lecture from waiting forever.
     let trimmed = text
         .trim_end()
         .trim_end_matches(['"', '\'', '”', '’', '」', '』', ')', '）']);
@@ -1116,9 +1199,10 @@ fn paragraph_ready(text: &str, fragments: usize, force: bool) -> bool {
         && trimmed.ends_with(['.', '?', '!', '。', '？', '！']);
     force
         || fragments >= PARAGRAPH_HARD_SEGMENTS
-        || (fragments >= 2
-            && (text.chars().count() >= PARAGRAPH_HARD_CHARS
-                || (text.chars().count() >= PARAGRAPH_MIN_TERMINAL_CHARS && terminal)))
+        || text.chars().count() >= PARAGRAPH_HARD_CHARS
+        || (terminal
+            && (text.chars().count() >= PARAGRAPH_SINGLE_WINDOW_TERMINAL_CHARS
+                || (fragments >= 2 && text.chars().count() >= PARAGRAPH_MIN_TERMINAL_CHARS)))
 }
 
 fn maybe_finalize_paragraph(
@@ -1217,11 +1301,13 @@ fn maybe_finalize_paragraph(
             "detected_language": detected_language,
             "provider": provider,
             "assembly": "sentence-boundary-v2",
+            "source_version": pending.iter().filter_map(|(event, _, _, _)| event.payload.get("source_version").and_then(Value::as_u64)).max().unwrap_or_default(),
             "speaker": crate::speakers::paragraph_label(pending.iter().map(|(event, _, _, _)| *event))
         }),
     )?;
     let same_language =
-        languages_match_for_translation(&translation_source_language, &session.target_language);
+        languages_match_for_translation(&translation_source_language, &session.target_language)
+            && !text_requires_translation(&text, &session.target_language);
     let paragraph_text = paragraph
         .payload
         .get("text")
@@ -1276,6 +1362,7 @@ fn maybe_finalize_paragraph(
                 "detected_language": detected_language,
                 "glossary": [],
                 "context": context
+                ,"source_version": paragraph.payload.get("source_version").cloned().unwrap_or(Value::Null)
             }),
             input_object_hash: None,
             idempotency_key: format!("translate:{paragraph_id}"),
@@ -1321,6 +1408,30 @@ fn language_base(value: &str) -> &str {
 fn languages_match_for_translation(source: &str, target: &str) -> bool {
     let source = language_base(source);
     !matches!(source, "auto" | "mixed" | "zh-en") && source == language_base(target)
+}
+
+fn text_requires_translation(text: &str, target: &str) -> bool {
+    let target = language_base(target);
+    let mut latin = 0_usize;
+    let mut cjk = 0_usize;
+    let mut kana = 0_usize;
+    let mut hangul = 0_usize;
+    for character in text.chars().filter(|character| character.is_alphabetic()) {
+        match character as u32 {
+            0x3040..=0x30ff => kana += 1,
+            0xac00..=0xd7af => hangul += 1,
+            0x3400..=0x9fff => cjk += 1,
+            _ if character.is_ascii_alphabetic() => latin += 1,
+            _ => {}
+        }
+    }
+    match target {
+        "zh" => kana > 0 || hangul > 0 || latin > cjk.saturating_mul(3).max(24),
+        "ja" => hangul > 0 || latin > kana.saturating_mul(2).max(12),
+        "ko" => kana > 0 || latin > hangul.saturating_mul(2).max(12),
+        "en" => kana + hangul + cjk > latin.saturating_mul(2).max(12),
+        _ => false,
+    }
 }
 
 fn maybe_enqueue_coherent_explanation(
@@ -1654,8 +1765,8 @@ mod tests {
         PARAGRAPH_HARD_SEGMENTS, asr_initial_prompt, detected_language_for_paragraph,
         enqueue_summary, join_caption_fragments, languages_match_for_translation,
         maybe_enqueue_coherent_explanation, maybe_finalize_paragraph, normalize_language_code,
-        paragraph_ready, require_provider, require_provider_prefixes, validate_diagnostic_id,
-        validate_error_stage, validate_model_stage,
+        paragraph_ready, require_provider, require_provider_prefixes, text_requires_translation,
+        validate_diagnostic_id, validate_error_stage, validate_model_stage,
     };
     use crate::app::AppState;
     use aialra_event_store::NewSession;
@@ -1953,6 +2064,26 @@ mod tests {
                 .queued,
             0
         );
+    }
+
+    #[test]
+    fn mixed_script_detection_translates_sustained_foreign_speech_but_not_technical_terms() {
+        assert!(!text_requires_translation(
+            "这个 GPU 使用 CUDA kernel。",
+            "zh-CN"
+        ));
+        assert!(text_requires_translation(
+            "The complete lecture passage is delivered in English rather than Chinese.",
+            "zh-CN"
+        ));
+        assert!(text_requires_translation(
+            "ここではパイプラインハザードとフォワーディングを説明します。",
+            "zh-CN"
+        ));
+        assert!(text_requires_translation(
+            "이 강의에서는 파이프라인 해저드와 포워딩을 설명합니다.",
+            "zh-CN"
+        ));
     }
 
     #[test]

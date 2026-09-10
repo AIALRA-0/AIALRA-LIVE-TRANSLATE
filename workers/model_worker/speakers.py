@@ -42,7 +42,7 @@ def observe(audio: npt.NDArray[np.float32], sample_rate: int) -> SpeakerObservat
         return SpeakerObservation(status="disabled")
     if sample_rate != 16_000 or audio.ndim != 1 or len(audio) < sample_rate * 2:
         return SpeakerObservation(status="insufficient")
-    if len(audio) > sample_rate * 16 or not np.isfinite(audio).all():
+    if len(audio) > sample_rate * 24 or not np.isfinite(audio).all():
         return SpeakerObservation(status="uncertain")
     # Do not derive a profile from room noise or an ASR silence hallucination.
     frames = audio[:len(audio) // 320 * 320].reshape(-1, 320)
@@ -51,12 +51,16 @@ def observe(audio: npt.NDArray[np.float32], sample_rate: int) -> SpeakerObservat
         return SpeakerObservation(status="insufficient")
     try:
         with _lock:
-            # The detector accepts ten seconds; ASR accepts up to sixteen.
-            # Overlap the final window instead of dropping or padding a tiny
-            # remainder. A long ASR window must not bypass speaker analysis.
-            clips = [audio[:sample_rate * 10]]
-            if len(audio) > sample_rate * 10:
-                clips.append(audio[-sample_rate * 10:])
+            # The detector accepts ten seconds; ASR accepts up to twenty-four.
+            # Cover the complete ASR interval with overlapping detector windows,
+            # including one window anchored to the tail.
+            detector_samples = sample_rate * 10
+            detector_step = sample_rate * 8
+            starts = list(range(0, max(1, len(audio) - detector_samples + 1), detector_step))
+            tail_start = max(0, len(audio) - detector_samples)
+            if tail_start not in starts:
+                starts.append(tail_start)
+            clips = [audio[start:start + detector_samples] for start in starts]
             for clip in clips:
                 overlap = _overlapping_speech(clip)
                 if overlap is None:

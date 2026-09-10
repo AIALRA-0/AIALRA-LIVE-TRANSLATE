@@ -72,6 +72,15 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
   const usesInternalFragments = events.some((event) => event.event_type === "segment.finalized" && event.payload.display_mode === "internal_fragment");
   const activeStages = new Map<string, EventEnvelope>();
   const contentGroups = events.filter((event) => event.event_type === "content.group.created");
+  const stableSourceVersions = new Map<string, number>();
+  for (const event of events) {
+    if (event.event_type !== "transcript.stable" && event.event_type !== "segment.finalized") continue;
+    const sourceId = text(event.payload.source_id);
+    const sourceVersion = Number(event.payload.source_version);
+    if (sourceId && Number.isSafeInteger(sourceVersion) && sourceVersion >= 0) {
+      stableSourceVersions.set(sourceId, Math.max(stableSourceVersions.get(sourceId) ?? 0, sourceVersion));
+    }
+  }
 
   const items: TimelineItem[] = [];
   for (const event of events) {
@@ -112,6 +121,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       continue;
     }
     if (event.event_type === "segment.finalized") continue;
+    if (event.event_type === "transcript.interim" || event.event_type === "transcript.stable" || event.event_type === "transcript.revised") continue;
     if (event.event_type === "translation.finalized") continue;
 
     if (event.event_type === "explanation.card.created") {
@@ -229,14 +239,26 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       && id && !consumed.has(id) && !pending.has(id) && text(event.payload.text).trim()) pending.set(id, event);
   }
   const fragments = [...pending.values()];
-  if (fragments.length) {
-    const original = fragments.map((event) => text(event.payload.text).trim()).reduce((joined, part) => {
+  const latestInterim = new Map<string, EventEnvelope>();
+  for (const event of events) {
+    if (event.event_type !== "transcript.interim") continue;
+    const sourceId = text(event.payload.source_id);
+    const sourceVersion = Number(event.payload.source_version);
+    if (!sourceId || !Number.isSafeInteger(sourceVersion)
+      || sourceVersion <= (stableSourceVersions.get(sourceId) ?? 0)
+      || !text(event.payload.text).trim()) continue;
+    const previous = latestInterim.get(sourceId);
+    if (!previous || sourceVersion > Number(previous.payload.source_version)) latestInterim.set(sourceId, event);
+  }
+  const previewEvents = [...fragments, ...latestInterim.values()];
+  if (previewEvents.length) {
+    const original = previewEvents.map((event) => text(event.payload.text).trim()).reduce((joined, part) => {
       const space = joined && !/[\u3400-\u9fff，。？！]$/.test(joined) && !/^[\u3400-\u9fff，。？！.,!?;:)]/.test(part) ? " " : "";
       return joined + space + part;
     }, "");
-    items.push({ id: `preview-${fragments[0].payload.segment_id}`, kind: "preview",
+    items.push({ id: `preview-${text(previewEvents[0].payload.segment_id) || text(previewEvents[0].payload.source_id) || previewEvents[0].event_id}`, kind: "preview",
       title: "原文预览 · 等待成段", body: original, original, evidenceIds: [],
-      occurredAt: fragments[0].captured_at_wall });
+      occurredAt: previewEvents[0].captured_at_wall });
   }
   return items;
 }

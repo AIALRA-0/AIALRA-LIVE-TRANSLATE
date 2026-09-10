@@ -105,6 +105,23 @@ describe("timeline mapping", () => {
     expect(buildCourseDocument([fragment, next, paragraph, later]).at(-1)?.original).toBe("A new statement");
   });
 
+  it("shows only the newest interim transcript until its stable version arrives", () => {
+    const first = event("transcript.interim", {
+      source_id: "mic-g1", source_version: 3, text: "The controller",
+    });
+    const newer = { ...first, event_id: "interim-newer", payload: {
+      ...first.payload, source_version: 6, text: "The controller keeps the request open",
+    } };
+    expect(buildCourseDocument([first, newer])).toHaveLength(1);
+    expect(buildCourseDocument([first, newer])[0].original)
+      .toBe("The controller keeps the request open");
+    const stable = event("transcript.stable", {
+      source_id: "mic-g1", source_version: 6, segment_id: "stable-6",
+      text: "The controller keeps the request open.",
+    });
+    expect(buildCourseDocument([first, newer, stable])).toHaveLength(0);
+  });
+
   it("does not strip literal language-label speech from source or previews", () => {
     const literal = "源语言：我们正在讨论翻译格式";
     const paragraph = event("paragraph.finalized", { paragraph_id: "p1", text: literal });

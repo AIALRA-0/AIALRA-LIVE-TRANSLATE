@@ -111,13 +111,13 @@ def test_overlap_detector_pads_its_window_but_ignores_the_padded_frames(
     assert speakers._overlapping_speech(np.full(64000, 0.02, dtype=np.float32)) is False
 
 
-def test_sixteen_second_asr_window_checks_both_ends_and_all_embedding_windows(
+def test_twenty_four_second_asr_window_checks_the_full_interval_and_all_embeddings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AIALRA_SPEAKER_MODEL_PATH", "synthetic-model")
     model = Extractor()
     monkeypatch.setattr(speakers, "_extractor", model)
-    audio = np.linspace(0.01, 0.03, 16000 * 16, dtype=np.float32)
+    audio = np.linspace(0.01, 0.03, 16000 * 24, dtype=np.float32)
     checked: list[Any] = []
 
     def no_overlap(clip: Any) -> bool:
@@ -127,12 +127,13 @@ def test_sixteen_second_asr_window_checks_both_ends_and_all_embedding_windows(
     monkeypatch.setattr(speakers, "_overlapping_speech", no_overlap)
     result = speakers.observe(audio, 16000)
     assert result.status == "observed"
-    assert result.windows == model.calls == 6
-    assert len(checked) == 2
+    assert result.windows == model.calls == 8
+    assert len(checked) == 3
     np.testing.assert_array_equal(checked[0], audio[:160000])
-    np.testing.assert_array_equal(checked[1], audio[-160000:])
+    np.testing.assert_array_equal(checked[1], audio[128000:288000])
+    np.testing.assert_array_equal(checked[2], audio[-160000:])
     monkeypatch.setattr(speakers, "_extractor", Extractor(mixed=True))
     assert speakers.observe(audio, 16000).status == "uncertain"
     monkeypatch.setattr(speakers, "_overlapping_speech", lambda clip: bool(clip[-1] > 0.029))
     assert speakers.observe(audio, 16000).status == "uncertain"
-    assert speakers.observe(np.ones(16000 * 17, dtype=np.float32), 16000).status == "uncertain"
+    assert speakers.observe(np.ones(16000 * 25, dtype=np.float32), 16000).status == "uncertain"

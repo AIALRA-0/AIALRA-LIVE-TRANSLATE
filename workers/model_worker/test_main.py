@@ -300,6 +300,32 @@ def test_qwen_asr_path_uses_the_configured_language_and_provider(
     assert result.text == "Attention uses context."
 
 
+def test_nominal_same_language_still_translates_a_sustained_foreign_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "hy-mt")
+    monkeypatch.setattr(model_worker, "_configured_translation_importable", lambda: True)
+    monkeypatch.setattr(
+        model_worker,
+        "_translate_hymt_sync",
+        lambda _request: "这里说明流水线冒险以及如何通过转发解决。",
+    )
+    result = asyncio.run(model_worker.translate(model_worker.TranslationRequest(
+        text="ここではパイプラインハザードとフォワーディングによる解決方法を説明します。",
+        source_language="zh",
+        target_language="zh-CN",
+    )))
+    assert result.text == "这里说明流水线冒险以及如何通过转发解决。"
+    assert result.provider.startswith("hy-mt:")
+
+
+def test_same_language_keeps_short_embedded_technical_terms_without_translation() -> None:
+    assert not model_worker._text_requires_translation("这个 GPU 使用 CUDA kernel。", "zh-CN")
+    assert model_worker._text_requires_translation(
+        "The complete lecture passage is delivered in English rather than Chinese.", "zh-CN"
+    )
+
+
 def test_silent_audio_is_rejected_before_provider_inference() -> None:
     assert not _audio_has_speech(np.zeros(16_000, dtype=np.float32), 16_000)
 
@@ -673,15 +699,16 @@ async def test_cancelled_http_request_keeps_gpu_exclusive_until_actual_completio
     assert await inference() == 7
 
 
-def test_hymt_keeps_free_history_out_of_the_current_translation() -> None:
+def test_hymt_keeps_bounded_history_separate_from_the_current_translation() -> None:
     request = model_worker.TranslationRequest(
         text="The voltage is not 5 V.", source_language="en", target_language="zh-CN",
         context=["prior context " * 300], glossary=[],
     )
     prompt = model_worker._hymt_prompt(request)
     assert prompt.endswith(request.text)
-    assert "prior context" not in prompt
-    assert len(prompt) < 1400
+    assert "prior context" in prompt
+    assert "不得翻译、复述或带入上文事实" in prompt
+    assert len(prompt) < 1800
     assert "Source language:" not in prompt
     assert "Text to translate:" not in prompt
     request.glossary = [model_worker.GlossaryConstraint(source="voltage", preferred="电压")]
@@ -801,6 +828,28 @@ async def test_optional_speaker_work_runs_with_asr_and_cannot_discard_transcript
     ))
     assert result.text == "Synthetic speech"
     assert result.speaker_observation == SpeakerObservation(status="unavailable")
+
+
+@pytest.mark.asyncio
+async def test_interim_asr_skips_optional_speaker_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def recognize(*_args: Any) -> model_worker.AsrResponse:
+        return model_worker.AsrResponse(text="Synthetic preview", language="en", confidence=1,
+                                       duration_ms=2000, provider="qwen3-asr:test@cuda")
+
+    def identify(*_args: Any) -> SpeakerObservation:
+        raise AssertionError("interim ASR must not run speaker observation")
+
+    monkeypatch.setattr(model_worker, "_configured_asr_importable", lambda: True)
+    monkeypatch.setattr(model_worker, "_transcribe_sync", recognize)
+    monkeypatch.setattr(model_worker, "observe_speaker", identify)
+    result = await model_worker.transcribe(model_worker.AsrRequest(
+        pcm_s16le_base64=base64.b64encode(bytes(64000)).decode(), sample_rate=16000,
+        language="en", result_mode="interim",
+    ))
+    assert result.text == "Synthetic preview"
+    assert result.speaker_observation is None
 
 
 @pytest.mark.asyncio

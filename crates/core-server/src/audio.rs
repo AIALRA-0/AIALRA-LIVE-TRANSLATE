@@ -2,7 +2,7 @@
 
 use crate::app::ApiError;
 use crate::app::AppState;
-use crate::jobs::enqueue_asr;
+use crate::jobs::{AsrWindow, enqueue_asr_window};
 use crate::projects::hash_token;
 use aialra_core_domain::SessionState;
 use aialra_event_store::{AudioChunkRecord, AudioWindowRecord};
@@ -20,15 +20,17 @@ const SAMPLE_RATE: u32 = 16_000;
 const CHANNELS: u16 = 1;
 const PCM_BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * 2;
 // A fixed public-reference comparison reduced both original and weak-speech
-// errors with a four-second minimum. Transport ACKs remain one-second blocks;
+// errors with a longer minimum. Transport ACKs remain one-second blocks;
 // an explicit stop seals any shorter remainder immediately.
-const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 4;
-// The 16 s candidate with short-silence protection reduced fixed-reference
-// edits from 43 to 31. Pauses still seal after the four-second minimum.
-// This favors acoustic context over latency; it is not a three-second preview.
-const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 16;
-const SILENCE_LOOKBACK_BYTES: usize = PCM_BYTES_PER_SECOND * 450 / 1_000;
-// A quiet phrase tail must be quiet in every 20 ms frame. Averaging 450 ms
+const MIN_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 6;
+// Fixed public-reference qualification reduced the difficult long-sample edits
+// while keeping one-request CUDA latency below two seconds. Interim snapshots
+// provide responsiveness without translating or committing unfinished speech.
+const MAX_ASR_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 24;
+const SILENCE_LOOKBACK_BYTES: usize = PCM_BYTES_PER_SECOND * 800 / 1_000;
+const PREVIEW_INTERVAL_BYTES: usize = PCM_BYTES_PER_SECOND * 3;
+const PREVIEW_WINDOW_BYTES: usize = PCM_BYTES_PER_SECOND * 12;
+// A quiet phrase tail must be quiet in every 20 ms frame. Averaging 800 ms
 // at an amplitude of 550 (~-35 dBFS) classified weak speech as silence.
 // This conservative energy guard does not discard audio or claim to be a VAD.
 const SILENCE_FRAME_SAMPLES: usize = 320;
@@ -209,7 +211,7 @@ async fn persist_frame(
 }
 
 fn trailing_audio_is_silent(pcm: &[u8]) -> bool {
-    // A 450 ms quiet tail closes a phrase after the four-second minimum window.
+    // A sustained quiet tail closes a phrase after the minimum context window.
     let lookback_start = pcm.len().saturating_sub(SILENCE_LOOKBACK_BYTES);
     let trailing = &pcm[lookback_start..];
     if trailing.len() < SILENCE_LOOKBACK_BYTES {
@@ -336,10 +338,35 @@ fn assemble_source(
             }
         }
         if !(closed || seal_tail && index == chunks.len()) {
+            maybe_enqueue_preview(
+                state,
+                session_id,
+                source_id,
+                captured_at_ms,
+                first_sequence,
+                last_sequence,
+                &pcm,
+            )?;
             break;
         }
         let stored = state.objects.put(&pcm)?;
-        enqueue_asr(state, session_id, source_id, captured_at_ms, &pcm)?;
+        state
+            .store
+            .supersede_queued_asr_previews(session_id, source_id, last_sequence)?;
+        enqueue_asr_window(
+            state,
+            session_id,
+            source_id,
+            AsrWindow {
+                captured_at_ms,
+                audio_end_ms: captured_at_ms
+                    .saturating_add((pcm.len() as u64 * 1_000) / PCM_BYTES_PER_SECOND as u64),
+                first_sequence,
+                last_sequence,
+                result_mode: "stable",
+            },
+            &pcm,
+        )?;
         state
             .store
             .record_audio_window_and_advance(&AudioWindowRecord {
@@ -356,6 +383,46 @@ fn assemble_source(
         queued += 1;
     }
     Ok(queued)
+}
+
+fn maybe_enqueue_preview(
+    state: &AppState,
+    session_id: &str,
+    source_id: &str,
+    captured_at_ms: u64,
+    first_sequence: u64,
+    last_sequence: u64,
+    pcm: &[u8],
+) -> anyhow::Result<()> {
+    if pcm.len() < PREVIEW_INTERVAL_BYTES
+        || (pcm.len() / PREVIEW_INTERVAL_BYTES) * PREVIEW_INTERVAL_BYTES != pcm.len()
+    {
+        return Ok(());
+    }
+    state.store.supersede_queued_asr_previews(
+        session_id,
+        source_id,
+        last_sequence.saturating_sub(1),
+    )?;
+    let preview_start = pcm.len().saturating_sub(PREVIEW_WINDOW_BYTES);
+    let preview = &pcm[preview_start..];
+    let preview_start_ms =
+        captured_at_ms.saturating_add((preview_start as u64 * 1_000) / PCM_BYTES_PER_SECOND as u64);
+    enqueue_asr_window(
+        state,
+        session_id,
+        source_id,
+        AsrWindow {
+            captured_at_ms: preview_start_ms,
+            audio_end_ms: captured_at_ms
+                .saturating_add((pcm.len() as u64 * 1_000) / PCM_BYTES_PER_SECOND as u64),
+            first_sequence,
+            last_sequence,
+            result_mode: "interim",
+        },
+        preview,
+    )?;
+    Ok(())
 }
 
 fn extract_lease_token(headers: &HeaderMap) -> Option<&str> {
@@ -376,7 +443,7 @@ mod tests {
         trailing_audio_is_silent,
     };
     use crate::app::AppState;
-    use crate::jobs::enqueue_asr;
+    use crate::jobs::{AsrWindow, enqueue_asr_window};
     use aialra_event_store::{AudioChunkRecord, NewSession};
     use chrono::Utc;
 
@@ -526,7 +593,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 assemble_source(&state, session_id, source_id, false).unwrap(),
-                usize::from(sequence == 4)
+                usize::from(sequence == 6)
             );
         }
         assert_eq!(
@@ -534,7 +601,7 @@ mod tests {
                 .store
                 .audio_assembly_cursor(session_id, source_id)
                 .unwrap(),
-            Some(4)
+            Some(6)
         );
         assert_eq!(
             assemble_source(&state, session_id, source_id, true).unwrap(),
@@ -564,6 +631,7 @@ mod tests {
                     .unwrap()
                     .unwrap()
             })
+            .filter(|job| job.input["result_mode"] == "stable")
             .collect::<Vec<_>>();
         jobs.sort_by_key(|job| job.input["captured_at_ms"].as_u64().unwrap());
         assert_eq!(jobs.len(), 2);
@@ -580,7 +648,101 @@ mod tests {
     }
 
     #[test]
-    fn assembler_keeps_uninterrupted_speech_beyond_eight_seconds_and_seals_at_sixteen() {
+    fn interim_snapshots_never_advance_audio_or_crowd_out_the_stable_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        let session_id = "session_interim_snapshot";
+        let source_id = "browser-mic-g1";
+        state
+            .store
+            .create_session(&NewSession {
+                id: session_id.into(),
+                title: "Synthetic interim".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for sequence in 1..=6_u64 {
+            let mut pcm = [0x10_u8, 0x27_u8].repeat(PCM_BYTES_PER_SECOND / 2);
+            if sequence == 6 {
+                pcm[PCM_BYTES_PER_SECOND - SILENCE_LOOKBACK_BYTES..].fill(0);
+            }
+            let stored = state.objects.put(&pcm).unwrap();
+            state
+                .store
+                .insert_audio_chunk(&AudioChunkRecord {
+                    session_id: session_id.into(),
+                    source_id: source_id.into(),
+                    sequence,
+                    captured_at_ms: sequence * 1_000,
+                    sample_rate: 16_000,
+                    channels: 1,
+                    encoding: "pcm_s16le".into(),
+                    duration_ms: 1_000,
+                    object_hash: stored.hash,
+                    size_bytes: stored.size_bytes,
+                    acknowledged_at: Utc::now(),
+                })
+                .unwrap();
+            assemble_source(&state, session_id, source_id, false).unwrap();
+        }
+        assert_eq!(
+            state
+                .store
+                .audio_assembly_cursor(session_id, source_id)
+                .unwrap(),
+            Some(6)
+        );
+        let jobs = state
+            .store
+            .list_events(session_id)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "model.job.queued")
+            .filter_map(|event| {
+                state
+                    .store
+                    .get_model_job(event.payload["job_id"].as_str()?)
+                    .ok()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| job.input["result_mode"] == "interim")
+                .count(),
+            1
+        );
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| job.input["result_mode"] == "stable")
+                .count(),
+            1
+        );
+        let preview = jobs
+            .iter()
+            .find(|job| job.input["result_mode"] == "interim")
+            .unwrap();
+        assert_eq!(preview.status, "completed");
+        assert_eq!(
+            preview.last_error_kind.as_deref(),
+            Some("newer_asr_snapshot")
+        );
+        assert_eq!(
+            state
+                .store
+                .model_queue_counts(Some(session_id))
+                .unwrap()
+                .queued,
+            1
+        );
+    }
+
+    #[test]
+    fn assembler_keeps_uninterrupted_speech_beyond_sixteen_seconds_and_seals_at_twenty_four() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
         state
@@ -597,7 +759,7 @@ mod tests {
             .unwrap();
         let pcm = [0x10_u8, 0x27_u8].repeat(PCM_BYTES_PER_SECOND / 2);
         let stored = state.objects.put(&pcm).unwrap();
-        for sequence in 1..=17 {
+        for sequence in 1..=25 {
             state
                 .store
                 .insert_audio_chunk(&AudioChunkRecord {
@@ -614,7 +776,7 @@ mod tests {
                     acknowledged_at: Utc::now(),
                 })
                 .unwrap();
-            if sequence == 8 {
+            if sequence == 16 {
                 assert_eq!(
                     assemble_source(&state, "session_long_speech", "browser-mic-g1", false)
                         .unwrap(),
@@ -632,9 +794,9 @@ mod tests {
                 .store
                 .audio_assembly_cursor("session_long_speech", "browser-mic-g1")
                 .unwrap(),
-            Some(16)
+            Some(24)
         );
-        assert_eq!(MAX_ASR_WINDOW_BYTES, PCM_BYTES_PER_SECOND * 16);
+        assert_eq!(MAX_ASR_WINDOW_BYTES, PCM_BYTES_PER_SECOND * 24);
         assert_eq!(
             assemble_source(&state, "session_long_speech", "browser-mic-g1", true).unwrap(),
             1
@@ -644,7 +806,7 @@ mod tests {
                 .store
                 .audio_assembly_cursor("session_long_speech", "browser-mic-g1")
                 .unwrap(),
-            Some(17)
+            Some(25)
         );
     }
 
@@ -665,9 +827,22 @@ mod tests {
             })
             .unwrap();
         let pcm = vec![7_u8; 64_000];
-        enqueue_asr(&state, "session_repeated_audio", "network-g1", 1_000, &pcm).unwrap();
-        enqueue_asr(&state, "session_repeated_audio", "network-g1", 9_000, &pcm).unwrap();
-        enqueue_asr(&state, "session_repeated_audio", "network-g1", 1_000, &pcm).unwrap();
+        for captured_at_ms in [1_000, 9_000, 1_000] {
+            enqueue_asr_window(
+                &state,
+                "session_repeated_audio",
+                "network-g1",
+                AsrWindow {
+                    captured_at_ms,
+                    audio_end_ms: captured_at_ms + 2_000,
+                    first_sequence: 0,
+                    last_sequence: 0,
+                    result_mode: "stable",
+                },
+                &pcm,
+            )
+            .unwrap();
+        }
         assert_eq!(
             state
                 .store
