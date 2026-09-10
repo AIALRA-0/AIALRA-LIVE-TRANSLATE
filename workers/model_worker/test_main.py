@@ -549,6 +549,23 @@ def test_term_evidence_rejects_invalid_sources_without_silently_dropping_terms(
     }, request) is None
 
 
+def test_explanation_can_keep_complete_summary_after_term_evidence_repair_fails() -> None:
+    request = ExplanationRequest(
+        segments=[EvidenceSegment(id="first", text="A cache stores reusable data.")],
+        target_language="zh-CN",
+    )
+    bound = model_worker._bind_explanation_sources({
+        "sections": [{"source_indexes": [0], "explanation": "缓存用于保存可复用的数据。"}],
+        "terms": [{
+            "term": "缓存", "explanation": "保存数据的存储层。",
+            "evidence": [{"kind": "segment", "index": 0, "quote": "paraphrased quote"}],
+        }],
+    }, request, drop_invalid_terms=True)
+    assert bound is not None
+    assert bound["paragraph_summary"] == "缓存用于保存可复用的数据。"
+    assert bound["terms"] == []
+
+
 @pytest.mark.parametrize("indexes", [[0], [0, 0], [1, 0], [0, 2], [0, True]])
 def test_explanation_rejects_missing_duplicated_or_reordered_source_coverage(
     indexes: list[object],
@@ -976,6 +993,41 @@ async def test_topic_verification_can_veto_a_language_switch(
     }]
     for invalid in invalid_responses:
         assert not model_worker._topic_decisions_valid(invalid, [2])
+
+
+@pytest.mark.asyncio
+async def test_explanation_repairs_term_evidence_before_preserving_valid_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "sections": [{"source_indexes": [0], "explanation": "缓存用于保存可复用的数据。"}],
+        "terms": [{
+            "term": "缓存", "explanation": "保存数据的存储层。",
+            "evidence": [{"kind": "segment", "index": 0, "quote": "paraphrased quote"}],
+        }],
+    }
+
+    async def infer(*_args: object, **kwargs: object) -> dict[str, object]:
+        accept = kwargs["accept"]
+        assert callable(accept)
+        assert not accept(payload)
+        assert accept(payload)
+        return payload
+
+    async def no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(model_worker, "_shared_resident_models", lambda: False)
+    monkeypatch.setattr(model_worker, "_unload_ollama_model", no_op)
+    monkeypatch.setattr(model_worker, "_release_asr_model_sync", lambda: None)
+    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", no_op)
+    monkeypatch.setattr(model_worker, "_ollama_json", infer)
+    result = await model_worker.explain(ExplanationRequest(
+        segments=[EvidenceSegment(id="first", text="A cache stores reusable data.")],
+        target_language="zh-CN",
+    ))
+    assert result.paragraph_summary == "缓存用于保存可复用的数据。"
+    assert result.terms == []
 
 
 @pytest.mark.asyncio

@@ -832,6 +832,17 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
         },
         ensure_ascii=False,
     )
+    validation_attempt = 0
+
+    def accept_explanation(payload: dict[str, Any]) -> bool:
+        nonlocal validation_attempt
+        validation_attempt += 1
+        return _explanation_candidate_ok(
+            payload,
+            request,
+            drop_invalid_terms=validation_attempt > 1,
+        )
+
     try:
         result = await _ollama_json(
             system,
@@ -890,7 +901,7 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
             attempts=2,
             thinking=False,
             presence_penalty=0,
-            accept=lambda payload: _explanation_candidate_ok(payload, request),
+            accept=accept_explanation,
             repair_instruction=(
                 "Every segment index must occur exactly once in sections, in order. "
                 "For each term, copy a short quote verbatim from the source at its stated index, "
@@ -900,7 +911,7 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
     finally:
         await _restore_realtime_translation_model(EXPLANATION_MODEL)
     if isinstance(result, dict):
-        bound = _bind_explanation_sources(result, request)
+        bound = _bind_explanation_sources(result, request, drop_invalid_terms=True)
         normalized = _normalize_explanation(bound, segment_ids, page_ids) if bound else None
         if normalized is not None:
             normalized.provider = f"ollama:{EXPLANATION_MODEL}@{LLM_DEVICE}"
@@ -1855,12 +1866,14 @@ def _uses_requested_explanation_language(
 
 
 def _bind_explanation_sources(
-    raw: dict[str, Any], request: ExplanationRequest,
+    raw: dict[str, Any], request: ExplanationRequest, *, drop_invalid_terms: bool = False,
 ) -> dict[str, Any] | None:
     """Verify quotes before converting model-local indexes into trusted source IDs.
 
     This proves source presence, not that the definition is semantically correct.
-    Invalid references reject the whole response instead of silently losing terms.
+    The first model attempt rejects invalid references so the repair prompt can
+    fix them. After that repair, an invalid optional term is omitted rather than
+    discarding an otherwise complete explanation of the supplied paragraphs.
     """
 
     sections = raw.get("sections")
@@ -1889,37 +1902,52 @@ def _bind_explanation_sources(
     bound_terms = []
     for item in terms:
         if not isinstance(item, dict):
+            if drop_invalid_terms:
+                continue
             return None
         evidence = item.get("evidence")
         if not isinstance(evidence, list) or not evidence:
+            if drop_invalid_terms:
+                continue
             return None
         segment_ids: list[str] = []
         page_ids: list[str] = []
+        valid_term = True
         for reference in evidence:
             if not isinstance(reference, dict):
-                return None
+                valid_term = False
+                break
             index = reference.get("index")
             quote = reference.get("quote")
             kind = reference.get("kind")
             if type(index) is not int or index < 0 or not isinstance(quote, str):
-                return None
+                valid_term = False
+                break
             quote = " ".join(quote.split())
             if not quote:
-                return None
+                valid_term = False
+                break
             if kind == "segment" and index < len(request.segments):
                 segment = request.segments[index]
                 if quote not in " ".join(segment.text.split()):
-                    return None
+                    valid_term = False
+                    break
                 if segment.id not in segment_ids:
                     segment_ids.append(segment.id)
             elif kind == "page" and index < len(request.asset_pages):
                 page = request.asset_pages[index]
                 if quote not in " ".join(f"{page.title}\n{page.text}".split()):
-                    return None
+                    valid_term = False
+                    break
                 if page.id not in page_ids:
                     page_ids.append(page.id)
             else:
-                return None
+                valid_term = False
+                break
+        if not valid_term:
+            if drop_invalid_terms:
+                continue
+            return None
         bound_terms.append({
             "term": item.get("term"), "explanation": item.get("explanation"),
             "evidence_segment_ids": segment_ids, "asset_page_ids": page_ids,
@@ -1931,8 +1959,15 @@ def _bind_explanation_sources(
     }
 
 
-def _explanation_candidate_ok(raw: dict[str, Any], request: ExplanationRequest) -> bool:
-    bound = _bind_explanation_sources(raw, request)
+def _explanation_candidate_ok(
+    raw: dict[str, Any],
+    request: ExplanationRequest,
+    *,
+    drop_invalid_terms: bool = False,
+) -> bool:
+    bound = _bind_explanation_sources(
+        raw, request, drop_invalid_terms=drop_invalid_terms,
+    )
     return (
         bound is not None and _has_explanation_shape(bound)
         and _uses_requested_explanation_language(bound, request.target_language)
