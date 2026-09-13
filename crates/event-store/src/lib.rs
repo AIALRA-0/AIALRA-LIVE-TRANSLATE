@@ -1789,6 +1789,17 @@ impl EventStore {
         self.get_model_job_by_key(key)
     }
 
+    /// Retry transient teaching failures for one owned course. Reuse the
+    /// original job and evidence snapshot so no duplicate card is created.
+    pub fn requeue_failed_explanations(&self, session_id: &str) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?2, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?2, completed_at = NULL WHERE session_id = ?1 AND job_type = 'explain' AND status = 'failed' AND last_error_kind IN ('model_http_error', 'provider_unavailable')",
+            params![session_id, now],
+        )?)
+    }
+
     /// Expired leases return to the queue before one compatible job is leased atomically.
     pub fn lease_model_job(
         &self,
@@ -3641,6 +3652,55 @@ mod tests {
         assert_eq!(requeued.status, "queued");
         assert_eq!(requeued.attempts, 0);
         assert_eq!(store.model_queue_counts(None).unwrap().queued, 1);
+    }
+
+    #[test]
+    fn transient_explanation_retry_reuses_job_and_stays_within_course() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        store.create_session(&test_session()).unwrap();
+        for (id, kind) in [
+            ("transient", "model_http_error"),
+            ("permanent", "material_parse_failed"),
+        ] {
+            let job = store
+                .enqueue_model_job(&NewModelJob {
+                    id: id.to_owned(),
+                    session_id: "session_test".to_owned(),
+                    job_type: "explain".to_owned(),
+                    priority: 40,
+                    input: json!({"segments": []}),
+                    input_object_hash: None,
+                    idempotency_key: format!("explain:{id}"),
+                })
+                .unwrap();
+            store
+                .lease_model_job_for("worker", &["explain".into()], 60, Some(&job.id))
+                .unwrap()
+                .unwrap();
+            store
+                .retry_or_fail_model_job(&job.id, "worker", kind, false, 1)
+                .unwrap();
+        }
+        assert_eq!(
+            store.requeue_failed_explanations("other_session").unwrap(),
+            0
+        );
+        assert_eq!(
+            store.requeue_failed_explanations("session_test").unwrap(),
+            1
+        );
+        assert_eq!(
+            store.requeue_failed_explanations("session_test").unwrap(),
+            0
+        );
+        let retried = store.get_model_job("transient").unwrap().unwrap();
+        assert_eq!(retried.status, "queued");
+        assert_eq!(retried.attempts, 0);
+        assert_eq!(
+            store.get_model_job("permanent").unwrap().unwrap().status,
+            "failed"
+        );
     }
 
     #[test]

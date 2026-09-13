@@ -169,7 +169,7 @@ export const api = {
       fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/summary`, { method: "POST" }),
     ),
   ensureTopics: (projectId: string, sessionId: string) =>
-    checked<{ queued: boolean }>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/topics/ensure`, { method: "POST" })),
+    checked<{ queued: boolean; retried: number }>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/topics/ensure`, { method: "POST" })),
   dingtalkCapabilities: (sessionId: string) =>
     checked<DingtalkCapabilities>(
       fetch(`/api/v1/sessions/${sessionId}/dingtalk/capabilities`),

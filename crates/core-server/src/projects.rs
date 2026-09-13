@@ -714,7 +714,12 @@ pub async fn ensure_session_topics(
         .get_recording_lease(&project_id)?
         .is_some_and(|lease| lease.session_id == session_id && lease.expires_at > Utc::now());
     let queued = crate::topics::enqueue_pending(&state, &session_id, !has_active_lease)?;
-    Ok(Json(json!({"queued": queued})))
+    let retried = if has_active_lease {
+        0
+    } else {
+        state.store.requeue_failed_explanations(&session_id)?
+    };
+    Ok(Json(json!({"queued": queued, "retried": retried})))
 }
 
 fn project_sse_event(update: &ProjectUpdateRecord) -> Event {
@@ -1083,6 +1088,44 @@ mod tests {
                 .unwrap()
                 .queued,
             1
+        );
+        let failed = state
+            .store
+            .enqueue_model_job(&NewModelJob {
+                id: "failed-topic-explanation".into(),
+                session_id: "session_topic_owner".into(),
+                job_type: "explain".into(),
+                priority: 30,
+                input: json!({"segments": []}),
+                input_object_hash: None,
+                idempotency_key: "explain:topic-owner".into(),
+            })
+            .unwrap();
+        state
+            .store
+            .lease_model_job_for("worker", &["explain".into()], 60, Some(&failed.id))
+            .unwrap()
+            .unwrap();
+        state
+            .store
+            .retry_or_fail_model_job(&failed.id, "worker", "model_http_error", false, 1)
+            .unwrap();
+        let Json(retry) = ensure_session_topics(
+            State(state.clone()),
+            Extension(CurrentUser("owner".into())),
+            Path(("project_topic_owner".into(), "session_topic_owner".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry["retried"], 1);
+        assert_eq!(
+            state
+                .store
+                .get_model_job(&failed.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
         );
     }
 

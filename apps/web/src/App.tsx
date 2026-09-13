@@ -742,7 +742,7 @@ function DocumentItem({ item, languageView, sessionId }: { item: TimelineItem; l
   );
 }
 
-function ParagraphInsightPanel({ items, documentRef }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null> }) {
+function ParagraphInsightPanel({ items, documentRef, retryAvailable, retrying, onRetry }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null>; retryAvailable: boolean; retrying: boolean; onRetry: () => void }) {
   const paragraphs = useMemo(() => items.filter((item) => item.kind === "paragraph"), [items]);
   const insights = items.filter((item) => item.kind === "insight");
   const [currentParagraphId, setCurrentParagraphId] = useState<string | null>(paragraphs.at(-1)?.id ?? null);
@@ -778,6 +778,7 @@ function ParagraphInsightPanel({ items, documentRef }: { items: TimelineItem[]; 
       {groupParagraphs.length ? <details className="paragraph-insight-source"><summary>{insight ? "本组覆盖" : "尚未整理"} {groupParagraphs.length} 个段落 · 查看原文</summary><p>{groupParagraphs.map((item) => item.original).join(" ")}</p></details> : <p>积累一大段课程内容后，这里会显示总结和知识补充。</p>}
       <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "相似内容会保持在一起，确认话题转折后再统一整理；停止录音时会整理尚未完成的内容，不逐句总结"}</p></section>
       <section className="paragraph-terms-section"><strong>知识补充</strong><p className="form-help">以下为帮助理解的背景解释，不是老师原话；有资料链接的词条已经过来源核对</p>{terms.length ? terms.map((term, index) => <details key={`${term.label}:${index}`}><summary>{term.label.replace("知识补充 · ", "")}</summary><p>{term.text}</p>{term.backgroundReference && <a href={term.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}</details>) : <p>当前内容组还没有检测到需要解释的专业名词或缩写</p>}</section>
+      {retryAvailable && <button type="button" className="secondary-button" disabled={retrying} onClick={onRetry}>{retrying ? "正在重新排队" : "重试失败的讲解"}</button>}
     </section>
   );
 }
@@ -836,6 +837,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const topicEnsureStarted = useRef(false);
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [notice, setNotice] = useState("");
+  const [retryingExplanation, setRetryingExplanation] = useState(false);
   const [busy, setBusy] = useState(false);
   const [lease, setLease] = useState<RecordingLease | null>(null);
   const [captureActive, setCaptureActive] = useState(false);
@@ -1378,6 +1380,29 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       && event.payload.job_type === "translate" ? index : latest
   ), -1);
   const translationIssue = translationDegraded || latestTranslationIssueIndex > latestTranslationEventIndex;
+  const explanationJobStatus = new Map<string, { event: string; errorKind: string }>();
+  for (const event of timeline.events) {
+    if (event.event_type.startsWith("model.job.") && event.payload.job_type === "explain"
+      && typeof event.payload.job_id === "string") {
+      explanationJobStatus.set(event.payload.job_id, {
+        event: event.event_type,
+        errorKind: typeof event.payload.error_kind === "string" ? event.payload.error_kind : "",
+      });
+    }
+  }
+  const explanationRetryAvailable = [...explanationJobStatus.values()].some(({ event, errorKind }) =>
+    event === "model.job.failed" && ["model_http_error", "provider_unavailable"].includes(errorKind));
+  const retryExplanations = async () => {
+    setRetryingExplanation(true);
+    try {
+      const result = await api.ensureTopics(project.id, initial.id);
+      setNotice(result.retried ? `已重新排队 ${result.retried} 项讲解；录音内容保持不变` : "当前没有可重试的讲解任务");
+    } catch {
+      setNotice("讲解重新排队失败，请稍后重试；已保存的录音不受影响");
+    } finally {
+      setRetryingExplanation(false);
+    }
+  };
   const visibleCaptureStatus = stopPending ? "本机不再收音；确认音频保存和课程结束后，才会完成本次停止"
     : session.state === "processing"
     ? "录音已停止，音频已保存，后台正在生成结果"
@@ -1548,7 +1573,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="primary-button" disabled>等待后台处理完成</button>
             )}
           </section>
-          <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} />
+          <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} retryAvailable={explanationRetryAvailable} retrying={retryingExplanation} onRetry={() => void retryExplanations()} />
           <GpuPanel runtime={runtime} />
           <section className="side-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
