@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from workers.gpu_agent.reviewed_definitions import reviewed_definition
+from workers.model_worker.terminology import matching_technical_terms
 
 PartCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -133,6 +134,28 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
             for source in matching:
                 if source["id"] not in references:
                     references.append(source["id"])
+    # A verified glossary entry should not disappear merely because a model
+    # omitted it from the optional inventory. Both source presence and the
+    # reviewed domain-specific definition remain mandatory.
+    for source_term, _preferred in matching_technical_terms(
+        [source["text"] for source in segments], target,
+    ):
+        for index, (kind, sources) in enumerate(chunks):
+            if kind != "segment" or not contains_term(source_term, texts[index]):
+                continue
+            piece = texts[index]
+            context = texts[max(0, index - 1):index] + texts[index + 1:index + 2]
+            if reviewed_definition(source_term, piece, target, context) is None:
+                continue
+            key = " ".join(source_term.split()).casefold()
+            record = term_sources.setdefault(key, {
+                "original_term": source_term, "text": piece, "context": context,
+                "segment_ids": [], "page_ids": [],
+            })
+            for source in sources:
+                if (contains_term(source_term, source["text"])
+                        and source["id"] not in record["segment_ids"]):
+                    record["segment_ids"].append(source["id"])
     definitions: list[dict[str, Any]] = []
     for term_source in term_sources.values():
         reviewed = reviewed_definition(

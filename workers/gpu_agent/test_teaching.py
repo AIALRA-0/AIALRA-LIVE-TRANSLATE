@@ -35,6 +35,21 @@ async def test_term_reference_does_not_include_a_substring_only_paragraph() -> N
     assert result["terms"][0]["evidence_segment_ids"] == ["a"]
 
 
+@pytest.mark.asyncio
+async def test_reviewed_source_term_survives_an_empty_model_inventory() -> None:
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        assert body["phase"] == "prose"
+        return {"provider": "ollama:synthetic@cuda", "prose": "说明分区间的连接代价。",
+                "original_terms": []}
+
+    result = await assemble_explanation({
+        "segments": [{"id": "first", "text": "Circuit partitioning reduces cut size."}],
+        "target_language": "zh-CN",
+    }, call)
+    assert result["terms"][0]["evidence_segment_ids"] == ["first"]
+    assert result["terms"][0]["background_reference"].startswith("https://")
+
+
 @pytest.mark.parametrize("text", ["word " * 1500, "术语，条件。" * 900, "x" * 5000])
 def test_source_pieces_preserve_every_character(text: str) -> None:
     parts = source_pieces(text)
