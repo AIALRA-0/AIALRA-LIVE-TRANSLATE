@@ -39,6 +39,7 @@ from workers.model_worker.main import (
     _uses_requested_explanation_language,
 )
 from workers.model_worker.speakers import SpeakerObservation
+from workers.model_worker.teaching import TeachingPartRequest, TeachingPartResponse
 
 
 def test_asr_cpu_threads_stays_within_safe_host_bounds() -> None:
@@ -1028,6 +1029,68 @@ async def test_explanation_repairs_term_evidence_before_preserving_valid_summary
     ))
     assert result.paragraph_summary == "缓存用于保存可复用的数据。"
     assert result.terms == []
+
+
+@pytest.mark.asyncio
+async def test_group_explanation_prompt_names_every_required_source_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def infer(
+        _system: str, user: str, *_args: object, **_kwargs: object,
+    ) -> dict[str, object]:
+        request = json.loads(user[user.index("{"):])
+        assert request["required_shape"]["sections"][0]["source_indexes"] == [0, 1, 2]
+        return {"sections": [{"source_indexes": [0, 1, 2],
+                              "explanation": "三段内容共同说明这个技术概念。"}], "terms": []}
+
+    async def no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(model_worker, "_unload_ollama_model", no_op)
+    monkeypatch.setattr(model_worker, "_release_asr_model_sync", lambda: None)
+    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", no_op)
+    monkeypatch.setattr(model_worker, "_ollama_json", infer)
+    result = await model_worker.explain(ExplanationRequest(
+        segments=[EvidenceSegment(id=f"synthetic-{index}", text=f"Point {index}.")
+                  for index in range(3)],
+        target_language="zh-CN",
+    ))
+    assert result.evidence_segment_ids == ["synthetic-0", "synthetic-1", "synthetic-2"]
+
+
+@pytest.mark.asyncio
+async def test_split_teaching_releases_realtime_weights_and_restores_gpu_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def unload(_model: str) -> None:
+        calls.append("unload_background")
+
+    def release() -> None:
+        calls.append("release_realtime")
+
+    async def generate(*_args: object) -> TeachingPartResponse:
+        calls.append("generate")
+        return TeachingPartResponse(
+            prose="完整解释。", original_terms=[], provider="ollama:test@cuda",
+        )
+
+    async def restore(_model: str) -> None:
+        calls.append("restore")
+
+    monkeypatch.setattr(model_worker, "_shared_resident_models", lambda: False)
+    monkeypatch.setattr(model_worker, "_unload_ollama_model", unload)
+    monkeypatch.setattr(model_worker, "_release_asr_model_sync", release)
+    monkeypatch.setattr(model_worker, "generate_part", generate)
+    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", restore)
+    result = await model_worker.teaching_part(TeachingPartRequest(
+        phase="prose", text="Synthetic lecture paragraph.", target_language="zh-CN",
+    ))
+    assert result.prose == "完整解释。"
+    assert calls == [
+        "unload_background", "unload_background", "release_realtime", "generate", "restore",
+    ]
 
 
 @pytest.mark.asyncio

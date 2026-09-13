@@ -747,9 +747,18 @@ def _translation_contract_ok(
 @single_gpu_call
 async def teaching_part(request: TeachingPartRequest) -> TeachingPartResponse:
     """Each bounded call releases the shared LLM lane before the next part."""
-    if not _shared_resident_models():
-        raise HTTPException(409, "shared_teaching_layout_required")
-    result = await generate_part(request, _ollama_json, EXPLANATION_MODEL, LLM_DEVICE)
+    shared = _shared_resident_models()
+    if not shared:
+        await _unload_ollama_model(VISION_MODEL)
+        await _unload_ollama_model(SUMMARY_MODEL)
+        await asyncio.to_thread(_release_asr_model_sync)
+    try:
+        result = await generate_part(request, _ollama_json, EXPLANATION_MODEL, LLM_DEVICE)
+    finally:
+        if not shared:
+            # An ASR request can run between parts; free Ollama VRAM before
+            # releasing the GPU lane instead of stacking two model families.
+            await _restore_realtime_translation_model(EXPLANATION_MODEL)
     if result is None:
         raise HTTPException(503, "teaching_part_contract_invalid")
     return result
@@ -778,8 +787,9 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
         "When target_language starts with zh, write every natural-language field "
         "in Simplified Chinese. "
         "Return only sections and a terms list. Each section has source_indexes and explanation. "
-        "Assign every supplied segment index exactly once, in original order. Adjacent segments "
-        "about the same idea can share a section. Write the actual explanation, not a report "
+        "Assign every supplied segment index exactly once, in original order. This is one "
+        "sealed topic group: prefer one section covering all supplied indexes. Write the actual "
+        "explanation, not a report "
         "saying 'this passage discusses' or a list of topic names. "
         "Explain the entire group's actual reasoning in one or more readable paragraphs: what "
         "is being discussed, how it works, why, and its conditions, exceptions and examples when "
@@ -823,7 +833,8 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
                 for index, page in enumerate(request.asset_pages)
             ],
             "required_shape": {
-                "sections": [{"source_indexes": [0], "explanation": "complete readable prose"}],
+                "sections": [{"source_indexes": list(range(len(request.segments))),
+                              "explanation": "complete readable prose"}],
                 "terms": [{
                     "term": "string", "explanation": "string",
                     "evidence": [{"kind": "segment or page", "index": 0, "quote": "exact text"}],

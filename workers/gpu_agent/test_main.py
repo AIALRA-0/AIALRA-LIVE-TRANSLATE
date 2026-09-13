@@ -67,6 +67,36 @@ def test_audio_digest_is_required_and_checked_before_inference() -> None:
     asyncio.run(scenario())
 
 
+def test_explanation_uses_bounded_parts_for_complete_group_coverage() -> None:
+    async def scenario() -> None:
+        paths: list[str] = []
+
+        def infer(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            body = json.loads(request.content)
+            assert body["phase"] == "prose"
+            return httpx.Response(200, json={
+                "prose": "两段内容形成一个连贯的解释。",
+                "original_terms": [], "provider": "ollama:test@cuda",
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(infer)) as model, \
+                   httpx.AsyncClient() as gateway:
+            result = await execute_job(gateway, model, {
+                "id": "synthetic-explain", "idempotency_key": "synthetic-explain",
+                "job_type": "explain", "input": {
+                    "segments": [{"id": "first", "text": "First complete idea."},
+                                 {"id": "second", "text": "Second related idea."}],
+                    "target_language": "zh-CN", "asset_pages": [],
+                },
+            }, GpuScheduler(asr_uses_gpu=False), "worker")
+        assert result["evidence_segment_ids"] == ["first", "second"]
+        assert result["paragraph_summary"] == "两段内容形成一个连贯的解释。"
+        assert paths == ["/v1/explain/part"]
+
+    asyncio.run(scenario())
+
+
 def test_failure_diagnostics_cover_all_stages_and_keep_a_fixed_wire_shape() -> None:
     diagnostic_id = new_diagnostic_id()
     assert len(diagnostic_id) == 21

@@ -552,8 +552,7 @@ async def execute_job(
             )
         except httpx.HTTPError as error:
             raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
-    elif (job_type == "explain" and
-          os.getenv("AIALRA_SHARED_RESIDENT_MODELS", "false").casefold() == "true") or (
+    elif job_type == "explain" or (
         job_type == "summarize" and model_input.get("summary_contract") == "complete_groups_v1"
     ):
         async def part(body: dict[str, Any]) -> dict[str, Any]:
@@ -583,7 +582,7 @@ async def execute_job(
         if timings is not None:
             timings["inference_ms"] = int((time.monotonic() - started) * 1000)
         return result
-    elif job_type in {"topic", "explain"}:
+    elif job_type == "topic":
         try:
             response = await _timed_request(
                 timings,
