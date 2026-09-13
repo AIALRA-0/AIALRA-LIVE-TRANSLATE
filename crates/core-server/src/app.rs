@@ -222,6 +222,7 @@ impl AppState {
         if matches!(
             event.event_type.as_str(),
             "paragraph.finalized"
+                | "transcript.corrected"
                 | "translation.finalized"
                 | "explanation.card.created"
                 | "session.summary.created"

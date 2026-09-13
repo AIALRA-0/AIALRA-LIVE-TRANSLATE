@@ -15,3 +15,14 @@ it("exports saved source and translation without leaking processing notices into
   expect(markdown).toContain("课程总结");
   expect(markdown).not.toContain("internal retry notice");
 });
+
+it("exports a corrected source without publishing its stale translation", () => {
+  const markdown = courseMarkdown("Synthetic", [{
+    id: "p1", kind: "paragraph", title: "段落", body: "corrected", original: "corrected",
+    recognizedOriginal: "wrong", translationStale: true, evidenceIds: [],
+    occurredAt: "2026-09-13T00:00:00Z",
+  }]);
+  expect(markdown).toContain("corrected");
+  expect(markdown).toContain("原译文待校对");
+  expect(markdown).not.toContain("wrong");
+});

@@ -61,6 +61,8 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
       recording_session_finished: "本次课程已结束，历史内容仍可查看；请返回项目新建课程",
       recording_session_archived: "课程在回收站中，请先恢复后查看课程状态",
       recording_session_unavailable: "本次课程当前不能继续录音，请先查看课程状态",
+      transcript_revision_conflict: "这段转写已在另一页面修订，草稿仍在本页，请先查看最新版本",
+      course_question_wait_for_completion: "请先结束课程并等待已录内容处理完成，再提问",
       workspace_trash_blocked_active_session: "课程仍在录音或处理中，请先停止录音并等待处理完成",
       service_unavailable: "后台服务暂时不可用，请稍后重试",
       upstream_provider_failed: "外部服务暂时不可用，本地课程流程仍可继续",
@@ -89,6 +91,14 @@ export const api = {
   saveNote: (sessionId: string, text: string, base_revision: number) => checked<{text: string; revision: number}>(fetch(`/api/v1/sessions/${sessionId}/notes`, {
     method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify({text, base_revision}),
   })),
+  correctTranscript: (sessionId: string, paragraphId: string, text: string, base_revision: number) =>
+    checked<{text: string; revision: number; translation_queued: boolean}>(fetch(`/api/v1/sessions/${sessionId}/paragraphs/${encodeURIComponent(paragraphId)}/correction`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, base_revision }),
+    })),
+  askCourseQuestion: (sessionId: string, question: string) =>
+    checked<{ job_id: string; status: string }>(fetch(`/api/v1/sessions/${sessionId}/questions`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question }),
+    })),
   workspace: (deviceId: string) => checked<WorkspaceSnapshot>(fetch(`/api/v1/workspace?device_id=${encodeURIComponent(deviceId)}`)),
   createFolder: (input: { title: string; parent_id: string | null; sort_order?: number }) => checked<WorkspaceFolder>(fetch("/api/v1/workspace/folders", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),

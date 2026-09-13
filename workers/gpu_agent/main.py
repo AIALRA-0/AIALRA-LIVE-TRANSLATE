@@ -60,7 +60,7 @@ LANES = (
     # leases also make the server-side pickup metric reflect actual worker
     # availability instead of the duration of the previous LLM generation.
     Lane("translate", ("translate",)),
-    Lane("explain", ("topic", "explain", "summarize", "asset_parse")),
+    Lane("explain", ("topic", "explain", "summarize", "asset_parse", "course_qa")),
 )
 
 
@@ -289,7 +289,7 @@ def provider_proves_local_execution(job_type: str, provider: str) -> bool:
             (provider.startswith("faster-whisper:") or provider.startswith("qwen3-asr:"))
             and provider.endswith(("@cpu", "@cuda"))
         )
-    if job_type in {"translate", "topic", "explain", "summarize"}:
+    if job_type in {"translate", "topic", "explain", "summarize", "course_qa"}:
         if job_type == "summarize" and provider == COMPILED_PROVIDER:
             return True
         if job_type == "translate" and provider.startswith("identity:"):
@@ -491,7 +491,9 @@ async def execute_job(
     if (
         not isinstance(job_id, str)
         or not job_id
-        or job_type not in {"asr", "translate", "topic", "explain", "summarize", "asset_parse"}
+        or job_type not in {
+            "asr", "translate", "topic", "explain", "summarize", "asset_parse", "course_qa",
+        }
         or not isinstance(model_input_value, dict)
         or not isinstance(idempotency_key, str)
         or not idempotency_key
@@ -582,6 +584,17 @@ async def execute_job(
         if timings is not None:
             timings["inference_ms"] = int((time.monotonic() - started) * 1000)
         return result
+    elif job_type == "course_qa":
+        try:
+            response = await _timed_request(
+                timings, "inference_ms",
+                lambda: scheduler.run_llm(lambda: model_post(
+                    model, f"{MODEL_WORKER_URL}/v1/course/question", json=model_input,
+                    timeout=180,
+                )),
+            )
+        except httpx.HTTPError as error:
+            raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
     elif job_type == "topic":
         try:
             response = await _timed_request(

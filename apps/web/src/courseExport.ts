@@ -9,6 +9,7 @@ export function courseMarkdown(title: string, items: TimelineItem[]): string {
     if (item.kind !== "paragraph") continue;
     const timestamp = Number.isFinite(item.audioStartMs) ? new Date(item.audioStartMs!).toLocaleString("zh-CN") : item.occurredAt;
     lines.push(`### ${timestamp}${item.speakerLabel ? ` · ${item.speakerLabel}` : ""}`, "", item.original || item.body, "");
+    if (item.translationStale) lines.push("人工修订，原译文待校对", "");
     if (item.translation && item.translation !== item.original) lines.push("译文：", "", item.translation, "");
   }
   const insights = items.filter((item) => item.kind === "insight");

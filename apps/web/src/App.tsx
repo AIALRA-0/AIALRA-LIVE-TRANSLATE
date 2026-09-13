@@ -5,9 +5,10 @@ import { applySessionStateEvent } from "./sessionState";
 import { RecordingWakeLock } from "./wakeLock";
 import { clearStopIntent, readStopIntent, saveStopIntent, type RecordingStopIntent } from "./recordingStop";
 import { UserNotes } from "./UserNotes";
+import { CourseQuestions } from "./CourseQuestions";
 import { SessionPlayer } from "./SessionPlayer";
 import { CourseOutline } from "./CourseOutline";
-import { downloadCourseMarkdown } from "./courseExport";
+import { courseMarkdown, downloadCourseMarkdown } from "./courseExport";
 import type { NoiseSuppressionMode } from "./noiseSuppression";
 import { appendEvent, buildCourseDocument, isCourseEvent, isRenderableDocumentItem } from "./timeline";
 import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, RecordingProjectStatus, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
@@ -726,6 +727,10 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
 function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }: { item: TimelineItem; languageView: LanguageView; sessionId: string; wholeAudioReady: boolean; onSeek: (capturedAtMs: number) => void }) {
   const [playing, setPlaying] = useState(false);
   const [playError, setPlayError] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [savingCorrection, setSavingCorrection] = useState(false);
+  const [correctionError, setCorrectionError] = useState("");
   const time = new Date(item.occurredAt).toLocaleTimeString("zh-CN", { hour12: false });
   if (item.kind === "preview") {
     return <article className="course-paragraph source-preview" data-testid="source-preview">
@@ -736,11 +741,28 @@ function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }
   if (item.kind === "paragraph") {
     return (
       <article id={`evidence-${item.id}`} className="course-paragraph" data-testid="course-paragraph">
-        <header>{item.speakerLabel && <span className="speaker-label">{item.speakerLabel}</span>}<time>{time}</time><button type="button" className="text-link-button" onClick={() => { if (wholeAudioReady && item.audioStartMs) onSeek(item.audioStartMs); else { setPlaying((current) => !current); setPlayError(false); } }}>{playing ? "关闭回放" : "定位回听"}</button></header>
+        <header>{item.speakerLabel && <span className="speaker-label">{item.speakerLabel}</span>}<time>{time}</time><button type="button" className="text-link-button" onClick={() => { if (wholeAudioReady && item.audioStartMs) onSeek(item.audioStartMs); else { setPlaying((current) => !current); setPlayError(false); } }}>{playing ? "关闭回放" : "定位回听"}</button><button type="button" className="text-link-button" onClick={() => { setDraft(item.original ?? ""); setCorrectionError(""); setEditing(true); }}>修订原文</button></header>
         {playing && <audio controls autoPlay preload="none" src={`/api/v1/sessions/${sessionId}/paragraphs/${item.id}/audio`} onPlay={(event) => { document.querySelectorAll("audio").forEach((audio) => { if (audio !== event.currentTarget) audio.pause(); }); }} onError={() => setPlayError(true)} />}
         {playError && <small role="status">这段音频暂时无法播放，请检查网络；旧版导入内容可能没有原始音频。</small>}
-        {(languageView !== "translation" || item.translationMode === "same_language") && <p className="source-text">{item.original}</p>}
-        {languageView !== "source" && <p className="translation-text">{item.translationMode === "same_language" ? "原文，无需翻译" : item.translation || "等待真实模型翻译"}</p>}
+        {(languageView !== "translation" || item.translationMode === "same_language") && <p className="source-text">{item.original}{item.recognizedOriginal && item.recognizedOriginal !== item.original && <small> · 人工修订</small>}</p>}
+        {item.recognizedOriginal && item.recognizedOriginal !== item.original && <details><summary>查看修订前的识别记录</summary><p>{item.recognizedOriginal}</p></details>}
+        {languageView !== "source" && <p className="translation-text">{item.translationStale ? "原文已人工修订，原译文不再作为当前结果显示" : item.translationMode === "same_language" ? "原文，无需翻译" : item.translation || "等待真实模型翻译"}</p>}
+        {item.translationStale && <button type="button" className="text-link-button" disabled={savingCorrection} onClick={() => {
+          setSavingCorrection(true); setCorrectionError("");
+          void api.correctTranscript(sessionId, item.id, item.original ?? "", item.correctionRevision ?? 0)
+            .then((result) => { if (!result.translation_queued) setCorrectionError("原文已保存，但重译尚未排队，请稍后再试"); })
+            .catch((error) => setCorrectionError(error instanceof Error ? error.message : "重译未排队，请重试"))
+            .finally(() => setSavingCorrection(false));
+        }}>重试修订后的翻译</button>}
+        {correctionError && !editing && <p role="alert">{correctionError}</p>}
+        {editing && <form className="transcript-correction" onSubmit={(event) => {
+          event.preventDefault();
+          setSavingCorrection(true); setCorrectionError("");
+          void api.correctTranscript(sessionId, item.id, draft, item.correctionRevision ?? 0)
+            .then((result) => { setEditing(false); if (!result.translation_queued) setCorrectionError("原文已保存，但重译尚未排队，请稍后再试"); })
+            .catch((error) => setCorrectionError(error instanceof Error ? error.message : "修订未保存，请重试"))
+            .finally(() => setSavingCorrection(false));
+        }}><label>修订原文<textarea value={draft} maxLength={16384} onChange={(event) => setDraft(event.target.value)} /></label><div><button type="submit" disabled={savingCorrection || !draft.trim()}>{savingCorrection ? "正在保存" : "保存修订"}</button><button type="button" disabled={savingCorrection} onClick={() => setEditing(false)}>取消</button></div>{correctionError && <p role="alert">{correctionError}</p>}</form>}
       </article>
     );
   }
@@ -1516,6 +1538,12 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             <div className="document-actions">
               {section === "transcript" && <input type="search" aria-label="搜索课程原文和译文" placeholder="搜索原文或译文" value={documentSearch} onChange={(event) => { setDocumentSearch(event.target.value); setVisibleItemLimit(TIMELINE_PAGE_SIZE); }} />}
               <button type="button" onClick={() => downloadCourseMarkdown(session.title, timeline.items)} disabled={!timeline.items.length}>导出课程笔记</button>
+              <button type="button" onClick={() => {
+                if (!navigator.clipboard?.writeText) { setNotice("当前浏览器不支持复制，请使用旁边的导出按钮"); return; }
+                void navigator.clipboard.writeText(courseMarkdown(session.title, timeline.items))
+                  .then(() => setNotice("课程笔记已复制，可自行选择分享对象"))
+                  .catch(() => setNotice("复制失败，请使用旁边的导出按钮"));
+              }} disabled={!timeline.items.length}>复制课程笔记</button>
             </div>
           </div>
           <div
@@ -1611,6 +1639,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             )}
           </section>
           <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} retryAvailable={explanationRetryAvailable} retrying={retryingExplanation} onRetry={() => void retryExplanations()} />
+          <CourseQuestions sessionId={session.id} sessionState={session.state} events={timeline.events} onEvidence={(id) => {
+            navigate(project.id, session.id, "transcript");
+            window.setTimeout(() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+          }} />
           <GpuPanel runtime={runtime} />
           <section className="side-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>

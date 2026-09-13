@@ -19,10 +19,12 @@ from pptx import Presentation
 import workers.model_worker.main as model_worker
 from workers.model_worker.main import (
     ASR_CPU_THREADS,
+    CourseQuestionRequest,
     EvidencePage,
     EvidenceSegment,
     ExplanationRequest,
     ExplanationResponse,
+    QuestionEvidence,
     SummaryRequest,
     _audio_has_speech,
     _clean_translation_output,
@@ -44,6 +46,30 @@ from workers.model_worker.teaching import TeachingPartRequest, TeachingPartRespo
 
 def test_asr_cpu_threads_stays_within_safe_host_bounds() -> None:
     assert 0 <= ASR_CPU_THREADS <= 32
+
+
+def test_course_question_rejects_unknown_citation_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_ollama(
+        _system: str, _user: str, _schema: dict[str, Any], **kwargs: Any,
+    ) -> dict[str, Any] | None:
+        candidate = {
+            "answer": "Synthetic answer", "sufficient_evidence": True,
+            "evidence_segment_ids": ["another-course"],
+        }
+        return candidate if kwargs["accept"](candidate) else None
+
+    monkeypatch.setattr(model_worker, "_shared_resident_models", lambda: True)
+    monkeypatch.setattr(model_worker, "_ollama_json", fake_ollama)
+    request = CourseQuestionRequest(
+        question="What is the synthetic topic?",
+        segments=[QuestionEvidence(id="p1", text="Synthetic topic")],
+        target_language="zh-CN",
+    )
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(model_worker.course_question(request))
+    assert raised.value.detail == "course_question_contract_invalid"
 
 
 def test_ollama_gpu_residency_requires_configured_model_and_near_full_vram() -> None:

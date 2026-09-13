@@ -61,8 +61,16 @@ async fn main() -> Result<()> {
             get(course_content::get_note).put(course_content::save_note),
         )
         .route(
+            "/sessions/{session_id}/questions",
+            post(course_content::ask_course_question),
+        )
+        .route(
             "/sessions/{session_id}/paragraphs/{paragraph_id}/audio",
             get(course_content::paragraph_audio),
+        )
+        .route(
+            "/sessions/{session_id}/paragraphs/{paragraph_id}/correction",
+            axum::routing::put(course_content::correct_transcript),
         )
         .route(
             "/sessions/{session_id}/audio/index",

@@ -97,6 +97,28 @@ def test_explanation_uses_bounded_parts_for_complete_group_coverage() -> None:
     asyncio.run(scenario())
 
 
+def test_course_question_runs_on_background_lane_with_cuda_proof() -> None:
+    async def scenario() -> None:
+        def infer(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/course/question"
+            return httpx.Response(200, json={
+                "answer": "Synthetic answer", "sufficient_evidence": True,
+                "evidence_segment_ids": ["p1"], "provider": "ollama:test@cuda",
+            })
+        async with httpx.AsyncClient(transport=httpx.MockTransport(infer)) as model, \
+                   httpx.AsyncClient() as gateway:
+            result = await execute_job(gateway, model, {
+                "id": "synthetic-qa", "idempotency_key": "synthetic-qa",
+                "job_type": "course_qa", "input": {
+                    "question": "What?", "segments": [{"id": "p1", "text": "Synthetic lecture"}],
+                    "target_language": "zh-CN",
+                },
+            }, GpuScheduler(asr_uses_gpu=False), "worker")
+        assert result["evidence_segment_ids"] == ["p1"]
+        assert provider_proves_local_execution("course_qa", result["provider"])
+    asyncio.run(scenario())
+
+
 def test_failure_diagnostics_cover_all_stages_and_keep_a_fixed_wire_shape() -> None:
     diagnostic_id = new_diagnostic_id()
     assert len(diagnostic_id) == 21
@@ -240,7 +262,7 @@ def test_latency_sensitive_model_jobs_have_independent_lanes() -> None:
     capabilities = {lane.suffix: lane.capabilities for lane in LANES}
     assert capabilities["asr"] == ("asr",)
     assert capabilities["translate"] == ("translate",)
-    assert capabilities["explain"] == ("topic", "explain", "summarize", "asset_parse")
+    assert capabilities["explain"] == ("topic", "explain", "summarize", "asset_parse", "course_qa")
 
 
 def test_topic_job_uses_background_endpoint_and_preserves_source_payload() -> None:

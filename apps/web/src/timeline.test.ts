@@ -22,6 +22,27 @@ function event(eventType: string, payload: Record<string, unknown>): EventEnvelo
 }
 
 describe("timeline mapping", () => {
+  it("shows the latest human correction while preserving the recognition and hiding stale translation", () => {
+    const paragraph = event("paragraph.finalized", { paragraph_id: "p1", text: "recognition" });
+    const translation = event("translation.finalized", { paragraph_id: "p1", text: "old translation" });
+    const first = { ...event("transcript.corrected", { paragraph_id: "p1", text: "first correction" }), sequence: 1 };
+    const second = { ...event("transcript.corrected", { paragraph_id: "p1", text: "final correction" }), sequence: 2, event_id: "correction-2" };
+    const [item] = buildCourseDocument([paragraph, translation, first, second]);
+    expect(item).toMatchObject({ original: "final correction", recognizedOriginal: "recognition", correctionRevision: 2, translationStale: true });
+    expect(item.translation).toBeUndefined();
+    expect(buildCourseDocument([paragraph, translation, first, second])).toHaveLength(1);
+    const updated = { ...event("translation.finalized", {
+      paragraph_id: "p1", source_text: "final correction", text: "revised translation",
+    }), event_id: "translation-revised" };
+    expect(buildCourseDocument([paragraph, translation, first, second, updated])[0])
+      .toMatchObject({ original: "final correction", translation: "revised translation", translationStale: false });
+  });
+  it("keeps course questions out of transcript paragraphs", () => {
+    expect(buildCourseDocument([
+      event("course.question.asked", { job_id: "j1", question: "synthetic question" }),
+      event("course.question.answered", { job_id: "j1", answer: "synthetic answer" }),
+    ])).toHaveLength(0);
+  });
   it("links a finalized paragraph to the full recorded span of its source fragments", () => {
     const items = buildCourseDocument([
       event("segment.finalized", { segment_id: "s1", text: "first", audio_start_ms: 1000, audio_end_ms: 2500, display_mode: "internal_fragment" }),

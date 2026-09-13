@@ -477,8 +477,85 @@ fn apply_result(
         "topic" => crate::topics::apply_result(state, job, result).map_err(Into::into),
         "summarize" => apply_summary_result(state, job, result, elapsed_ms),
         "asset_parse" => apply_asset_result(state, job, result, elapsed_ms),
+        "course_qa" => apply_course_qa_result(state, job, result),
         _ => Err(ApiError::bad_request("unsupported model job type")),
     }
+}
+
+fn apply_course_qa_result(
+    state: &AppState,
+    job: &aialra_event_store::ModelJobRecord,
+    result: &Value,
+) -> Result<(), ApiError> {
+    // A result can be persisted before the worker receives its completion ACK.
+    // A later model retry must keep that first answer instead of conflicting
+    // with the append-only event's stable identity.
+    let answer_event_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("{}:answered", job.id).as_bytes(),
+    );
+    if state
+        .store
+        .get_event(&answer_event_id.to_string())?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let provider = result
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    require_provider(provider, "ollama:", &["@cuda"])?;
+    let answer = result
+        .get("answer")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if answer.is_empty() || answer.len() > 12_000 {
+        return Err(ApiError::bad_request("course answer has invalid length"));
+    }
+    let allowed = job
+        .input
+        .get("segments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|segment| segment.get("id").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    let cited = result
+        .get("evidence_segment_ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::bad_request("course answer lacks evidence field"))?;
+    let sufficient = result
+        .get("sufficient_evidence")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ApiError::bad_request("course answer lacks evidence status"))?;
+    if cited.len() > 16
+        || cited
+            .iter()
+            .any(|id| id.as_str().is_none_or(|id| !allowed.contains(id)))
+    {
+        return Err(ApiError::bad_request(
+            "course answer cites unrelated evidence",
+        ));
+    }
+    if cited.is_empty() == sufficient {
+        return Err(ApiError::bad_request(
+            "course answer evidence status is inconsistent",
+        ));
+    }
+    state.emit_idempotent(
+        &format!("{}:answered", job.id),
+        &job.session_id,
+        "gpu_course_qa",
+        "course.question.answered",
+        0,
+        &job.id,
+        None,
+        json!({"job_id": job.id, "answer": answer, "sufficient_evidence": sufficient,
+            "evidence_segment_ids": cited, "provider": provider}),
+    )?;
+    Ok(())
 }
 
 fn apply_asr_result(
@@ -672,6 +749,8 @@ fn apply_translation_result(
                 .or_else(|| job.input.get("target_language").and_then(Value::as_str).map(str::to_owned)),
             "provider": translation.provider,
             "source_version": job.input.get("source_version").cloned().unwrap_or(Value::Null),
+            "correction_revision": job.input.get("correction_revision").cloned().unwrap_or(Value::Null),
+            "translation_mode": if translation.provider.starts_with("identity:") { Some("same_language") } else { None },
             "context_paragraphs": job.input.get("context").and_then(Value::as_array).map_or(0, Vec::len),
             "elapsed_ms": elapsed_ms
         }),
@@ -1599,7 +1678,13 @@ fn allowed_capabilities(values: Vec<String>) -> Vec<String> {
         .filter(|value| {
             matches!(
                 value.as_str(),
-                "asr" | "translate" | "explain" | "topic" | "summarize" | "asset_parse"
+                "asr"
+                    | "translate"
+                    | "explain"
+                    | "topic"
+                    | "summarize"
+                    | "asset_parse"
+                    | "course_qa"
             )
         })
         .collect()

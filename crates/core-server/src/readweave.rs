@@ -1231,37 +1231,43 @@ fn render_overview(
 }
 
 fn render_transcript(events: &[aialra_event_protocol::EventEnvelope]) -> String {
-    let translations = events
+    let corrections = latest_transcript_corrections(events);
+    let mut translations: std::collections::HashMap<String, Vec<(String, Option<String>)>> =
+        std::collections::HashMap::new();
+    for event in events
         .iter()
         .filter(|event| event.event_type == "translation.finalized")
-        .filter_map(|event| {
-            Some((
+    {
+        if let (Some(id), Some(text)) = (
+            event
+                .payload
+                .get("paragraph_id")
+                .or_else(|| event.payload.get("segment_id"))
+                .and_then(Value::as_str),
+            event.payload.get("text").and_then(Value::as_str),
+        ) {
+            translations.entry(id.to_owned()).or_default().push((
+                text.to_owned(),
                 event
                     .payload
-                    .get("paragraph_id")
-                    .or_else(|| event.payload.get("segment_id"))?
-                    .as_str()?
-                    .to_owned(),
-                (
-                    event.payload.get("text")?.as_str()?.to_owned(),
-                    event
-                        .payload
-                        .get("source_text")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                ),
-            ))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
+                    .get("source_text")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ));
+        }
+    }
     let has_paragraphs = events
         .iter()
         .any(|event| event.event_type == "paragraph.finalized");
     let rows = events.iter().filter(|event| event.event_type == if has_paragraphs { "paragraph.finalized" } else { "segment.finalized" }).map(|event| {
         let segment = event.payload.get(if has_paragraphs { "paragraph_id" } else { "segment_id" }).and_then(Value::as_str).unwrap_or("unknown");
         let raw_original = event.payload.get("text").and_then(Value::as_str).unwrap_or("");
-        let translated_record = translations.get(segment);
-        let original = translated_record.and_then(|(_, source)| source.as_deref()).unwrap_or(raw_original);
-        let translated = translated_record.map(|(text, _)| text.as_str()).unwrap_or("等待翻译");
+        let original = corrections.get(segment).map(|(_, text)| text.as_str()).unwrap_or(raw_original);
+        let translated_record = translations.get(segment).and_then(|history| {
+            history.iter().rev().find(|(_, source)| source.as_deref() == Some(original))
+                .or_else(|| (!corrections.contains_key(segment)).then(|| history.last()).flatten())
+        });
+        let translated = translated_record.map(|(text, _)| text.as_str()).unwrap_or(if corrections.contains_key(segment) { "原文已人工修订，原译文待校对" } else { "等待翻译" });
         let provider = event.payload.get("provider").and_then(Value::as_str).unwrap_or("unknown");
         format!("<section><h3>{}</h3><p><strong>原文</strong> {}</p><p><strong>译文</strong> {}</p><p><small>{} · {} · {}</small></p></section>", event.ingested_at.format("%H:%M:%S"), html(original), html(translated), html(provider), html(segment), event.event_id)
     }).collect::<String>();
@@ -1270,6 +1276,29 @@ fn render_transcript(events: &[aialra_event_protocol::EventEnvelope]) -> String 
     } else {
         rows
     }
+}
+
+fn latest_transcript_corrections(
+    events: &[aialra_event_protocol::EventEnvelope],
+) -> std::collections::HashMap<String, (u64, String)> {
+    let mut corrections = std::collections::HashMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "transcript.corrected")
+    {
+        if let (Some(id), Some(text)) = (
+            event.payload.get("paragraph_id").and_then(Value::as_str),
+            event.payload.get("text").and_then(Value::as_str),
+        ) {
+            let entry = corrections
+                .entry(id.to_owned())
+                .or_insert((0, String::new()));
+            if event.sequence > entry.0 {
+                *entry = (event.sequence, text.to_owned());
+            }
+        }
+    }
+    corrections
 }
 
 fn render_explanations(events: &[aialra_event_protocol::EventEnvelope]) -> String {
@@ -1576,31 +1605,34 @@ pub fn preview_payload(state: &AppState, project_id: &str) -> Result<Value, ApiE
     let mut previews = Vec::new();
     for session in sessions.into_iter().take(5) {
         let events = state.store.list_events(&session.id)?;
-        let translations = events
+        let mut translations: std::collections::HashMap<String, Vec<(String, Option<String>)>> =
+            std::collections::HashMap::new();
+        for event in events
             .iter()
             .filter(|event| event.event_type == "translation.finalized")
-            .filter_map(|event| {
-                Some((
+        {
+            if let (Some(id), Some(text)) = (
+                event
+                    .payload
+                    .get("paragraph_id")
+                    .or_else(|| event.payload.get("segment_id"))
+                    .and_then(Value::as_str),
+                event.payload.get("text").and_then(Value::as_str),
+            ) {
+                translations.entry(id.to_owned()).or_default().push((
+                    text.to_owned(),
                     event
                         .payload
-                        .get("paragraph_id")
-                        .or_else(|| event.payload.get("segment_id"))?
-                        .as_str()?
-                        .to_owned(),
-                    (
-                        event.payload.get("text")?.as_str()?.to_owned(),
-                        event
-                            .payload
-                            .get("source_text")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                    ),
-                ))
-            })
-            .collect::<std::collections::HashMap<_, _>>();
+                        .get("source_text")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                ));
+            }
+        }
         let has_paragraphs = events
             .iter()
             .any(|event| event.event_type == "paragraph.finalized");
+        let corrections = latest_transcript_corrections(&events);
         let latest_entries = events
             .iter()
             .filter(|event| {
@@ -1623,10 +1655,21 @@ pub fn preview_payload(state: &AppState, project_id: &str) -> Result<Value, ApiE
                     })?
                     .as_str()?;
                 let raw_original = event.payload.get("text")?.as_str()?;
-                let translated_record = translations.get(segment_id);
-                let original = translated_record
-                    .and_then(|(_, source)| source.as_deref())
+                let original = corrections
+                    .get(segment_id)
+                    .map(|(_, text)| text.as_str())
                     .unwrap_or(raw_original);
+                let translated_record = translations.get(segment_id).and_then(|history| {
+                    history
+                        .iter()
+                        .rev()
+                        .find(|(_, source)| source.as_deref() == Some(original))
+                        .or_else(|| {
+                            (!corrections.contains_key(segment_id))
+                                .then(|| history.last())
+                                .flatten()
+                        })
+                });
                 Some(json!({
                     "segment_id": segment_id,
                     "original": original,
@@ -1741,6 +1784,47 @@ mod tests {
         assert!(rendered.contains("segment_1"));
         assert!(rendered.contains("&lt;attention&gt;"));
         assert!(!rendered.contains("<pre>"));
+    }
+
+    #[test]
+    fn transcript_projection_uses_correction_without_reusing_old_translation() {
+        let original = aialra_event_protocol::EventEnvelope::new(
+            "session_test",
+            "asr",
+            1,
+            "paragraph.finalized",
+            0,
+            "test",
+            None,
+            json!({"paragraph_id":"p1","text":"original"}),
+        )
+        .unwrap();
+        let translated = aialra_event_protocol::EventEnvelope::new(
+            "session_test",
+            "mt",
+            1,
+            "translation.finalized",
+            0,
+            "test",
+            None,
+            json!({"paragraph_id":"p1","source_text":"original","text":"old translation"}),
+        )
+        .unwrap();
+        let corrected = aialra_event_protocol::EventEnvelope::new(
+            "session_test",
+            "human",
+            1,
+            "transcript.corrected",
+            0,
+            "test",
+            None,
+            json!({"paragraph_id":"p1","text":"corrected"}),
+        )
+        .unwrap();
+        let rendered = render_transcript(&[original, translated, corrected]);
+        assert!(rendered.contains("corrected"));
+        assert!(rendered.contains("原文已人工修订"));
+        assert!(!rendered.contains("old translation"));
     }
 
     #[test]

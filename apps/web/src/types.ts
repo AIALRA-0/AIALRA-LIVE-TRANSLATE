@@ -207,6 +207,9 @@ export interface TimelineItem {
   imageUrl?: string;
   original?: string;
   translation?: string;
+  correctionRevision?: number;
+  recognizedOriginal?: string;
+  translationStale?: boolean;
   translationMode?: "same_language";
   groupReason?: "topic_change" | "capacity_continuation" | "recording_stopped";
   speakerLabel?: string;

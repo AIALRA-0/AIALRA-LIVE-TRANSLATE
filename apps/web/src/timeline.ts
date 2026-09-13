@@ -64,10 +64,18 @@ function cleanTranslationDisplay(value: unknown): string {
 
 // A course document pairs stable source segments with translations and expands structured teaching output.
 export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
-  const translations = new Map<string, EventEnvelope>();
+  const translations = new Map<string, EventEnvelope[]>();
+  const corrections = new Map<string, EventEnvelope>();
   const segmentAudio = new Map<string, { start: number; end: number }>();
   for (const event of events) {
-    if (event.event_type === "translation.finalized") translations.set(text(event.payload.paragraph_id) || text(event.payload.segment_id), event);
+    if (event.event_type === "translation.finalized") {
+      const id = text(event.payload.paragraph_id) || text(event.payload.segment_id);
+      translations.set(id, [...(translations.get(id) ?? []), event]);
+    }
+    if (event.event_type === "transcript.corrected") {
+      const id = text(event.payload.paragraph_id);
+      if (id && (!corrections.has(id) || event.sequence > corrections.get(id)!.sequence)) corrections.set(id, event);
+    }
     if (event.event_type === "segment.finalized") {
       const start = Number(event.payload.audio_start_ms);
       const end = Number(event.payload.audio_end_ms);
@@ -111,16 +119,22 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       const segmentId = text(payload.paragraph_id) || text(payload.segment_id) || event.event_id;
       const spans = (event.event_type === "paragraph.finalized" ? strings(payload.segment_ids) : [segmentId])
         .map((id) => segmentAudio.get(id)).filter((span): span is { start: number; end: number } => Boolean(span));
-      const translation = translations.get(segmentId);
+      const history = translations.get(segmentId) ?? [];
       // Recognized source is content, even when a lecturer literally says a
       // phrase resembling a provider label. Only translations need label cleanup.
-      const original = text(payload.text) || text(translation?.payload.source_text);
+      const recognizedOriginal = text(payload.text) || text(history.at(-1)?.payload.source_text);
+      const correction = corrections.get(segmentId);
+      const original = text(correction?.payload.text) || recognizedOriginal;
+      const translation = [...history].reverse().find((entry) => text(entry.payload.source_text) === original) ?? history.at(-1);
+      const translationStale = Boolean(correction && original !== recognizedOriginal && text(translation?.payload.source_text) !== original);
       const speaker = object(payload.speaker);
       const speakerLabel = speaker.status === "assigned" && Number.isInteger(speaker.index) && Number(speaker.index) > 0 && Number(speaker.index) <= 64
         ? `说话人 ${speaker.index}` : speaker.status ? "说话人待确认" : undefined;
       items.push({
         id: segmentId, kind: "paragraph", title: "课程段落", body: original,
-        original, translation: translation?.payload.translation_mode === "same_language" ? original
+        original, recognizedOriginal: correction ? recognizedOriginal : undefined,
+        correctionRevision: correction?.sequence ?? 0, translationStale,
+        translation: translationStale ? undefined : translation?.payload.translation_mode === "same_language" ? original
           : translation ? cleanTranslationDisplay(translation.payload.text) : undefined,
         speakerLabel,
         translationMode: translation?.payload.translation_mode === "same_language" ? "same_language" : undefined,
@@ -132,7 +146,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       continue;
     }
     if (event.event_type === "segment.finalized") continue;
-    if (event.event_type === "transcript.interim" || event.event_type === "transcript.stable" || event.event_type === "transcript.revised") continue;
+    if (event.event_type === "transcript.interim" || event.event_type === "transcript.stable" || event.event_type === "transcript.revised" || event.event_type === "transcript.corrected" || event.event_type.startsWith("course.question.")) continue;
     if (event.event_type === "translation.finalized") continue;
 
     if (event.event_type === "explanation.card.created") {
@@ -288,7 +302,8 @@ const COURSE_EVENT_TYPES = new Set([
   "explanation.card.created", "session.completed", "session.recording.started",
   "session.summary.created", "session.summary.failed", "asset.page.extracted",
   "model.job.failed", "model.job.retry_scheduled", "transcript.interim",
-  "transcript.stable", "transcript.revised",
+  "transcript.stable", "transcript.revised", "transcript.corrected",
+  "course.question.asked", "course.question.answered",
 ]);
 
 export function isCourseEvent(event: EventEnvelope): boolean {

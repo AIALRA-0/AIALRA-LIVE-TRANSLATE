@@ -541,6 +541,14 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 .user-notes-editor textarea { width: 100%; min-height: 45vh; resize: vertical; box-sizing: border-box; font: inherit; line-height: 1.75; padding: 1rem; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: .75rem; }
 .user-notes-editor > div { display: flex; flex-wrap: wrap; gap: .75rem; }
 .course-paragraph audio { width: 100%; max-width: 100%; margin-block: .75rem; }
+.transcript-correction, .course-questions form { display: grid; gap: .65rem; }
+.transcript-correction textarea, .course-questions textarea { width: 100%; min-height: 5rem; box-sizing: border-box; resize: vertical; padding: .7rem; font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: .5rem; }
+.transcript-correction > div { display: flex; gap: .5rem; }
+.course-questions { font-size: 13px; }
+.course-questions p, .course-questions label { font-size: 13px; line-height: 1.55; }
+.course-questions-history { display: grid; gap: .7rem; max-height: 24rem; overflow-y: auto; }
+.course-questions-history article { padding: .7rem; border: 1px solid var(--line); border-radius: .55rem; overflow-wrap: anywhere; }
+.course-questions-evidence { display: flex; flex-wrap: wrap; gap: .4rem; }
 .paragraph-terms-section details { padding-block: .6rem; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
 .paragraph-terms-section summary { cursor: pointer; font-weight: 600; }
 button:disabled, select:disabled { cursor: not-allowed; }

@@ -1094,6 +1094,17 @@ impl EventStore {
         ).optional().context("read user note")
     }
 
+    pub fn latest_paragraph_correction(
+        &self,
+        session_id: &str,
+        paragraph_id: &str,
+    ) -> Result<Option<EventEnvelope>> {
+        self.lock()?.query_row(
+            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND event_type = 'transcript.corrected' AND json_extract(payload_json, '$.paragraph_id') = ?2 ORDER BY sequence DESC LIMIT 1",
+            params![session_id, paragraph_id], map_event,
+        ).optional().context("read paragraph correction")
+    }
+
     pub fn document_event(
         &self,
         session_id: &str,
@@ -1138,7 +1149,7 @@ impl EventStore {
             |row| row.get(0),
         ).optional()?;
         let mut statement = connection.prepare(
-            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND event_type IN ('paragraph.finalized', 'segment.finalized', 'translation.finalized', 'content.group.created', 'explanation.card.created', 'session.completed', 'session.recording.started', 'session.summary.created', 'session.summary.failed', 'asset.page.extracted', 'model.job.failed', 'model.job.retry_scheduled') ORDER BY ingested_at, event_id",
+            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND event_type IN ('paragraph.finalized', 'segment.finalized', 'translation.finalized', 'transcript.corrected', 'course.question.asked', 'course.question.answered', 'content.group.created', 'explanation.card.created', 'session.completed', 'session.recording.started', 'session.summary.created', 'session.summary.failed', 'asset.page.extracted', 'model.job.failed', 'model.job.retry_scheduled') ORDER BY ingested_at, event_id",
         )?;
         let events = statement
             .query_map([session_id], map_event)?
@@ -1837,6 +1848,31 @@ impl EventStore {
         let connection = self.lock()?;
         connection.execute(
             "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?2, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?2, completed_at = NULL WHERE idempotency_key = ?1 AND job_type = 'summarize' AND status = 'failed'",
+            params![key, now],
+        )?;
+        drop(connection);
+        self.get_model_job_by_key(key)
+    }
+
+    pub fn requeue_failed_translation_by_key(&self, key: &str) -> Result<Option<ModelJobRecord>> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?2, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?2, completed_at = NULL WHERE idempotency_key = ?1 AND job_type = 'translate' AND status = 'failed'",
+            params![key, now],
+        )?;
+        drop(connection);
+        self.get_model_job_by_key(key)
+    }
+
+    pub fn requeue_failed_course_question_by_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<ModelJobRecord>> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?2, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?2, completed_at = NULL WHERE idempotency_key = ?1 AND job_type = 'course_qa' AND status = 'failed'",
             params![key, now],
         )?;
         drop(connection);

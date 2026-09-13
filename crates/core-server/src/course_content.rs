@@ -1,7 +1,9 @@
 //! Small, owner-scoped document operations. Notes are append-only; audio stays private.
 use crate::app::{ApiError, AppState};
+use aialra_core_domain::SessionState;
 use aialra_event_protocol::EventEnvelope;
 use aialra_event_store::AudioChunkRecord;
+use aialra_event_store::NewModelJob;
 use axum::{
     Json,
     body::Body,
@@ -11,11 +13,303 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 pub struct SaveNote {
     pub text: String,
     pub base_revision: u64,
+}
+
+#[derive(Deserialize)]
+pub struct CorrectTranscript {
+    pub text: String,
+    pub base_revision: u64,
+}
+
+pub async fn correct_transcript(
+    State(state): State<AppState>,
+    Path((session, paragraph)): Path<(String, String)>,
+    Json(request): Json<CorrectTranscript>,
+) -> Result<Json<Value>, ApiError> {
+    let corrected = request.text.trim();
+    if corrected.is_empty() || corrected.len() > 16 * 1024 {
+        return Err(ApiError::bad_request("修订内容应为 1 到 16384 字节"));
+    }
+    let (event, document, changed) = {
+        let _guard = state
+            .sequence_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("correction lock unavailable"))?;
+        let document = state
+            .store
+            .document_event(&session, &paragraph)?
+            .ok_or_else(|| ApiError::not_found("段落不存在"))?;
+        let current = state
+            .store
+            .latest_paragraph_correction(&session, &paragraph)?;
+        let revision = current.as_ref().map_or(0, |event| event.sequence);
+        if current
+            .as_ref()
+            .and_then(|event| event.payload.get("text"))
+            .and_then(Value::as_str)
+            == Some(corrected)
+        {
+            (
+                current.expect("matching correction exists"),
+                document,
+                false,
+            )
+        } else {
+            if revision != request.base_revision {
+                return Err(ApiError::conflict_with_code(
+                    "这段转写已在另一页面修订，草稿仍在本页，请先查看最新版本",
+                    "transcript_revision_conflict",
+                ));
+            }
+            let event = EventEnvelope::new(
+                &session,
+                "human_correction",
+                state.store.next_sequence(&session, "human_correction")?,
+                "transcript.corrected",
+                0,
+                "human_correction",
+                None,
+                json!({"paragraph_id": paragraph, "text": corrected}),
+            )
+            .map_err(anyhow::Error::from)?;
+            state.store.insert_event(&event)?;
+            (event, document, true)
+        }
+    };
+    if changed {
+        let _ = state.events.send(event.clone());
+        if let Err(_error) = state.record_session_event_update(&event) {
+            tracing::warn!(
+                error_kind = "correction_update_pending",
+                "course correction saved but projection pending"
+            );
+        }
+    }
+    let translation_queued = match enqueue_correction_translation(
+        &state, &session, &paragraph, corrected, &document, &event,
+    ) {
+        Ok(_) => true,
+        Err(_error) => {
+            tracing::warn!(
+                error_kind = "correction_translation_pending",
+                "course correction saved but retranslation pending"
+            );
+            false
+        }
+    };
+    Ok(Json(
+        json!({"revision": event.sequence, "text": corrected, "translation_queued": translation_queued}),
+    ))
+}
+
+fn enqueue_correction_translation(
+    state: &AppState,
+    session_id: &str,
+    paragraph_id: &str,
+    text: &str,
+    document: &EventEnvelope,
+    correction: &EventEnvelope,
+) -> Result<(), ApiError> {
+    let course = state
+        .store
+        .get_session(session_id)?
+        .ok_or_else(|| ApiError::not_found("课程不存在"))?;
+    let source_language = if matches!(course.source_language.as_str(), "auto" | "mixed") {
+        document
+            .payload
+            .get("detected_language")
+            .and_then(Value::as_str)
+            .unwrap_or(course.source_language.as_str())
+    } else {
+        course.source_language.as_str()
+    };
+    let key = format!("translate-correction:{}", correction.event_id);
+    if state
+        .store
+        .get_model_job_by_key(&key)?
+        .is_some_and(|job| job.status == "failed")
+    {
+        state.store.requeue_failed_translation_by_key(&key)?;
+    }
+    state.enqueue_job(NewModelJob {
+        id: format!("job_{}", Uuid::now_v7().simple()),
+        session_id: session_id.to_owned(),
+        job_type: "translate".into(),
+        priority: 50,
+        input: json!({"text": text, "paragraph_id": paragraph_id,
+            "source_language": source_language, "target_language": course.target_language,
+            "detected_language": document.payload.get("detected_language"),
+            "glossary": [], "context": [], "correction_revision": correction.sequence}),
+        input_object_hash: None,
+        idempotency_key: key,
+    })?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct AskCourseQuestion {
+    pub question: String,
+}
+
+pub async fn ask_course_question(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    Json(request): Json<AskCourseQuestion>,
+) -> Result<Json<Value>, ApiError> {
+    let question = request.question.trim();
+    if question.is_empty() || question.len() > 2000 {
+        return Err(ApiError::bad_request("问题应为 1 到 2000 字节"));
+    }
+    let course = state
+        .store
+        .get_session(&session)?
+        .ok_or_else(|| ApiError::not_found("课程不存在"))?;
+    if !matches!(course.state, SessionState::Completed | SessionState::Failed) {
+        return Err(ApiError::conflict_with_code(
+            "请先结束课程并等待已录内容处理完成，再提问",
+            "course_question_wait_for_completion",
+        ));
+    }
+    let (events, _) = state.store.course_document_snapshot(&session)?;
+    let has_paragraphs = events
+        .iter()
+        .any(|event| event.event_type == "paragraph.finalized");
+    let paragraphs = events
+        .iter()
+        .filter(|event| {
+            event.event_type
+                == if has_paragraphs {
+                    "paragraph.finalized"
+                } else {
+                    "segment.finalized"
+                }
+        })
+        .filter_map(|event| {
+            let id = event
+                .payload
+                .get(if has_paragraphs {
+                    "paragraph_id"
+                } else {
+                    "segment_id"
+                })?
+                .as_str()?;
+            let recognized = event.payload.get("text")?.as_str()?;
+            let corrected = events
+                .iter()
+                .filter(|candidate| {
+                    candidate.event_type == "transcript.corrected"
+                        && candidate
+                            .payload
+                            .get("paragraph_id")
+                            .and_then(Value::as_str)
+                            == Some(id)
+                })
+                .max_by_key(|candidate| candidate.sequence)
+                .and_then(|candidate| candidate.payload.get("text"))
+                .and_then(Value::as_str);
+            Some((id.to_owned(), corrected.unwrap_or(recognized).to_owned()))
+        })
+        .collect::<Vec<_>>();
+    if paragraphs.is_empty() {
+        return Err(ApiError::bad_request("这节课程尚无可引用的稳定转写"));
+    }
+    let mut terms = question
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    let characters = question.chars().collect::<Vec<_>>();
+    for pair in characters.windows(2) {
+        if pair.iter().all(|character| {
+            matches!(*character as u32,
+            0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xac00..=0xd7af)
+        }) {
+            terms.push(pair.iter().collect());
+        }
+    }
+    terms.sort();
+    terms.dedup();
+    let translations = events
+        .iter()
+        .filter(|event| event.event_type == "translation.finalized")
+        .filter_map(|event| {
+            Some((
+                event.payload.get("paragraph_id")?.as_str()?,
+                event.payload.get("text")?.as_str()?,
+            ))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut candidates = paragraphs
+        .iter()
+        .enumerate()
+        .map(|(index, (id, text))| {
+            let lower = format!(
+                "{} {}",
+                text.to_lowercase(),
+                translations
+                    .get(id.as_str())
+                    .copied()
+                    .unwrap_or_default()
+                    .to_lowercase()
+            );
+            let score = terms
+                .iter()
+                .filter(|term| lower.contains(term.as_str()))
+                .count();
+            (index, score, id, text)
+        })
+        .collect::<Vec<_>>();
+    candidates
+        .sort_by_key(|(index, score, _, _)| (std::cmp::Reverse(*score), std::cmp::Reverse(*index)));
+    candidates.truncate(12);
+    candidates.sort_by_key(|(index, _, _, _)| *index);
+    let evidence = candidates.into_iter().map(|(_, _, id, text)| json!({"id": id, "text": text.chars().take(600).collect::<String>()})).collect::<Vec<_>>();
+    let fingerprint = aialra_event_protocol::hash_payload(&json!({
+        "session_id": session, "question": question, "segments": evidence,
+    }))
+    .map_err(anyhow::Error::from)?;
+    let key = format!("course_qa:{fingerprint}");
+    let previously_failed = state
+        .store
+        .get_model_job_by_key(&key)?
+        .is_some_and(|job| job.status == "failed");
+    if previously_failed {
+        state.store.requeue_failed_course_question_by_key(&key)?;
+    }
+    let id = format!("job_{}", Uuid::now_v7().simple());
+    let job = state.enqueue_job(NewModelJob {
+        id: id.clone(), session_id: session.clone(), job_type: "course_qa".into(), priority: 15,
+        input: json!({"question": question, "segments": evidence, "target_language": course.target_language}),
+        input_object_hash: None, idempotency_key: key,
+    })?;
+    state.emit_idempotent(
+        &format!("{}:asked", job.id),
+        &session,
+        "course_questions",
+        "course.question.asked",
+        0,
+        &job.id,
+        None,
+        json!({"job_id": job.id, "question": question}),
+    )?;
+    if previously_failed {
+        state.emit(
+            &session,
+            "course_questions",
+            "model.job.retry_scheduled",
+            0,
+            &job.id,
+            None,
+            json!({"job_id": job.id, "job_type": "course_qa"}),
+        )?;
+    }
+    Ok(Json(json!({"job_id": job.id, "status": job.status})))
 }
 
 pub async fn get_note(
@@ -416,6 +710,173 @@ mod tests {
                 .unwrap()
                 .sequence,
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn corrections_keep_original_and_reject_stale_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let session = "session_content_test".to_owned();
+        state
+            .emit(
+                &session,
+                "asr",
+                "paragraph.finalized",
+                0,
+                "paragraph_test",
+                None,
+                json!({"paragraph_id":"paragraph_test","text":"original"}),
+            )
+            .unwrap();
+        let correction = Path((session.clone(), "paragraph_test".to_owned()));
+        let first = correct_transcript(
+            State(state.clone()),
+            correction,
+            Json(CorrectTranscript {
+                text: "corrected".into(),
+                base_revision: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.0["revision"], 1);
+        assert_eq!(first.0["translation_queued"], true);
+        let correction_event = state
+            .store
+            .latest_paragraph_correction(&session, "paragraph_test")
+            .unwrap()
+            .unwrap();
+        let job_key = format!("translate-correction:{}", correction_event.event_id);
+        let queued = state.store.get_model_job_by_key(&job_key).unwrap().unwrap();
+        assert_eq!(queued.job_type, "translate");
+        assert_eq!(queued.input["text"], "corrected");
+        assert_eq!(queued.input["correction_revision"], 1);
+        assert!(
+            correct_transcript(
+                State(state.clone()),
+                Path((session.clone(), "paragraph_test".into())),
+                Json(CorrectTranscript {
+                    text: "stale".into(),
+                    base_revision: 0
+                })
+            )
+            .await
+            .is_err()
+        );
+        let retry = correct_transcript(
+            State(state.clone()),
+            Path((session.clone(), "paragraph_test".into())),
+            Json(CorrectTranscript {
+                text: "corrected".into(),
+                base_revision: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry.0["revision"], 1);
+        assert_eq!(
+            state
+                .store
+                .get_model_job_by_key(&job_key)
+                .unwrap()
+                .unwrap()
+                .id,
+            queued.id
+        );
+        let (snapshot, _) = state.store.course_document_snapshot(&session).unwrap();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].payload["text"], "original");
+        assert_eq!(snapshot[1].payload["text"], "corrected");
+        assert!(
+            correct_transcript(
+                State(state.clone()),
+                Path((session, "paragraph_other".into())),
+                Json(CorrectTranscript {
+                    text: "wrong".into(),
+                    base_revision: 0
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn course_question_uses_corrected_evidence_after_course_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let session = "session_content_test";
+        for next in [
+            SessionState::Ready,
+            SessionState::Recording,
+            SessionState::Stopping,
+            SessionState::Processing,
+            SessionState::Completed,
+        ] {
+            state.store.transition_session(session, next).unwrap();
+        }
+        state
+            .emit(
+                session,
+                "asr",
+                "paragraph.finalized",
+                0,
+                "paragraph_test",
+                None,
+                json!({"paragraph_id":"paragraph_test","text":"Original synthetic wording"}),
+            )
+            .unwrap();
+        let _ = correct_transcript(
+            State(state.clone()),
+            Path((session.into(), "paragraph_test".into())),
+            Json(CorrectTranscript {
+                text: "Corrected synthetic wording".into(),
+                base_revision: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        let answer = ask_course_question(
+            State(state.clone()),
+            Path(session.into()),
+            Json(AskCourseQuestion {
+                question: "What was corrected?".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let repeated = ask_course_question(
+            State(state.clone()),
+            Path(session.into()),
+            Json(AskCourseQuestion {
+                question: "What was corrected?".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated.0["job_id"], answer.0["job_id"]);
+        let job = state
+            .store
+            .get_model_job(answer.0["job_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.job_type, "course_qa");
+        assert_eq!(
+            job.input["segments"][0]["text"],
+            "Corrected synthetic wording"
+        );
+        assert_eq!(job.input["target_language"], "zh-CN");
+        assert_eq!(
+            state
+                .store
+                .course_document_snapshot(session)
+                .unwrap()
+                .0
+                .iter()
+                .filter(|event| event.event_type == "course.question.asked")
+                .count(),
+            1
         );
     }
 
