@@ -22,6 +22,14 @@ function event(eventType: string, payload: Record<string, unknown>): EventEnvelo
 }
 
 describe("timeline mapping", () => {
+  it("links a finalized paragraph to the full recorded span of its source fragments", () => {
+    const items = buildCourseDocument([
+      event("segment.finalized", { segment_id: "s1", text: "first", audio_start_ms: 1000, audio_end_ms: 2500, display_mode: "internal_fragment" }),
+      event("segment.finalized", { segment_id: "s2", text: "second", audio_start_ms: 2600, audio_end_ms: 4000, display_mode: "internal_fragment" }),
+      event("paragraph.finalized", { paragraph_id: "p1", segment_ids: ["s1", "s2"], text: "first second" }),
+    ]);
+    expect(items.find((item) => item.id === "p1")).toMatchObject({ audioStartMs: 1000, audioEndMs: 4000 });
+  });
   it("keeps reviewed background separate from course evidence and rejects unsafe links", () => {
     const reference = "https://www.rfc-editor.org/rfc/rfc3385";
     const [item] = buildCourseDocument([event("explanation.card.created", { result: {

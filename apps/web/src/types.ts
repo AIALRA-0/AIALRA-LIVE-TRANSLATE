@@ -200,6 +200,8 @@ export interface TimelineItem {
   body: string;
   evidenceIds: string[];
   occurredAt: string;
+  audioStartMs?: number;
+  audioEndMs?: number;
   provider?: string;
   statusTone?: "neutral" | "warning";
   imageUrl?: string;

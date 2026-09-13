@@ -64,6 +64,14 @@ async fn main() -> Result<()> {
             "/sessions/{session_id}/paragraphs/{paragraph_id}/audio",
             get(course_content::paragraph_audio),
         )
+        .route(
+            "/sessions/{session_id}/audio/index",
+            get(course_content::session_audio_index),
+        )
+        .route(
+            "/sessions/{session_id}/audio",
+            get(course_content::session_audio),
+        )
         .route("/runtime/status", get(api::health))
         .route("/workspace", get(workspace::workspace_snapshot))
         .route("/workspace/stream", get(workspace::stream_workspace))
@@ -186,6 +194,10 @@ async fn main() -> Result<()> {
         .route("/sessions/{session_id}/start", post(api::start_session))
         .route("/sessions/{session_id}/stop", post(api::stop_session))
         .route("/sessions/{session_id}/events", get(api::list_events))
+        .route(
+            "/sessions/{session_id}/document-snapshot",
+            get(api::course_document_snapshot),
+        )
         .route("/sessions/{session_id}/stream", get(api::stream_events))
         .route("/sessions/{session_id}/assets", post(api::upload_asset))
         .route(

@@ -1124,6 +1124,50 @@ impl EventStore {
         Ok(events)
     }
 
+    /// Return only events needed to construct the course document. The cursor
+    /// still points at the latest event of any type, so the live stream cannot
+    /// replay thousands of audio acknowledgements after this snapshot.
+    pub fn course_document_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<EventEnvelope>, Option<String>)> {
+        let connection = self.lock()?;
+        let cursor: Option<String> = connection.query_row(
+            "SELECT event_id FROM events WHERE session_id = ?1 ORDER BY ingested_at DESC, event_id DESC LIMIT 1",
+            [session_id],
+            |row| row.get(0),
+        ).optional()?;
+        let mut statement = connection.prepare(
+            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND event_type IN ('paragraph.finalized', 'segment.finalized', 'translation.finalized', 'content.group.created', 'explanation.card.created', 'session.completed', 'session.recording.started', 'session.summary.created', 'session.summary.failed', 'asset.page.extracted', 'model.job.failed', 'model.job.retry_scheduled') ORDER BY ingested_at, event_id",
+        )?;
+        let events = statement
+            .query_map([session_id], map_event)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((events, cursor))
+    }
+
+    pub fn list_events_after(
+        &self,
+        session_id: &str,
+        cursor: &EventEnvelope,
+    ) -> Result<Vec<EventEnvelope>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND (ingested_at, event_id) > (?2, ?3) ORDER BY ingested_at, event_id",
+        )?;
+        let events = statement
+            .query_map(
+                params![
+                    session_id,
+                    cursor.ingested_at.to_rfc3339(),
+                    cursor.event_id.to_string()
+                ],
+                map_event,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(events)
+    }
+
     /// Sequence allocation resumes from persisted data after a process restart.
     pub fn next_sequence(&self, session_id: &str, source_id: &str) -> Result<u64> {
         let connection = self.lock()?;
@@ -1339,6 +1383,16 @@ impl EventStore {
         )?;
         Ok(statement
             .query_map(params![session_id, source_id, cursor], map_audio_chunk)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_session_audio_chunks(&self, session_id: &str) -> Result<Vec<AudioChunkRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT session_id, source_id, sequence, captured_at_ms, sample_rate, channels, encoding, duration_ms, object_hash, size_bytes, acknowledged_at FROM audio_chunks WHERE session_id = ?1 ORDER BY captured_at_ms, source_id, sequence",
+        )?;
+        Ok(statement
+            .query_map([session_id], map_audio_chunk)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -3171,6 +3225,57 @@ mod tests {
 
         let reopened = EventStore::open(&path).unwrap();
         assert_eq!(reopened.list_events("session_test").unwrap(), vec![event]);
+    }
+
+    #[test]
+    fn document_snapshot_skips_audio_facts_without_losing_the_stream_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        store.create_session(&test_session()).unwrap();
+        for sequence in 1..=200 {
+            let event = EventEnvelope::new(
+                "session_test",
+                "browser",
+                sequence,
+                "audio.chunk.received",
+                sequence,
+                "audio-test",
+                None,
+                json!({"duration_ms": 1000}),
+            )
+            .unwrap();
+            store.insert_event(&event).unwrap();
+        }
+        let paragraph = EventEnvelope::new(
+            "session_test",
+            "paragraphs",
+            1,
+            "paragraph.finalized",
+            0,
+            "paragraph-test",
+            None,
+            json!({"paragraph_id": "p1", "text": "Synthetic text"}),
+        )
+        .unwrap();
+        store.insert_event(&paragraph).unwrap();
+        let full = store.list_events("session_test").unwrap();
+        let (document, cursor) = store.course_document_snapshot("session_test").unwrap();
+        assert_eq!(document, vec![paragraph]);
+        assert_eq!(cursor, full.last().map(|event| event.event_id.to_string()));
+        assert_eq!(
+            store
+                .list_events_after("session_test", full.last().unwrap())
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .list_events_after("session_test", &full[0])
+                .unwrap()
+                .len(),
+            200
+        );
     }
 
     #[test]

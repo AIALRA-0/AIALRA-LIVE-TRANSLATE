@@ -877,13 +877,23 @@ fn ensure_sessions_can_move_to_trash(
         let Some(session) = state.store.get_session(session_id)? else {
             continue;
         };
-        if matches!(
+        let unfinished_stop = matches!(
             session.state,
-            aialra_core_domain::SessionState::Recording
-                | aialra_core_domain::SessionState::Degraded
-                | aialra_core_domain::SessionState::Stopping
+            aialra_core_domain::SessionState::Stopping
                 | aialra_core_domain::SessionState::Processing
-        ) {
+        );
+        let live_lease = if let Some(project) = state.store.project_for_session(session_id)? {
+            state
+                .store
+                .get_recording_lease(&project.id)?
+                .is_some_and(|lease| {
+                    lease.session_id == *session_id && lease.expires_at > chrono::Utc::now()
+                })
+        } else {
+            false
+        };
+        let queue = state.store.model_queue_counts(Some(session_id))?;
+        if unfinished_stop || live_lease || queue.queued + queue.leased > 0 {
             return Err(ApiError::conflict_with_code(
                 "请先停止录音并等待处理完成",
                 "workspace_trash_blocked_active_session",
@@ -1115,4 +1125,64 @@ fn trash_selection(
             _ => false,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aialra_core_domain::SessionState;
+    use aialra_event_store::{NewProject, NewSession};
+
+    #[test]
+    fn trash_allows_abandoned_recording_only_after_the_lease_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::open(dir.path()).unwrap();
+        let project_id = "project_trash_test";
+        let session_id = "session_trash_test";
+        state
+            .store
+            .create_project(&NewProject {
+                id: project_id.into(),
+                owner_subject: "test-owner".into(),
+                title: "Synthetic".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+            })
+            .unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: session_id.into(),
+                title: "Synthetic".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .store
+            .attach_session_to_project(project_id, session_id, "test-owner", "test-device")
+            .unwrap();
+        state
+            .store
+            .transition_session(session_id, SessionState::Ready)
+            .unwrap();
+        state
+            .store
+            .transition_session(session_id, SessionState::Recording)
+            .unwrap();
+        assert!(ensure_sessions_can_move_to_trash(&state, &[session_id.into()]).is_ok());
+        state
+            .store
+            .acquire_recording_lease(project_id, session_id, "test-device", "test-hash", 45)
+            .unwrap();
+        assert!(ensure_sessions_can_move_to_trash(&state, &[session_id.into()]).is_err());
+        state
+            .store
+            .release_recording_lease(project_id, session_id, "test-hash")
+            .unwrap();
+        assert!(ensure_sessions_can_move_to_trash(&state, &[session_id.into()]).is_ok());
+    }
 }

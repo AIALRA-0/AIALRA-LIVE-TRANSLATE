@@ -6,7 +6,7 @@ use crate::identity::CurrentUser;
 use crate::projects::hash_token;
 use aialra_event_store::{AssetRecord, NewModelJob, SessionRecord};
 use axum::body::Body;
-use axum::extract::{Extension, Multipart, Path, State};
+use axum::extract::{Extension, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -246,18 +246,38 @@ fn authorize_dingtalk_lease(
 pub async fn stream_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    Query(query): Query<EventStreamQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let mut receiver = state.events.subscribe();
-    let full_history = state.store.list_events(&session_id)?;
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok());
+    let requested_cursor = last_event_id.or(query.after.as_deref());
+    let cursor = match requested_cursor {
+        Some(id) => state
+            .store
+            .get_event(id)?
+            .filter(|event| event.session_id == session_id),
+        None => None,
+    };
+    if query.after.is_some() && last_event_id.is_none() && cursor.is_none() {
+        return Err(ApiError::bad_request("课程同步位置无效，请重新读取课程"));
+    }
+    let full_history = if let Some(cursor) = &cursor {
+        state.store.list_events_after(&session_id, cursor)?
+    } else {
+        state.store.list_events(&session_id)?
+    };
     // The subscription is opened before the snapshot.  A provider completion can
     // therefore be present in both the snapshot and the broadcast queue; the
     // watermark suppresses that one duplicate without retaining every event ID
     // for the lifetime of a long course.
     let watermark = full_history
         .last()
+        .or(cursor.as_ref())
         .map(|event| (event.ingested_at, event.event_id));
-    let history = replay_after_last_event_id(full_history, headers.get("last-event-id"));
+    let history = full_history;
     let stream = async_stream::stream! {
         // Replay precedes live events so a refreshed UI reconstructs the same timeline.
         for envelope in history {
@@ -286,23 +306,17 @@ pub async fn stream_events(
     ))
 }
 
-fn replay_after_last_event_id(
-    history: Vec<aialra_event_protocol::EventEnvelope>,
-    last_event_id: Option<&HeaderValue>,
-) -> Vec<aialra_event_protocol::EventEnvelope> {
-    let Some(last_event_id) = last_event_id.and_then(|value| value.to_str().ok()) else {
-        return history;
-    };
-    let Some(index) = history
-        .iter()
-        .position(|event| event.event_id.to_string() == last_event_id)
-    else {
-        // An unknown cursor can come from a pruned browser cache or a version
-        // change, so replaying the durable history is safer than dropping facts
-        // that the observer has not confirmed.
-        return history;
-    };
-    history.into_iter().skip(index + 1).collect()
+#[derive(Deserialize)]
+pub struct EventStreamQuery {
+    pub after: Option<String>,
+}
+
+pub async fn course_document_snapshot(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (events, cursor) = state.store.course_document_snapshot(&session_id)?;
+    Ok(Json(json!({ "events": events, "cursor": cursor })))
 }
 
 fn event_after_watermark(

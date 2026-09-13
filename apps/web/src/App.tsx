@@ -5,8 +5,11 @@ import { applySessionStateEvent } from "./sessionState";
 import { RecordingWakeLock } from "./wakeLock";
 import { clearStopIntent, readStopIntent, saveStopIntent, type RecordingStopIntent } from "./recordingStop";
 import { UserNotes } from "./UserNotes";
+import { SessionPlayer } from "./SessionPlayer";
+import { CourseOutline } from "./CourseOutline";
+import { downloadCourseMarkdown } from "./courseExport";
 import type { NoiseSuppressionMode } from "./noiseSuppression";
-import { appendEvent, isRenderableDocumentItem } from "./timeline";
+import { appendEvent, buildCourseDocument, isCourseEvent, isRenderableDocumentItem } from "./timeline";
 import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, RecordingProjectStatus, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
 import { canDropWorkspaceTarget, formatAudioInputLabel, formatLocalTimestamp, isFolderDescendant, isRecordingResumable, recordingDisplayState, resumeSessionLabel, type WorkspaceDragTarget, type WorkspaceDropTarget } from "./uiState";
 
@@ -30,10 +33,10 @@ function audioInputStorageKey(projectId: string): string {
 }
 
 interface TimelineState { events: EventEnvelope[]; items: TimelineItem[] }
-type TimelineAction = { type: "append"; event: EventEnvelope } | { type: "reset" };
+type TimelineAction = { type: "append"; event: EventEnvelope } | { type: "reset"; events: EventEnvelope[] };
 
 function timelineReducer(state: TimelineState, action: TimelineAction): TimelineState {
-  return action.type === "reset" ? { events: [], items: [] } : appendEvent(state, action.event);
+  return action.type === "reset" ? { events: action.events, items: buildCourseDocument(action.events) } : appendEvent(state, action.event);
 }
 
 function recorderDeviceId(): string {
@@ -209,11 +212,19 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [expandedHistoryProjects, setExpandedHistoryProjects] = useState<Set<string>>(() => new Set());
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());
   const [allProjectsVisible, setAllProjectsVisible] = useState(false);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(
     () => new Set(snapshot.folders.filter((folder) => folder.parent_id === null).map((folder) => folder.id)),
   );
+  const projectExpanded = (projectId: string) => expandedProjects.has(projectId) || (activeProjectId === projectId && !collapsedProjects.has(projectId));
+  const toggleProject = (projectId: string) => {
+    const expanded = projectExpanded(projectId);
+    setExpandedProjects((current) => { const next = new Set(current); if (expanded) next.delete(projectId); else next.add(projectId); return next; });
+    setCollapsedProjects((current) => { const next = new Set(current); if (expanded) next.add(projectId); else next.delete(projectId); return next; });
+  };
   const [dialog, setDialog] = useState<WorkspaceDialogState | null>(null);
   const [dialogTitle, setDialogTitle] = useState("");
   const [dialogParentId, setDialogParentId] = useState<string>("");
@@ -536,13 +547,14 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
         onDragEnd={endDrag}
         onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}
       >
-        <button className="tree-item-button" onClick={() => onSelectProject(project)}><span aria-hidden="true">▣</span><span>{project.title}</span></button>
+        <button className="project-disclosure" aria-label={`${projectExpanded(project.id) ? "折叠" : "展开"}${project.title}`} aria-expanded={projectExpanded(project.id)} onClick={() => toggleProject(project.id)}>{projectExpanded(project.id) ? "▾" : "▸"}</button>
+        <button className="tree-item-button" onClick={() => { setExpandedProjects((current) => new Set(current).add(project.id)); setCollapsedProjects((current) => { const next = new Set(current); next.delete(project.id); return next; }); onSelectProject(project); }}><span aria-hidden="true">▣</span><span>{project.title}</span></button>
         <button className="tree-drag-handle" draggable aria-label={"拖动项目 " + project.title} title="拖动项目" onClick={(event) => event.stopPropagation()} onDragStart={(event) => beginDrag(event, { entityType: "project", entityId: project.id })}>⠿</button>
         {renderDropZone(projectTarget, "before")}
         {renderDropZone(projectTarget, "after")}
         <button className="tree-context-hint" aria-label={`管理项目 ${project.title}`} onClick={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })} onContextMenu={(event) => showContextMenu(event, { entityType: "project", entityId: project.id })}>⋯</button>
       </div>
-      {activeProjectId === project.id && (
+      {projectExpanded(project.id) && (
         <ul className="tree-sessions">
           {visibleSessions.map((session) => {
             const sessionTarget = { entityType: "session", entityId: session.id, projectId: project.id } as const;
@@ -711,7 +723,7 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
   );
 }
 
-function DocumentItem({ item, languageView, sessionId }: { item: TimelineItem; languageView: LanguageView; sessionId: string }) {
+function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }: { item: TimelineItem; languageView: LanguageView; sessionId: string; wholeAudioReady: boolean; onSeek: (capturedAtMs: number) => void }) {
   const [playing, setPlaying] = useState(false);
   const [playError, setPlayError] = useState(false);
   const time = new Date(item.occurredAt).toLocaleTimeString("zh-CN", { hour12: false });
@@ -724,7 +736,7 @@ function DocumentItem({ item, languageView, sessionId }: { item: TimelineItem; l
   if (item.kind === "paragraph") {
     return (
       <article id={`evidence-${item.id}`} className="course-paragraph" data-testid="course-paragraph">
-        <header>{item.speakerLabel && <span className="speaker-label">{item.speakerLabel}</span>}<time>{time}</time><button type="button" className="text-link-button" onClick={() => { setPlaying((current) => !current); setPlayError(false); }}>{playing ? "关闭回放" : "回听这段"}</button></header>
+        <header>{item.speakerLabel && <span className="speaker-label">{item.speakerLabel}</span>}<time>{time}</time><button type="button" className="text-link-button" onClick={() => { if (wholeAudioReady && item.audioStartMs) onSeek(item.audioStartMs); else { setPlaying((current) => !current); setPlayError(false); } }}>{playing ? "关闭回放" : "定位回听"}</button></header>
         {playing && <audio controls autoPlay preload="none" src={`/api/v1/sessions/${sessionId}/paragraphs/${item.id}/audio`} onPlay={(event) => { document.querySelectorAll("audio").forEach((audio) => { if (audio !== event.currentTarget) audio.pause(); }); }} onError={() => setPlayError(true)} />}
         {playError && <small role="status">这段音频暂时无法播放，请检查网络；旧版导入内容可能没有原始音频。</small>}
         {(languageView !== "translation" || item.translationMode === "same_language") && <p className="source-text">{item.original}</p>}
@@ -825,6 +837,10 @@ function RuntimeSettingsDialog({ runtime, readWeave, onClose }: { runtime: Runti
 
 function SessionConsole({ project, initial, languageView, onLanguageView }: { project: Project; initial: Session; languageView: LanguageView; onLanguageView: (view: LanguageView) => void }) {
   const [session, setSession] = useState(initial);
+  const [seekRequest, setSeekRequest] = useState<{ capturedAtMs: number; serial: number } | null>(null);
+  const [wholeAudioReady, setWholeAudioReady] = useState(false);
+  const [documentSearch, setDocumentSearch] = useState("");
+  const seekToCapture = (capturedAtMs: number) => setSeekRequest((previous) => ({ capturedAtMs, serial: (previous?.serial ?? 0) + 1 }));
   const [timeline, dispatch] = useReducer(timelineReducer, { events: [], items: [] });
   const [streamConnected, setStreamConnected] = useState(false);
   const [lastActivityAt, setLastActivityAt] = useState(initial.updated_at);
@@ -962,12 +978,22 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }
 
   useEffect(() => {
-    return subscribeEvents(initial.id, (event) => {
-      dispatch({ type: "append", event });
+    let active = true;
+    let unsubscribe: () => void = () => {};
+    const onEvent = (event: EventEnvelope) => {
+      if (isCourseEvent(event)) dispatch({ type: "append", event });
       setSession((current) => applySessionStateEvent(current, event.event_type, event.ingested_at, event.payload.resumed === true));
       const eventTime = event.ingested_at || event.captured_at_wall;
       if (eventTime) setLastActivityAt((current) => new Date(eventTime).getTime() >= new Date(current).getTime() ? eventTime : current);
-    }, setStreamConnected);
+    };
+    void api.documentSnapshot(initial.id).then(({ events, cursor }) => {
+      if (!active) return;
+      dispatch({ type: "reset", events });
+      unsubscribe = subscribeEvents(initial.id, onEvent, setStreamConnected, cursor ?? undefined);
+    }).catch(() => {
+      if (active) unsubscribe = subscribeEvents(initial.id, onEvent, setStreamConnected);
+    });
+    return () => { active = false; unsubscribe(); };
   }, [initial.id]);
 
   useEffect(() => {
@@ -1442,7 +1468,11 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const readWeaveUrl = readWeave?.targets?.find((target) => target.local_id === `${session.id}:${section === "user-notes" ? "user" : section}` || (!section && target.node_type === "session" && target.local_id === session.id))?.note_url ?? readWeave?.note_url;
   const visibleItems = timeline.items.filter(isRenderableDocumentItem).filter((item) => {
     if (item.kind === "preview" && languageView === "translation") return false;
-    if (!section || section === "transcript") return section ? item.kind === "paragraph" || item.kind === "preview" : item.kind !== "insight";
+    if (!section || section === "transcript") {
+      if (section && item.kind !== "paragraph" && item.kind !== "preview") return false;
+      const query = documentSearch.trim().toLocaleLowerCase();
+      return !query || section !== "transcript" || [item.body, item.translation, item.speakerLabel].some((value) => value?.toLocaleLowerCase().includes(query));
+    }
     if (section === "overview") return item.kind === "session-summary";
     if (section === "explanations") return item.kind === "insight";
     if (section === "assets") return item.kind === "asset";
@@ -1473,6 +1503,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         <div><p className="eyebrow">{project.title}</p><h1>{session.title}</h1><div className="session-meta"><span>建立：{formatLocalTimestamp(session.created_at)}</span><span>最近活动：{formatLocalTimestamp(lastActivityAt)}</span></div></div>
         <div className="header-status"><StatusBadge tone={streamConnected ? "green" : "yellow"}>{streamConnected ? "多端已同步" : "正在恢复同步"}</StatusBadge><StatusBadge tone={stopPending ? "yellow" : stateTone(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}>{stopPending ? "本机已停麦，待完成停止" : stateLabel(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}</StatusBadge></div>
       </header>
+      <SessionPlayer sessionId={session.id} sessionState={session.state} seekRequest={seekRequest} onReady={setWholeAudioReady} />
       <main className="session-layout">
         <section className="document-panel">
           <div className="document-toolbar">
@@ -1482,6 +1513,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <small className="document-explainer">自动整理的内容会同步到 ReadWeave；“我的笔记”不会被系统覆盖</small>
             </div>
             <div className="view-switch" role="group" aria-label="语言显示模式">{(["bilingual", "source", "translation"] as LanguageView[]).map((view) => <button key={view} aria-pressed={languageView === view} className={languageView === view ? "active" : ""} onClick={() => onLanguageView(view)}>{view === "bilingual" ? "双语" : view === "source" ? "原文" : "译文"}</button>)}</div>
+            <div className="document-actions">
+              {section === "transcript" && <input type="search" aria-label="搜索课程原文和译文" placeholder="搜索原文或译文" value={documentSearch} onChange={(event) => { setDocumentSearch(event.target.value); setVisibleItemLimit(TIMELINE_PAGE_SIZE); }} />}
+              <button type="button" onClick={() => downloadCourseMarkdown(session.title, timeline.items)} disabled={!timeline.items.length}>导出课程笔记</button>
+            </div>
           </div>
           <div
             ref={documentRef}
@@ -1494,6 +1529,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             }}
           >
             {newItemsPending && <button className="new-items-button" type="button" onClick={() => { followDocumentRef.current = true; setNewItemsPending(false); const element = documentRef.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: "instant" }); }}>有新内容，回到底部</button>}
+            {section === "transcript" && documentSearch.trim() && <p className="document-search-count" role="status">找到 {visibleItems.length} 条匹配内容</p>}
+            {section === "overview" && <CourseOutline items={timeline.items} onSeek={seekToCapture} />}
             {hiddenItemCount > 0 && (
               <button
                 className="load-earlier-button"
@@ -1502,7 +1539,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
                 加载更早内容 · 还有 {hiddenItemCount} 项
               </button>
             )}
-            {section === "user-notes" ? <UserNotes key={session.id} sessionId={session.id} /> : renderedItems.length ? renderedItems.map((item) => <DocumentItem key={item.id} item={item} languageView={languageView} sessionId={session.id} />) : <div className="document-empty"><h2>{section === "overview" ? "课程概览" : section === "assets" ? "课件与证据" : section === "explanations" ? "补充讲解与术语" : "逐段转写与翻译"}</h2><p>{section === "overview" ? "停止录音并完成整理后，课程总结会显示在这里。" : section === "assets" ? "在下方选择或拖入材料，确认上传后即可查看解析结果。" : section === "explanations" ? "积累一个完整内容组后生成总结和专业术语解释，不对每一句重复生成。" : "开始录音后，稳定原文和译文将按时间排列；点击时间旁的入口可回听对应片段。"}</p></div>}
+            {section === "user-notes" ? <UserNotes key={session.id} sessionId={session.id} /> : renderedItems.length ? renderedItems.map((item) => <DocumentItem key={item.id} item={item} languageView={languageView} sessionId={session.id} wholeAudioReady={wholeAudioReady} onSeek={seekToCapture} />) : section !== "overview" && <div className="document-empty"><h2>{section === "assets" ? "课件与证据" : section === "explanations" ? "补充讲解与术语" : "逐段转写与翻译"}</h2><p>{section === "assets" ? "在下方选择或拖入材料，确认上传后即可查看解析结果。" : section === "explanations" ? "积累一个完整内容组后生成总结和专业术语解释，不对每一句重复生成。" : "开始录音后，稳定原文和译文将按时间排列；点击时间旁的入口可回听对应片段。"}</p></div>}
           </div>
           <section
             className={"material-composer" + (uploadDropActive ? " drop-active" : "")}
@@ -1719,7 +1756,7 @@ export default function App() {
         onUpdateProject={(project, input) => runWorkspaceAction(async () => { await api.updateProject(project.id, input); await refresh(); })}
         onMoveWorkspace={(input) => runWorkspaceAction(async () => { await api.moveWorkspaceEntity(input); await refresh(); })}
         onUpdateSession={(project, session, archived, sortOrder, title) => runWorkspaceAction(async () => { const metadata = snapshot.session_metadata.find((item) => item.session_id === session.id); await api.updateSession(project.id, session.id, { title, pinned: metadata?.pinned ?? false, sort_order: sortOrder ?? metadata?.sort_order ?? 0, archived }); await refresh(); if (archived && activeSession?.id === session.id) navigate(project.id, null); })}
-        onTrash={(entityType, entityId) => runWorkspaceAction(async () => { await api.trash(entityType, entityId); await refresh(); if (entityType === "folder" || (entityType === "project" && activeProject?.id === entityId) || (entityType === "session" && activeSession?.id === entityId)) navigate(null, null); })}
+        onTrash={(entityType, entityId) => runWorkspaceAction(async () => { await api.trash(entityType, entityId); await refresh(); if (entityType === "session" && activeSession?.id === entityId && activeProject) navigate(activeProject.id, null); else if (entityType === "project" && activeProject?.id === entityId) navigate(null, null); })}
         onRestoreTrash={(item) => runWorkspaceAction(async () => { await api.restoreTrash(item.entity_type, item.entity_id); await refresh(); })}
         onPurgeTrash={(item) => runWorkspaceAction(async () => {
           await api.purgeTrash(item.entity_type, item.entity_id);

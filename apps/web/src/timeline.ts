@@ -65,8 +65,15 @@ function cleanTranslationDisplay(value: unknown): string {
 // A course document pairs stable source segments with translations and expands structured teaching output.
 export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
   const translations = new Map<string, EventEnvelope>();
+  const segmentAudio = new Map<string, { start: number; end: number }>();
   for (const event of events) {
     if (event.event_type === "translation.finalized") translations.set(text(event.payload.paragraph_id) || text(event.payload.segment_id), event);
+    if (event.event_type === "segment.finalized") {
+      const start = Number(event.payload.audio_start_ms);
+      const end = Number(event.payload.audio_end_ms);
+      const id = text(event.payload.segment_id);
+      if (id && Number.isFinite(start) && Number.isFinite(end) && start > 0 && end >= start) segmentAudio.set(id, { start, end });
+    }
   }
   const hasParagraphs = events.some((event) => event.event_type === "paragraph.finalized");
   const usesInternalFragments = events.some((event) => event.event_type === "segment.finalized" && event.payload.display_mode === "internal_fragment");
@@ -102,6 +109,8 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
     }
     if (event.event_type === "paragraph.finalized" || (event.event_type === "segment.finalized" && !hasParagraphs && !usesInternalFragments)) {
       const segmentId = text(payload.paragraph_id) || text(payload.segment_id) || event.event_id;
+      const spans = (event.event_type === "paragraph.finalized" ? strings(payload.segment_ids) : [segmentId])
+        .map((id) => segmentAudio.get(id)).filter((span): span is { start: number; end: number } => Boolean(span));
       const translation = translations.get(segmentId);
       // Recognized source is content, even when a lecturer literally says a
       // phrase resembling a provider label. Only translations need label cleanup.
@@ -117,6 +126,8 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
         translationMode: translation?.payload.translation_mode === "same_language" ? "same_language" : undefined,
         sourceProvider: text(payload.provider), translationProvider: translation ? text(translation.payload.provider) : undefined,
         evidenceIds: [segmentId], occurredAt: event.captured_at_wall,
+        audioStartMs: spans.length ? Math.min(...spans.map((span) => span.start)) : undefined,
+        audioEndMs: spans.length ? Math.max(...spans.map((span) => span.end)) : undefined,
       });
       continue;
     }
@@ -268,6 +279,20 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
 // from rendering backend progress events as if they were recognized speech.
 export function isRenderableDocumentItem(item: TimelineItem): boolean {
   return item.kind !== "status";
+}
+
+// Audio acknowledgements and worker telemetry remain durable facts, but they
+// cannot change the readable course document. Skip them in the React timeline.
+const COURSE_EVENT_TYPES = new Set([
+  "paragraph.finalized", "segment.finalized", "translation.finalized", "content.group.created",
+  "explanation.card.created", "session.completed", "session.recording.started",
+  "session.summary.created", "session.summary.failed", "asset.page.extracted",
+  "model.job.failed", "model.job.retry_scheduled", "transcript.interim",
+  "transcript.stable", "transcript.revised",
+]);
+
+export function isCourseEvent(event: EventEnvelope): boolean {
+  return COURSE_EVENT_TYPES.has(event.event_type);
 }
 
 // Replay and live delivery can overlap, so event IDs remain the deduplication boundary.

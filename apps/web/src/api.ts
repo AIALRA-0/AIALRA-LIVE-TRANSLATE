@@ -32,6 +32,11 @@ export interface RuntimeHealth {
   } | null;
 }
 
+export interface SessionAudioIndex {
+  duration_ms: number;
+  positions: Array<{ captured_at_ms: number; duration_ms: number; playback_start_ms: number; playback_end_ms: number }>;
+}
+
 // API errors retain the server message so consent and state failures stay actionable.
 async function checked<T>(responsePromise: Promise<Response> | Response): Promise<T> {
   const response = await responsePromise;
@@ -77,6 +82,9 @@ async function checked<T>(responsePromise: Promise<Response> | Response): Promis
 // All calls use relative URLs so browser, Tauri, and the Rust static host share one client.
 export const api = {
   health: () => checked<RuntimeHealth>(fetch("/api/v1/health")),
+  documentSnapshot: (sessionId: string) => checked<{ events: EventEnvelope[]; cursor: string | null }>(
+    fetch(`/api/v1/sessions/${sessionId}/document-snapshot`)),
+  sessionAudioIndex: (sessionId: string) => checked<SessionAudioIndex>(fetch(`/api/v1/sessions/${sessionId}/audio/index`)),
   note: (sessionId: string) => checked<{text: string; revision: number}>(fetch(`/api/v1/sessions/${sessionId}/notes`)),
   saveNote: (sessionId: string, text: string, base_revision: number) => checked<{text: string; revision: number}>(fetch(`/api/v1/sessions/${sessionId}/notes`, {
     method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify({text, base_revision}),
@@ -228,8 +236,9 @@ export function subscribeEvents(
   sessionId: string,
   onEvent: (event: EventEnvelope) => void,
   onConnection: (connected: boolean) => void,
+  after?: string,
 ): () => void {
-  const source = new EventSource(`/api/v1/sessions/${sessionId}/stream`);
+  const source = new EventSource(`/api/v1/sessions/${sessionId}/stream${after ? `?after=${encodeURIComponent(after)}` : ""}`);
   source.onopen = () => onConnection(true);
   source.onerror = () => onConnection(false);
   source.onmessage = (message) => onEvent(JSON.parse(message.data) as EventEnvelope);
