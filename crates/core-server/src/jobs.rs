@@ -355,7 +355,8 @@ pub async fn complete_job(
     // A topic check or explanation may finish after the last translated
     // paragraph arrives. Revisit that tail without requiring another utterance.
     if matches!(job.job_type.as_str(), "topic" | "explain")
-        && let Err(_error) = maybe_enqueue_coherent_explanation(&state, &job.session_id, &job.id)
+        && let Err(_error) =
+            enqueue_topic_followup(&state, &job.session_id, job.job_type == "topic")
     {
         tracing::warn!(
             error_kind = "topic_followup_enqueue_failed",
@@ -1437,17 +1438,32 @@ fn text_requires_translation(text: &str, target: &str) -> bool {
 fn maybe_enqueue_coherent_explanation(
     state: &AppState,
     session_id: &str,
-    current_job_id: &str,
+    _current_job_id: &str,
 ) -> Result<(), ApiError> {
-    if state.store.active_model_jobs_excluding(
-        session_id,
-        &["asr", "translate", "explain"],
-        current_job_id,
-    )? > 0
-    {
-        return Ok(());
-    }
     crate::topics::enqueue_pending(state, session_id, false)?;
+    Ok(())
+}
+
+fn enqueue_topic_followup(
+    state: &AppState,
+    session_id: &str,
+    after_topic_check: bool,
+) -> Result<(), ApiError> {
+    let force_tail = if after_topic_check {
+        if let Some(project) = state.store.project_for_session(session_id)? {
+            !state
+                .store
+                .get_recording_lease(&project.id)?
+                .is_some_and(|lease| {
+                    lease.session_id == session_id && lease.expires_at > chrono::Utc::now()
+                })
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    crate::topics::enqueue_pending(state, session_id, force_tail)?;
     Ok(())
 }
 
@@ -1769,7 +1785,7 @@ mod tests {
         validate_diagnostic_id, validate_error_stage, validate_model_stage,
     };
     use crate::app::AppState;
-    use aialra_event_store::NewSession;
+    use aialra_event_store::{NewModelJob, NewProject, NewSession};
     use serde_json::json;
 
     #[test]
@@ -2214,6 +2230,109 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn unfinished_background_work_does_not_suppress_live_topic_enqueue() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_busy_topic".into(),
+                title: "Busy topic".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .enqueue_job(NewModelJob {
+                id: "asset-job".into(),
+                session_id: "session_busy_topic".into(),
+                job_type: "asset_parse".into(),
+                priority: 30,
+                input: json!({}),
+                input_object_hash: None,
+                idempotency_key: "asset-job".into(),
+            })
+            .unwrap();
+        for index in 0..12 {
+            state.emit_idempotent(&format!("busy-para-{index}"), "session_busy_topic", "fixture",
+                "paragraph.finalized", index, &format!("busy-para-{index}"), None,
+                json!({"paragraph_id": format!("busy-para-{index}"), "text": "A complete synthetic lecture paragraph. ".repeat(7)})).unwrap();
+        }
+        maybe_enqueue_coherent_explanation(&state, "session_busy_topic", "current-translation")
+            .unwrap();
+        let topic = state
+            .store
+            .lease_model_job("topic-worker", &["topic".into()], 60)
+            .unwrap();
+        assert!(topic.is_some());
+    }
+
+    #[test]
+    fn historical_topic_followup_includes_the_short_final_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_project(&NewProject {
+                id: "project_topic_tail".into(),
+                owner_subject: "owner".into(),
+                title: "Synthetic project".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+            })
+            .unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_topic_tail".into(),
+                title: "Synthetic lesson".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .store
+            .attach_session_to_project(
+                "project_topic_tail",
+                "session_topic_tail",
+                "owner",
+                "fixture",
+            )
+            .unwrap();
+        for index in 0..24 {
+            state.emit_idempotent(&format!("tail-{index}"), "session_topic_tail", "fixture",
+                "paragraph.finalized", index, &format!("paragraph-{index}"), None,
+                json!({"paragraph_id": format!("paragraph-{index}"), "text": "Synthetic speech for a course topic."})).unwrap();
+        }
+        assert!(crate::topics::enqueue_pending(&state, "session_topic_tail", true).unwrap());
+        let first = state
+            .store
+            .lease_model_job("topic-worker", &["topic".into()], 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.input["segments"].as_array().unwrap().len(), 20);
+        let result = json!({"boundaries": [], "provider": "ollama:synthetic@cuda"});
+        crate::topics::apply_result(&state, &first, &result).unwrap();
+        state
+            .store
+            .complete_model_job(&first.id, "topic-worker", &result)
+            .unwrap();
+        super::enqueue_topic_followup(&state, "session_topic_tail", true).unwrap();
+        let tail = state
+            .store
+            .lease_model_job("topic-worker-2", &["topic".into()], 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tail.input["segments"].as_array().unwrap().len(), 4);
     }
 
     #[test]

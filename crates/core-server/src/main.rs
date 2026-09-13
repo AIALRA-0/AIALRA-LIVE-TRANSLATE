@@ -131,6 +131,10 @@ async fn main() -> Result<()> {
             post(projects::summarize_session),
         )
         .route(
+            "/projects/{project_id}/sessions/{session_id}/topics/ensure",
+            post(projects::ensure_session_topics),
+        )
+        .route(
             "/projects/{project_id}/sessions/{session_id}/device-pairing",
             post(pairing::create_pairing_code),
         )

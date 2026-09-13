@@ -701,6 +701,22 @@ pub async fn summarize_session(
     Ok(Json(json!({"job_id": job.id, "status": job.status})))
 }
 
+pub async fn ensure_session_topics(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((project_id, session_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    owned_project_session(&state, &user.0, &project_id, &session_id)?;
+    // A quiet historical course can seal its last window. A live recorder
+    // keeps the normal semantic boundary rules and never gets interrupted.
+    let has_active_lease = state
+        .store
+        .get_recording_lease(&project_id)?
+        .is_some_and(|lease| lease.session_id == session_id && lease.expires_at > Utc::now());
+    let queued = crate::topics::enqueue_pending(&state, &session_id, !has_active_lease)?;
+    Ok(Json(json!({"queued": queued})))
+}
+
 fn project_sse_event(update: &ProjectUpdateRecord) -> Event {
     Event::default()
         .id(update.cursor.to_string())
@@ -983,6 +999,92 @@ fn default_target_language() -> String {
 mod tests {
     use super::*;
     use aialra_event_store::{NewModelJob, NewSession, WorkerHeartbeat};
+
+    #[tokio::test]
+    async fn historical_topic_backfill_is_owner_scoped_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_project(&NewProject {
+                id: "project_topic_owner".into(),
+                owner_subject: "owner".into(),
+                title: "Synthetic course".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+            })
+            .unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_topic_owner".into(),
+                title: "Synthetic lesson".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .store
+            .attach_session_to_project(
+                "project_topic_owner",
+                "session_topic_owner",
+                "owner",
+                "fixture",
+            )
+            .unwrap();
+        for index in 0..8 {
+            state
+                .emit_idempotent(
+                    &format!("topic-owner-{index}"),
+                    "session_topic_owner",
+                    "fixture",
+                    "paragraph.finalized",
+                    index,
+                    &format!("paragraph-{index}"),
+                    None,
+                    json!({"paragraph_id": format!("paragraph-{index}"),
+                    "text": "Synthetic speech with no private recording."}),
+                )
+                .unwrap();
+        }
+        let path = ("project_topic_owner".into(), "session_topic_owner".into());
+        assert!(
+            ensure_session_topics(
+                State(state.clone()),
+                Extension(CurrentUser("other".into())),
+                Path(path.clone())
+            )
+            .await
+            .is_err()
+        );
+        let Json(first) = ensure_session_topics(
+            State(state.clone()),
+            Extension(CurrentUser("owner".into())),
+            Path(path.clone()),
+        )
+        .await
+        .unwrap();
+        let Json(second) = ensure_session_topics(
+            State(state.clone()),
+            Extension(CurrentUser("owner".into())),
+            Path(path),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["queued"], true);
+        assert_eq!(second["queued"], false);
+        assert_eq!(
+            state
+                .store
+                .model_queue_counts(Some("session_topic_owner"))
+                .unwrap()
+                .queued,
+            1
+        );
+    }
 
     #[test]
     fn lease_tokens_are_url_safe_and_hashable() {

@@ -208,6 +208,8 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   onOpenSettings: () => void;
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [expandedHistoryProjects, setExpandedHistoryProjects] = useState<Set<string>>(() => new Set());
+  const [allProjectsVisible, setAllProjectsVisible] = useState(false);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(
     () => new Set(snapshot.folders.filter((folder) => folder.parent_id === null).map((folder) => folder.id)),
@@ -243,6 +245,18 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
       || left.title.localeCompare(right.title, "zh-CN")
       || left.id.localeCompare(right.id);
   });
+  const rootProjects = projectsInFolder(null);
+  const latestSessionByProject = new Map<string, string>();
+  for (const session of snapshot.sessions) {
+    const projectId = snapshot.session_projects[session.id];
+    if (projectId && session.updated_at > (latestSessionByProject.get(projectId) ?? "")) {
+      latestSessionByProject.set(projectId, session.updated_at);
+    }
+  }
+  const recentProjectIds = new Set([...rootProjects]
+    .sort((left, right) => (latestSessionByProject.get(right.id) ?? "").localeCompare(latestSessionByProject.get(left.id) ?? ""))
+    .slice(0, 2).map((project) => project.id));
+  const visibleRootProjects = allProjectsVisible ? rootProjects : rootProjects.filter((project) => recentProjectIds.has(project.id) || project.id === activeProjectId);
 
   useEffect(() => {
     const close = () => setContextMenu(null);
@@ -511,6 +525,10 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   const renderProject = (project: Project) => {
     const projectTarget = { entityType: "project", entityId: project.id } as const;
     const projectDropIntent = currentDropIntent(projectTarget);
+    const sessions = projectSessions(project.id);
+    const recentLimit = sessions.length > 4 ? 1 : 2;
+    const historyExpanded = expandedHistoryProjects.has(project.id);
+    const visibleSessions = historyExpanded ? sessions : sessions.filter((session, index) => index < recentLimit || session.id === activeSessionId);
     return (
     <li key={project.id} className={`tree-project ${dragging?.entityId === project.id ? "dragging" : ""}`}>
       <div
@@ -526,7 +544,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
       </div>
       {activeProjectId === project.id && (
         <ul className="tree-sessions">
-          {projectSessions(project.id).map((session) => {
+          {visibleSessions.map((session) => {
             const sessionTarget = { entityType: "session", entityId: session.id, projectId: project.id } as const;
             const sessionDropIntent = currentDropIntent(sessionTarget);
             return <li key={session.id} className={dragging?.entityId === session.id ? "dragging" : ""}>
@@ -550,6 +568,8 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
               )}
             </li>;
           })}
+          {sessions.length > visibleSessions.length && <li><button type="button" className="tree-history-toggle" onClick={() => setExpandedHistoryProjects((current) => new Set(current).add(project.id))}>查看其余 {sessions.length - visibleSessions.length} 节历史课程</button></li>}
+          {historyExpanded && sessions.length > recentLimit && <li><button type="button" className="tree-history-toggle" onClick={() => setExpandedHistoryProjects((current) => { const next = new Set(current); next.delete(project.id); return next; })}>收起历史课程</button></li>}
         </ul>
       )}
     </li>
@@ -615,7 +635,9 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
         {dragging && <div className="drag-status" role="status" aria-live="polite"><strong>正在移动：{targetTitle(dragging)}</strong><span>{dropTarget ? `松开放入“${dropTargetTitle(dropTarget)}”` : "将光标移到高亮位置，再松开鼠标"}</span></div>}
         <ul className={currentDropIntent({ entityType: "root" }) ? "workspace-root-drop drop-target drop-root" : "workspace-root-drop"} onContextMenu={(event) => showContextMenu(event, { entityType: "root" })}>
           {snapshot.folders.filter((folder) => !folder.archived_at && folder.parent_id === null).map((folder) => renderFolder(folder, 0))}
-          {projectsInFolder(null).map(renderProject)}
+          {visibleRootProjects.map(renderProject)}
+          {rootProjects.length > visibleRootProjects.length && <li><button type="button" className="tree-history-toggle" onClick={() => setAllProjectsVisible(true)}>查看其余 {rootProjects.length - visibleRootProjects.length} 个项目</button></li>}
+          {allProjectsVisible && rootProjects.length > 2 && <li><button type="button" className="tree-history-toggle" onClick={() => setAllProjectsVisible(false)}>收起其他项目</button></li>}
           {dragging && dragging.entityType !== "session" && <li>{renderDropZone({ entityType: "root" }, "root")}</li>}
         </ul>
       </nav>
@@ -645,6 +667,9 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
   const [targetLanguage, setTargetLanguage] = useState(project.target_language);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [historyExpanded, setHistoryExpanded] = useState(false);
+  const recentSessions = [...sessions].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  const recentLimit = sessions.length > 4 ? 1 : 2;
   const resumableSession = [...sessions]
     .filter((session) => isRecordingResumable(session.state))
     .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0];
@@ -664,7 +689,8 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
             <div><p>继续已有课程会话</p><strong>{resumableSession.title}</strong><small>最近活动：{formatLocalTimestamp(resumableSession.updated_at)} · 已确认历史会按时间戳继续保留</small></div>
             <button className="primary-button" onClick={() => navigate(project.id, resumableSession.id)}>{resumeSessionLabel(resumableSession.state)}</button>
           </div>}
-          {sessions.length ? sessions.map((session) => <button className="recent-session-row" key={session.id} onClick={() => navigate(project.id, session.id)}><span><strong>{session.title}</strong><small>最近活动：{formatLocalTimestamp(session.updated_at)}</small></span><StatusBadge tone={stateTone(recordingDisplayState(session.state, session.recording_active))}>{stateLabel(recordingDisplayState(session.state, session.recording_active))}</StatusBadge></button>) : <p>还没有课程会话</p>}
+          {sessions.length ? (historyExpanded ? recentSessions : recentSessions.slice(0, recentLimit)).map((session) => <button className="recent-session-row" key={session.id} onClick={() => navigate(project.id, session.id)}><span><strong>{session.title}</strong><small>最近活动：{formatLocalTimestamp(session.updated_at)}</small></span><StatusBadge tone={stateTone(recordingDisplayState(session.state, session.recording_active))}>{stateLabel(recordingDisplayState(session.state, session.recording_active))}</StatusBadge></button>) : <p>还没有课程会话</p>}
+          {sessions.length > recentLimit && <button className="session-history-toggle" type="button" onClick={() => setHistoryExpanded((current) => !current)}>{historyExpanded ? "收起历史课程" : `查看其余 ${sessions.length - recentLimit} 节历史课程`}</button>}
         </section>
         <form className="overview-card new-session" onSubmit={create}>
           <h2>新建独立课程会话</h2>
@@ -807,6 +833,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [recordingStatus, setRecordingStatus] = useState<RecordingProjectStatus | null>(null);
   const [recordingStatusReady, setRecordingStatusReady] = useState(false);
   const recordingStatusRequest = useRef(0);
+  const topicEnsureStarted = useRef(false);
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -940,6 +967,30 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       if (eventTime) setLastActivityAt((current) => new Date(eventTime).getTime() >= new Date(current).getTime() ? eventTime : current);
     }, setStreamConnected);
   }, [initial.id]);
+
+  useEffect(() => {
+    if (topicEnsureStarted.current) return;
+    const assigned = new Set<string>();
+    const paragraphs: string[] = [];
+    for (const event of timeline.events) {
+      if (event.event_type === "paragraph.finalized" && typeof event.payload.paragraph_id === "string") paragraphs.push(event.payload.paragraph_id);
+      const evidence = event.event_type === "content.group.created" ? event.payload.paragraph_ids
+        : event.event_type === "explanation.card.created" && event.payload.result && typeof event.payload.result === "object"
+          ? (event.payload.result as Record<string, unknown>).evidence_segment_ids : null;
+      if (Array.isArray(evidence)) for (const id of evidence) if (typeof id === "string") assigned.add(id);
+    }
+    if (paragraphs.filter((id) => !assigned.has(id)).length < 8) return;
+    // EventSource replays the full history. Wait for the replay to settle so an
+    // old card arriving after the eighth paragraph cannot trigger new work.
+    const timer = window.setTimeout(() => {
+      if (topicEnsureStarted.current) return;
+      topicEnsureStarted.current = true;
+      void api.ensureTopics(project.id, initial.id).catch(() => {
+        setNotice("当前内容组尚未整理完成，请稍后重新打开课程重试");
+      });
+    }, 1_500);
+    return () => window.clearTimeout(timer);
+  }, [timeline.events, project.id, initial.id]);
 
   useEffect(() => {
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1454,6 +1505,9 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
            <section className="side-card capture-card">
              <div className="card-heading"><h3>录音</h3><StatusBadge tone={captureTone}>{captureLabel}</StatusBadge></div>
              <div className="session-continuity"><strong>{stopPending ? "本机收音已停止" : isRecordingResumable(session.state) ? "可继续本次课程" : "本次课程历史"}</strong><span>{stopPending ? "已记住本次停止操作。重试只补传尚未确认的音频并结束课程，不会重新打开麦克风。" : sessionContinuity}</span></div>
+             <details className="capture-advanced">
+               <summary>设备与音量设置 <small>{captureMode === "microphone" ? selectedAudioLabel : "浏览器共享音频"}</small></summary>
+               <div className="capture-advanced-body">
              <label>音频来源<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as CaptureMode)} disabled={isRecording || busy || micTesting || audioPermissionPending}><option value="microphone">麦克风</option><option value="screen">浏览器标签或共享音频</option></select></label>
              {captureMode === "microphone" && <>
                <label>输入设备<select value={selectedAudioInput} onChange={(event) => { setSelectedAudioInput(event.target.value); setMicResult(null); }} disabled={isRecording || busy || micTesting || audioPermissionPending}><option value="">{defaultAudioLabel}</option>{audioInputs.filter((device) => device.deviceId !== "default" && device.deviceId !== "communications").map((device) => <option key={device.deviceId} value={device.deviceId}>{formatAudioInputLabel(device)}</option>)}</select></label>
@@ -1469,6 +1523,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="secondary-button" disabled={busy || micTesting || audioPermissionPending || isRecording || captureMode !== "microphone"} onClick={() => void runMicTest()}>{micTesting ? "测试中 4 秒" : "测试麦克风"}</button>
             </div>
             <p className="capture-help">音频在确认写入后才会从本机发送队列中移除；浏览器端不需要额外配对设备。</p>
+               </div>
+             </details>
             {keepScreenAwake && wakeLockNotice && <button type="button" className="text-link-button wake-lock-notice" onClick={() => void screenWake.request()}>{wakeLockNotice}</button>}
             {conflictingLeaseSeconds !== null && <div className="recording-lease-status" role="status"><strong>其他设备正在录制本项目</strong><span>{recordingStatus?.lease?.session_title ? `课程“${recordingStatus.lease.session_title}”` : "当前课程会话"} · 租约约 {conflictingLeaseSeconds} 秒后到期</span></div>}
             {capacityBlocked && <div className="recording-capacity-status" role="status"><strong>暂不接纳新的项目录音</strong><span>原因：{recordingStatus?.admission.reason === "asr_backlog" ? "ASR 队列积压" : recordingStatus?.admission.reason === "asr_degraded" ? "ASR/CUDA 状态降级" : "ASR Worker 暂时离线"} · 约 {recordingStatus?.admission.retry_after_seconds ?? 5} 秒后自动复查</span></div>}
@@ -1496,7 +1552,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           <GpuPanel runtime={runtime} />
           <section className="side-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
-            <p>{readWeavePreview?.sessions.find((item) => item.session_id === session.id)?.latest_entries[0]?.translation ?? "稳定字幕和讲解会自动进入对应笔记"}</p>
+            <p>{readWeavePreview?.sessions?.find((item) => item.session_id === session.id)?.latest_entries[0]?.translation ?? "稳定字幕和讲解会自动进入对应笔记"}</p>
             <dl className="readweave-connection">
               <div><dt>连接目标</dt><dd>{readWeave?.connection?.public_url ?? (readWeave?.configured ? "已连接（地址受保护）" : "未配置")}</dd></div>
               <div><dt>同步范围</dt><dd>{readWeave?.connection?.policy ?? "仅同步稳定内容，不同步原始音频或秘密配置"}</dd></div>
@@ -1546,8 +1602,21 @@ export default function App() {
     void api.workspace(deviceId).then((next) => {
       setSnapshot(next);
       const selected = routeSelection();
-      if (!selected.projectId && next.preference?.active_project_id) navigate(next.preference.active_project_id, next.preference.active_session_id);
-      else if (!selected.projectId && next.projects[0]) navigate(next.projects[0].id, null);
+      const preferredProjectId = next.preference?.active_project_id;
+      const preferredProjectVisible = preferredProjectId && next.projects.some((project) => project.id === preferredProjectId)
+        && !next.project_placements.find((placement) => placement.project_id === preferredProjectId)?.archived_at;
+      if (!selected.projectId && preferredProjectVisible) navigate(preferredProjectId, next.preference?.active_session_id ?? null);
+      else if (!selected.projectId) {
+        const latestSessionByProject = new Map<string, string>();
+        for (const session of next.sessions) {
+          const projectId = next.session_projects[session.id];
+          if (projectId && session.updated_at > (latestSessionByProject.get(projectId) ?? "")) latestSessionByProject.set(projectId, session.updated_at);
+        }
+        const recentProject = next.projects
+          .filter((project) => !next.project_placements.find((placement) => placement.project_id === project.id)?.archived_at)
+          .sort((left, right) => (latestSessionByProject.get(right.id) ?? "").localeCompare(latestSessionByProject.get(left.id) ?? ""))[0];
+        if (recentProject) navigate(recentProject.id, null);
+      }
     }).catch((caught) => setError(caught instanceof Error ? caught.message : "工作区加载失败"));
     const refreshQuietly = () => { void refresh().catch(() => undefined); };
     const unsubscribe = subscribeWorkspace(refreshQuietly, () => undefined);

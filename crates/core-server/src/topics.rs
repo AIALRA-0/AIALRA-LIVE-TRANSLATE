@@ -13,6 +13,8 @@ const WINDOW_BYTES: usize = 4_000;
 
 /// Counts throttle analysis, never decide where a topic ends.
 pub fn enqueue_pending(state: &AppState, session_id: &str, force: bool) -> Result<bool> {
+    // Prevent overlapping topic windows, but do not let realtime ASR or
+    // translation jobs indefinitely defer the creation of a teaching task.
     if state
         .store
         .active_model_jobs_excluding(session_id, &["topic"], "")?
@@ -255,6 +257,35 @@ mod tests {
             .lease_model_job("topic-worker", &["topic".into()], 60)
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn live_translation_does_not_starve_topic_work_or_duplicate_queued_windows() {
+        let (_temp, state) = setup();
+        state
+            .enqueue_job(NewModelJob {
+                id: "live-translation".into(),
+                session_id: "session_topic_test".into(),
+                job_type: "translate".into(),
+                priority: 80,
+                input: json!({"text": "Synthetic speech"}),
+                input_object_hash: None,
+                idempotency_key: "live-translation".into(),
+            })
+            .unwrap();
+        assert!(enqueue_pending(&state, "session_topic_test", false).unwrap());
+        state.emit_idempotent("topic-test-12", "session_topic_test", "fixture",
+            "paragraph.finalized", 12, "para-12", None,
+            json!({"paragraph_id": "para-12", "text": "Another synthetic paragraph. ".repeat(7)})).unwrap();
+        assert!(!enqueue_pending(&state, "session_topic_test", false).unwrap());
+        assert_eq!(
+            state
+                .store
+                .model_queue_counts(Some("session_topic_test"))
+                .unwrap()
+                .queued,
+            2
+        );
     }
 
     #[test]

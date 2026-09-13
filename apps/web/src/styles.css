@@ -482,6 +482,17 @@ input:focus, select:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(0,
 .workspace-drop-zone.root-drop-zone { display: grid; min-height: 34px; margin: 5px 3px; border-color: #79a6ff; color: #bcd1ff; background: rgba(23, 53, 111, .42); }
 .workspace-drop-zone.root-drop-zone.active { color: #fff; background: #214d9a; }
 
+/* Keep the recording choices visible while preserving direct access to history. */
+.tree-history-toggle { width: 100%; margin: 5px 0; padding: 7px 11px; border: 1px solid var(--sidebar-line); border-radius: 7px; color: var(--sidebar-ink); background: var(--sidebar-surface); text-align: left; cursor: pointer; font-size: 11px; }
+.tree-history-toggle:hover, .tree-history-toggle:focus-visible { background: var(--sidebar-selected); outline-color: #3978ff; }
+.session-history-toggle { width: 100%; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--soft); text-align: center; cursor: pointer; }
+.session-history-toggle:hover, .session-history-toggle:focus-visible { border-color: #3978ff; outline-color: #3978ff; }
+.capture-advanced { min-width: 0; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); }
+.capture-advanced > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; color: var(--ink); cursor: pointer; font-size: 11px; font-weight: 750; }
+.capture-advanced > summary small { overflow: hidden; max-width: 58%; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 500; }
+.capture-advanced-body { display: grid; gap: 11px; padding: 3px 12px 12px; }
+@media (min-width: 1081px) { .session-layout { grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr); } }
+
 [data-theme="dark"] .material-composer { background: color-mix(in srgb, var(--soft) 55%, var(--paper)); }
 [data-theme="dark"] .material-drop-copy { background: #202020; }
 [data-theme="dark"] .material-confirm { background: #30260e; }
