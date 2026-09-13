@@ -8,9 +8,10 @@ import { UserNotes } from "./UserNotes";
 import { CourseQuestions } from "./CourseQuestions";
 import { SessionPlayer } from "./SessionPlayer";
 import { CourseOutline } from "./CourseOutline";
+import { focusedParagraphId, insightForParagraph, mainDocumentItems } from "./documentLayout";
 import { courseMarkdown, downloadCourseMarkdown } from "./courseExport";
 import type { NoiseSuppressionMode } from "./noiseSuppression";
-import { appendEvent, buildCourseDocument, isCourseEvent, isRenderableDocumentItem } from "./timeline";
+import { appendEvent, buildCourseDocument, isCourseEvent } from "./timeline";
 import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, RecordingProjectStatus, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
 import { canDropWorkspaceTarget, formatAudioInputLabel, formatLocalTimestamp, isFolderDescendant, isRecordingResumable, recordingDisplayState, resumeSessionLabel, type WorkspaceDragTarget, type WorkspaceDropTarget } from "./uiState";
 
@@ -776,7 +777,7 @@ function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }
   );
 }
 
-function ParagraphInsightPanel({ items, documentRef, retryAvailable, retrying, onRetry }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null>; retryAvailable: boolean; retrying: boolean; onRetry: () => void }) {
+function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, retrying, onRetry }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null>; focusKey: string; retryAvailable: boolean; retrying: boolean; onRetry: () => void }) {
   const paragraphs = useMemo(() => items.filter((item) => item.kind === "paragraph"), [items]);
   const insights = items.filter((item) => item.kind === "insight");
   const [currentParagraphId, setCurrentParagraphId] = useState<string | null>(paragraphs.at(-1)?.id ?? null);
@@ -786,30 +787,36 @@ function ParagraphInsightPanel({ items, documentRef, retryAvailable, retrying, o
     if (!root || paragraphs.length === 0) return;
     const paragraphIds = new Set(paragraphs.map((item) => item.id));
     setCurrentParagraphId((current) => current && paragraphIds.has(current) ? current : paragraphs.at(-1)?.id ?? null);
-    const observer = new IntersectionObserver((entries) => {
-      const visible = entries
-        .filter((entry) => entry.isIntersecting)
-        .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
-      if (visible) setCurrentParagraphId(visible.target.id.replace(/^evidence-/, ""));
-    }, { root, threshold: [0.2, 0.55, 0.9] });
-    root.querySelectorAll<HTMLElement>("[data-testid='course-paragraph']").forEach((element) => observer.observe(element));
-    return () => observer.disconnect();
-  }, [documentRef, paragraphs]);
+    let frame = 0;
+    const update = () => {
+      const elements = root.querySelectorAll<HTMLElement>("[data-testid='course-paragraph']");
+      if (!elements.length) return;
+      const anchor = root.getBoundingClientRect().top + Math.min(root.clientHeight * 0.25, 150);
+      const positions = [...elements].map((element) => ({ id: element.id.replace(/^evidence-/, ""), bottom: element.getBoundingClientRect().bottom }));
+      setCurrentParagraphId(focusedParagraphId(positions, anchor));
+    };
+    const onScroll = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => { frame = 0; update(); });
+    };
+    root.addEventListener("scroll", onScroll, { passive: true });
+    update();
+    return () => { root.removeEventListener("scroll", onScroll); if (frame) cancelAnimationFrame(frame); };
+  }, [documentRef, paragraphs, focusKey]);
 
   const paragraph = paragraphs.find((item) => item.id === currentParagraphId) ?? paragraphs.at(-1);
-  const insight = paragraph
-    ? [...insights].reverse().find((item) => item.evidenceIds.includes(paragraph.id))
-    : undefined;
+  const insight = insightForParagraph(insights, paragraph?.id ?? null);
   const groupParagraphs = insight
     ? paragraphs.filter((item) => insight.evidenceIds.includes(item.id))
-    : paragraphs.filter((item) => !insights.some((entry) => entry.evidenceIds.includes(item.id)));
+    : paragraph ? [paragraph] : [];
   const summary = insight?.sections?.find((section) => section.label === "当前内容组总结");
   const terms = insight?.sections?.filter((section) => section.label.startsWith("知识补充")) ?? [];
   return (
     <section className="side-card paragraph-insight-panel" data-testid="paragraph-insight-panel">
       <div className="card-heading"><h3>当前内容组</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "积累内容"}</StatusBadge></div>
       {insight?.groupReason === "capacity_continuation" && <p className="form-help">同主题续接：这一组达到单次整理容量，后续内容会继续保留，不代表老师已经换话题</p>}
-      {groupParagraphs.length ? <details className="paragraph-insight-source"><summary>{insight ? "本组覆盖" : "尚未整理"} {groupParagraphs.length} 个段落 · 查看原文</summary><p>{groupParagraphs.map((item) => item.original).join(" ")}</p></details> : <p>积累一大段课程内容后，这里会显示总结和知识补充。</p>}
+      {paragraph && <small className="insight-anchor">对应左侧 {new Date(paragraph.occurredAt).toLocaleTimeString("zh-CN", { hour12: false })} 的段落</small>}
+      {insight ? <details className="paragraph-insight-source"><summary>本组覆盖 {groupParagraphs.length} 个段落 · 查看原文</summary><p>{groupParagraphs.map((item) => item.original).join(" ")}</p></details> : <p>当前段落尚未形成已完成的内容组；不会借用其他话题的讲解。</p>}
       <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "相似内容会保持在一起，确认话题转折后再统一整理；停止录音时会整理尚未完成的内容，不逐句总结"}</p></section>
       <section className="paragraph-terms-section"><strong>知识补充</strong><p className="form-help">以下为帮助理解的背景解释，不是老师原话；有资料链接的词条已经过来源核对</p>{terms.length ? terms.map((term, index) => <details key={`${term.label}:${index}`}><summary>{term.label.replace("知识补充 · ", "")}</summary><p>{term.text}</p>{term.backgroundReference && <a href={term.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}</details>) : <p>当前内容组还没有检测到需要解释的专业名词或缩写</p>}</section>
       {retryAvailable && <button type="button" className="secondary-button" disabled={retrying} onClick={onRetry}>{retrying ? "正在重新排队" : "重试失败的讲解"}</button>}
@@ -1457,7 +1464,9 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     : session.state === "completed" && summaryPending ? "录音已完成，课程总结正在后台生成"
       : session.state === "completed" ? "录音和模型处理均已完成" : captureStatus;
   const captureTone = stopPending ? "yellow" : capturePhaseTone(capturePhase, session.state, Boolean(lease), recordingStatusReady);
-  const captureLabel = stopPending ? busy ? "正在完成停止" : "待完成停止" : capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode, recordingStatusReady);
+  const captureLabel = stopPending ? busy ? "正在完成停止" : "待完成停止"
+    : !recordingStatusReady && ["completed", "failed"].includes(session.state) ? "正在核对续录状态"
+      : capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode, recordingStatusReady);
   const currentRecordingStatus = recordingStatus?.sessions?.find((item) => item.session_id === initial.id);
   const conflictingLeaseSeconds = recordingStatus?.lease?.holder === "other"
     ? Math.max(0, Math.ceil((new Date(recordingStatus.lease.expires_at).getTime() - statusClock) / 1_000))
@@ -1488,19 +1497,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const section = routeSelection().section;
   const readWeaveNodeType = section === "user-notes" ? "user_notes" : section;
   const readWeaveUrl = readWeave?.targets?.find((target) => target.local_id === `${session.id}:${section === "user-notes" ? "user" : section}` || (!section && target.node_type === "session" && target.local_id === session.id))?.note_url ?? readWeave?.note_url;
-  const visibleItems = timeline.items.filter(isRenderableDocumentItem).filter((item) => {
-    if (item.kind === "preview" && languageView === "translation") return false;
-    if (!section || section === "transcript") {
-      if (section && item.kind !== "paragraph" && item.kind !== "preview") return false;
-      const query = documentSearch.trim().toLocaleLowerCase();
-      return !query || section !== "transcript" || [item.body, item.translation, item.speakerLabel].some((value) => value?.toLocaleLowerCase().includes(query));
-    }
-    if (section === "overview") return item.kind === "session-summary";
-    if (section === "explanations") return item.kind === "insight";
-    if (section === "assets") return item.kind === "asset";
-    return false;
-  });
+  const visibleItems = mainDocumentItems(timeline.items, section, languageView, documentSearch);
   const renderedItems = visibleItems.slice(-visibleItemLimit);
+  const documentFocusKey = `${section ?? "course"}:${renderedItems.map((item) => item.id).join("|")}`;
+  const latestCourseSummary = [...timeline.items].reverse().find((item) => item.kind === "session-summary");
   const hiddenItemCount = visibleItems.length - renderedItems.length;
   // A translation can arrive above the trailing preview. Track visible text,
   // not only item count or the final item's body, without following diagnostics.
@@ -1530,9 +1530,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         <section className="document-panel">
           <div className="document-toolbar">
             <div>
-              <span>{section === "user-notes" ? "我的笔记" : section === "assets" ? "课件与证据" : section === "overview" ? "课程概览" : section === "explanations" ? "补充讲解与术语" : "逐段转写与翻译"}</span>
+              <span>{section === "user-notes" ? "我的笔记" : section === "assets" ? "课件与证据" : "逐段转写与翻译"}</span>
               {section !== "user-notes" && <small>{visibleItems.length} 项已保存内容</small>}
-              <small className="document-explainer">自动整理的内容会同步到 ReadWeave；“我的笔记”不会被系统覆盖</small>
             </div>
             <div className="view-switch" role="group" aria-label="语言显示模式">{(["bilingual", "source", "translation"] as LanguageView[]).map((view) => <button key={view} aria-pressed={languageView === view} className={languageView === view ? "active" : ""} onClick={() => onLanguageView(view)}>{view === "bilingual" ? "双语" : view === "source" ? "原文" : "译文"}</button>)}</div>
             <div className="document-actions">
@@ -1558,7 +1557,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           >
             {newItemsPending && <button className="new-items-button" type="button" onClick={() => { followDocumentRef.current = true; setNewItemsPending(false); const element = documentRef.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: "instant" }); }}>有新内容，回到底部</button>}
             {section === "transcript" && documentSearch.trim() && <p className="document-search-count" role="status">找到 {visibleItems.length} 条匹配内容</p>}
-            {section === "overview" && <CourseOutline items={timeline.items} onSeek={seekToCapture} />}
             {hiddenItemCount > 0 && (
               <button
                 className="load-earlier-button"
@@ -1567,7 +1565,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
                 加载更早内容 · 还有 {hiddenItemCount} 项
               </button>
             )}
-            {section === "user-notes" ? <UserNotes key={session.id} sessionId={session.id} /> : renderedItems.length ? renderedItems.map((item) => <DocumentItem key={item.id} item={item} languageView={languageView} sessionId={session.id} wholeAudioReady={wholeAudioReady} onSeek={seekToCapture} />) : section !== "overview" && <div className="document-empty"><h2>{section === "assets" ? "课件与证据" : section === "explanations" ? "补充讲解与术语" : "逐段转写与翻译"}</h2><p>{section === "assets" ? "在下方选择或拖入材料，确认上传后即可查看解析结果。" : section === "explanations" ? "积累一个完整内容组后生成总结和专业术语解释，不对每一句重复生成。" : "开始录音后，稳定原文和译文将按时间排列；点击时间旁的入口可回听对应片段。"}</p></div>}
+            {section === "user-notes" ? <UserNotes key={session.id} sessionId={session.id} /> : renderedItems.length ? renderedItems.map((item) => <DocumentItem key={item.id} item={item} languageView={languageView} sessionId={session.id} wholeAudioReady={wholeAudioReady} onSeek={seekToCapture} />) : <div className="document-empty"><h2>{section === "assets" ? "课件与证据" : "逐段转写与翻译"}</h2><p>{section === "assets" ? "在下方选择或拖入材料，确认上传后即可查看解析结果。" : "开始录音后，稳定原文和译文将按时间排列；内容组讲解与课程总结显示在右侧。"}</p></div>}
           </div>
           <section
             className={"material-composer" + (uploadDropActive ? " drop-active" : "")}
@@ -1577,13 +1575,11 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             onDragLeave={(event) => { if (event.currentTarget === event.target || !event.currentTarget.contains(event.relatedTarget as Node)) setUploadDropActive(false); }}
             onDrop={(event) => { event.preventDefault(); setUploadDropActive(false); const file = event.dataTransfer.files[0]; if (file) chooseUpload(file); }}
           >
-            <div className="material-composer-heading"><div><h3>讲解与材料</h3><p>上传后先保存材料；只有你确认后才会排队，并自动加入下一次讲解。</p></div><StatusBadge tone={modelStatusTone}>{summaryRetryable ? "总结可重试" : translationIssue ? "部分翻译待重试" : modelQueueDepth > 0 ? "队列处理中" : "可用"}</StatusBadge></div>
+            <div className="material-composer-heading"><div><h3>讲解与材料</h3><p>拖动文件到这里，或选择文件；确认上传后立即排队，自动加入讲解。</p></div><StatusBadge tone={modelStatusTone}>{summaryRetryable ? "总结可重试" : translationIssue ? "部分翻译待重试" : modelQueueDepth > 0 ? "队列处理中" : "可用"}</StatusBadge></div>
             {translationIssue && <p className="translation-degraded-notice" role="status">原文和音频已保存；部分译文正在重试，录音控制与已完成内容不受影响。</p>}
-            <div className="material-drop-copy"><strong>拖动材料到这里</strong><span>或选择 PPT、PDF、图片、文档和文本文件</span></div>
             <input ref={fileInput} className="visually-hidden" type="file" accept=".pptx,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) chooseUpload(file); }} />
-            <button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}>选择材料</button>
-            {summaryRetryable && <button className="secondary-button" disabled={busy || isRecording} onClick={() => void api.summarize(project.id, session.id).then(() => setNotice("课程总结已重新排队，完成后会在当前页面出现")).catch((caught) => setNotice(caught instanceof Error ? caught.message : "课程总结重试失败"))}>重试课程总结</button>}
-            <p className="material-queue-help">确认窗口会列出文件名、类型、大小和目标课程；取消不会创建任何任务。确认后材料解析与等待讲解任务会立即进入队列，讲解会等待材料解析和稳定段落完成。</p>
+            <div className="material-composer-actions"><button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}>选择材料</button>
+            {summaryRetryable && <button className="secondary-button" disabled={busy || isRecording} onClick={() => void api.summarize(project.id, session.id).then(() => setNotice("课程总结已重新排队，完成后会在当前页面出现")).catch((caught) => setNotice(caught instanceof Error ? caught.message : "课程总结重试失败"))}>重试课程总结</button>}</div>
             {pendingUpload && <div className="material-confirm" role="dialog" aria-modal="false" aria-label="确认上传材料">
               <div><strong>确认上传材料</strong><span>{pendingUpload.name}</span><small>{pendingUpload.type || "未知类型"} · {(pendingUpload.size / 1024 / 1024).toFixed(2)} MiB · 目标课程：{session.title}</small></div>
               <p>确认后将保存材料，并自动加入下一次讲解；不会覆盖已有字幕、译文或人工笔记。</p>
@@ -1591,7 +1587,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             </div>}
           </section>
         </section>
-        <aside className="session-sidebar">
+        <div className="session-sidebar">
            <section className="side-card capture-card">
              <div className="card-heading"><h3>录音</h3><StatusBadge tone={captureTone}>{captureLabel}</StatusBadge></div>
              <div className="session-continuity"><strong>{stopPending ? "本机收音已停止" : isRecordingResumable(session.state) ? "可继续本次课程" : "本次课程历史"}</strong><span>{stopPending ? "已记住本次停止操作。重试只补传尚未确认的音频并结束课程，不会重新打开麦克风。" : sessionContinuity}</span></div>
@@ -1621,7 +1617,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             {currentRecordingStatus?.recoverable && !lease && !stopPending && <div className="recording-recovery-status" role="status"><strong>可在本课程继续录音</strong><span>已确认的音频和历史内容仍保留。点击下方按钮并确认后续录，尚未完成的翻译会在后台处理。</span></div>}
             {recordingWaitsForQueue && <div className="recording-capacity-status" role="status"><strong>本次课程正在收尾</strong><span>还有 {currentRecordingStatus?.active_model_jobs ?? 0} 个后台任务；完成后会自动恢复继续入口。</span></div>}
             {captureNotice && <div className={capturePhase === "error" || capturePhase === "blocked" ? "capture-inline-alert" : "recording-recovery-status"} role="status">{captureNotice}</div>}
-            <p className="capture-copy" aria-live="polite"><strong>{captureLabel}</strong> · {visibleCaptureStatus}</p>
+            <p className="capture-copy" aria-live="polite">{visibleCaptureStatus}</p>
             {stopPending ? (
               <button className="stop-button" disabled={busy} onClick={() => void stop()}>{busy ? "正在保存音频并结束课程" : "重试完成停止"}</button>
             ) : session.state === "archived" ? (
@@ -1638,7 +1634,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="primary-button" disabled>等待后台处理完成</button>
             )}
           </section>
-          <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} retryAvailable={explanationRetryAvailable} retrying={retryingExplanation} onRetry={() => void retryExplanations()} />
+          <aside className="learning-sidebar" aria-label="课程讲解与状态">
+          {section === "overview" && <section className="side-card sidebar-outline"><CourseOutline items={timeline.items} onSeek={seekToCapture} /></section>}
+          {section !== "assets" && section !== "user-notes" && <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} focusKey={documentFocusKey} retryAvailable={explanationRetryAvailable} retrying={retryingExplanation} onRetry={() => void retryExplanations()} />}
+          {latestCourseSummary && <section className="side-card course-summary-panel" aria-label="课程总结"><h3>课程总结</h3><p>{latestCourseSummary.body}</p></section>}
           <CourseQuestions sessionId={session.id} sessionState={session.state} events={timeline.events} onEvidence={(id) => {
             navigate(project.id, session.id, "transcript");
             window.setTimeout(() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
@@ -1663,7 +1662,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             {readWeaveConfirmUrl && <div className="inline-confirm" role="dialog" aria-label="确认打开 ReadWeave"><p>即将打开 ReadWeave 对应目标：</p><code>{readWeaveConfirmUrl}</code><div><button className="secondary-button" onClick={() => setReadWeaveConfirmUrl(null)}>取消</button><button className="primary-button" onClick={() => { const url = readWeaveConfirmUrl; setReadWeaveConfirmUrl(null); window.location.assign(url); }}>确认打开</button></div></div>}
           </section>
           {notice && <div className="notice-box" role="status">{notice}</div>}
-        </aside>
+          </aside>
+        </div>
       </main>
     </div>
   );
