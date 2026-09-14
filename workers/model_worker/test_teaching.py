@@ -66,13 +66,16 @@ async def test_course_synthesis_uses_bounded_notes_without_term_inventory() -> N
         assert "whole course" in system
         assert json.loads(user)["source"] == "First, gates are modeled. Then their delays matter."
         assert options["max_tokens"] == 1400
-        return {"prose": "先建立门电路模型，再考虑门延迟对结果的影响", "original_terms": []}
+        assert list(schema["properties"]) == ["prose"]
+        assert schema["properties"]["prose"]["maxLength"] == 1200
+        return {"prose": "先建立门电路模型，再考虑门延迟对结果的影响"}
 
     result = await generate_part(TeachingPartRequest(
         phase="course", text="First, gates are modeled. Then their delays matter.",
         target_language="zh-CN",
     ), infer, "test", "cuda")
     assert result is not None and result.provider == "ollama:test@cuda"
+    assert result.original_terms == []
     assert not valid_part({"prose": "有结论", "original_terms": ["gates"]}, TeachingPartRequest(
         phase="course", text="gates", target_language="zh-CN",
     ))
