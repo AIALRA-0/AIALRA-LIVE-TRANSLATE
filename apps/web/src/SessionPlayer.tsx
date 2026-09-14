@@ -61,7 +61,7 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
   };
   return <section className="session-player" aria-label="整节课程录音回放">
     <div className="session-player-label"><strong>整节课程回放</strong><span>{clock(position)} / {clock(duration)}</span></div>
-    <audio ref={audio} preload="metadata" src={`/api/v1/sessions/${sessionId}/audio`}
+    <audio ref={audio} preload="none" src={`/api/v1/sessions/${sessionId}/audio`}
       onLoadedMetadata={() => { setMediaReady(true); setBuffering(false); }}
       onCanPlay={() => { setMediaReady(true); setBuffering(false); }}
       onWaiting={() => setBuffering(true)} onStalled={() => setBuffering(true)}

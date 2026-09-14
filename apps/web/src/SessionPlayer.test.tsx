@@ -17,14 +17,14 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-it("uses metadata-only preload, keeps playback available, and reports readiness after media loads", async () => {
+it("does not preload long recordings, keeps playback available, and reports readiness after media loads", async () => {
   const onReady = vi.fn();
   const { container } = render(<SessionPlayer sessionId="session-test" sessionState="completed" seekRequest={null} onReady={onReady} />);
   await act(async () => undefined);
 
   const audio = screen.getByLabelText("课程录音") as HTMLAudioElement;
   expect(audio).not.toHaveAttribute("controls");
-  expect(audio).toHaveAttribute("preload", "metadata");
+  expect(audio).toHaveAttribute("preload", "none");
   expect(screen.getByRole("button", { name: "播放课程" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "后退 15 秒" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "前进 15 秒" })).toBeInTheDocument();
