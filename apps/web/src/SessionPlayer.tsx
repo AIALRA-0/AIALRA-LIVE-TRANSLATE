@@ -61,7 +61,7 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
   };
   return <section className="session-player" aria-label="整节课程录音回放">
     <div className="session-player-label"><strong>整节课程回放</strong><span>{clock(position)} / {clock(duration)}</span></div>
-    <audio ref={audio} preload="auto" src={`/api/v1/sessions/${sessionId}/audio`}
+    <audio ref={audio} preload="metadata" src={`/api/v1/sessions/${sessionId}/audio`}
       onLoadedMetadata={() => { setMediaReady(true); setBuffering(false); }}
       onCanPlay={() => { setMediaReady(true); setBuffering(false); }}
       onWaiting={() => setBuffering(true)} onStalled={() => setBuffering(true)}
@@ -71,7 +71,7 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
       onError={() => { setMediaReady(false); setBuffering(false); setError("录音暂时无法读取，请稍后重试"); }}
       aria-label="课程录音" />
     <div className="session-player-controls">
-      <button type="button" className="player-icon-button" onClick={toggle} disabled={!mediaReady} aria-label={playing ? "暂停回放" : "播放课程"}>{playing ? "Ⅱ" : "▶"}</button>
+      <button type="button" className="player-icon-button" onClick={toggle} aria-label={playing ? "暂停回放" : "播放课程"}>{playing ? "Ⅱ" : "▶"}</button>
       <button type="button" onClick={() => seek(position - 15)}>后退 15 秒</button>
       <input aria-label="回放位置" type="range" min={0} max={Math.max(duration, 0.1)} step={0.1} value={Math.min(position, duration)} onChange={(event) => seek(Number(event.target.value))} />
       <button type="button" onClick={() => seek(position + 15)}>前进 15 秒</button>

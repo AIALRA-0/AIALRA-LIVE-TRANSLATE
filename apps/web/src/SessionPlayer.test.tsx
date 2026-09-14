@@ -17,21 +17,21 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-it("renders one unified accessible player and reports readiness only after media loads", async () => {
+it("uses metadata-only preload, keeps playback available, and reports readiness after media loads", async () => {
   const onReady = vi.fn();
   const { container } = render(<SessionPlayer sessionId="session-test" sessionState="completed" seekRequest={null} onReady={onReady} />);
   await act(async () => undefined);
 
   const audio = screen.getByLabelText("课程录音") as HTMLAudioElement;
   expect(audio).not.toHaveAttribute("controls");
-  expect(screen.getByRole("button", { name: "播放课程" })).toBeDisabled();
+  expect(audio).toHaveAttribute("preload", "metadata");
+  expect(screen.getByRole("button", { name: "播放课程" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "后退 15 秒" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "前进 15 秒" })).toBeInTheDocument();
   expect(screen.getByRole("slider", { name: "回放位置" })).toBeInTheDocument();
   expect(screen.getByRole("combobox", { name: "回放速度" })).toHaveValue("1");
 
   fireEvent.loadedMetadata(audio);
-  expect(screen.getByRole("button", { name: "播放课程" })).toBeEnabled();
   expect(onReady).toHaveBeenLastCalledWith(true);
   expect(container.querySelectorAll("audio")).toHaveLength(1);
 });
