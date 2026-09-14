@@ -20,7 +20,7 @@ from workers.model_worker.terminology import matching_technical_terms
 class TeachingPartRequest(BaseModel):
     """One model call, not a new course or a separately published explanation."""
 
-    phase: Literal["prose", "definition"]
+    phase: Literal["prose", "definition", "group", "course"]
     text: str = Field(min_length=1, max_length=4000)
     context: list[str] = Field(default_factory=list, max_length=3)
     target_language: str = Field(min_length=2, max_length=32)
@@ -64,14 +64,18 @@ def source_surface(term: str, text: str) -> str | None:
 
 
 def valid_part(payload: dict[str, Any], request: TeachingPartRequest) -> bool:
-    if request.phase == "prose":
+    if request.phase != "definition":
         terms = payload.get("original_terms")
         prose = payload.get("prose")
         return (
             isinstance(prose, str) and bool(prose.strip())
             and isinstance(terms, list)
-            and all(isinstance(term, str) and source_surface(term, request.text) is not None
-                    for term in terms)
+            and all(
+                isinstance(term, str)
+                and (request.phase != "prose" or source_surface(term, request.text) is not None)
+                for term in terms
+            )
+            and (request.phase == "prose" or not terms)
             and len(terms) == len({term.casefold() for term in terms})
             and requested_language(prose, request.target_language)
         )
@@ -120,7 +124,7 @@ async def generate_part(
         "disambiguation only; explain and inventory only source, not context_reference. "
         "Return only the requested JSON, no labels or thinking. "
     )
-    if request.phase == "prose":
+    if request.phase != "definition":
         instruction = (
             "Explain this complete source paragraph to a beginner in coherent prose, keeping "
             "all of its information rather than merely naming its topic. Preserve its examples "
@@ -133,6 +137,14 @@ async def generate_part(
             "Explain uncertainty about quantities or comparisons in ordinary reader-facing "
             "language when the source leaves it unresolved. Do not hide that uncertainty "
             "merely to produce smoother prose."
+        ) if request.phase == "prose" else (
+            "Synthesize the ordered teaching notes into a coherent, beginner-readable "
+            + ("explanation of this content group" if request.phase == "group"
+               else "overview of the whole course")
+            + ". Explain the subject, how the ideas connect, the important distinctions and "
+            "any uncertainty. Preserve concrete mechanisms, examples, negations and limitations. "
+            "Use short paragraphs, not a transcript or a list of disconnected sentences. "
+            "Do not introduce facts absent from the supplied notes. Return original_terms as []."
         )
         properties: dict[str, Any] = {
             "prose": {"type": "string", "minLength": 1},
@@ -140,7 +152,7 @@ async def generate_part(
                 "type": "string", "minLength": 1, "maxLength": 160,
             }},
         }
-        budget = 1000
+        budget = 1400 if request.phase != "prose" else 1000
     else:
         common = (
             "Write a factual technical glossary for a beginner in target_language. "
@@ -203,7 +215,7 @@ async def generate_part(
     if request.target_language.casefold().startswith("zh"):
         raw = {
             **raw,
-            **({"prose": generated_prose(raw["prose"])} if request.phase == "prose" else {
+            **({"prose": generated_prose(raw["prose"])} if request.phase != "definition" else {
                 "term": bilingual_term(raw["term"]),
                 "definition": generated_prose(raw["definition"]),
             }),

@@ -1149,7 +1149,7 @@ impl EventStore {
             |row| row.get(0),
         ).optional()?;
         let mut statement = connection.prepare(
-            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND event_type IN ('paragraph.finalized', 'segment.finalized', 'translation.finalized', 'transcript.corrected', 'course.question.asked', 'course.question.answered', 'content.group.created', 'explanation.card.created', 'session.completed', 'session.recording.started', 'session.summary.created', 'session.summary.failed', 'asset.page.extracted', 'model.job.failed', 'model.job.retry_scheduled') ORDER BY ingested_at, event_id",
+            "SELECT event_id, schema_version, session_id, source_id, sequence, event_type, captured_at_monotonic_ns, captured_at_wall, ingested_at, correlation_id, causation_id, content_hash, payload_json FROM events WHERE session_id = ?1 AND event_type IN ('paragraph.finalized', 'segment.finalized', 'translation.finalized', 'transcript.corrected', 'course.question.asked', 'course.question.answered', 'content.group.created', 'explanation.card.created', 'session.completed', 'session.recording.started', 'session.summary.created', 'session.summary.failed', 'session.summary.queued', 'asset.page.extracted', 'model.job.failed', 'model.job.retry_scheduled') ORDER BY ingested_at, event_id",
         )?;
         let events = statement
             .query_map([session_id], map_event)?

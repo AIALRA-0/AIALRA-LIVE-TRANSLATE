@@ -850,6 +850,94 @@ fn apply_explanation_result(
             "result": explanation
         }),
     )?;
+    // Teaching cards can finish after an early summary failed. Once their
+    // evidence covers the course, retry with a fresh snapshot automatically.
+    maybe_retry_summary_after_explanation(state, &job.session_id)?;
+    Ok(())
+}
+
+fn maybe_retry_summary_after_explanation(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), ApiError> {
+    let Some(session) = state.store.get_session(session_id)? else {
+        return Ok(());
+    };
+    if session.state != SessionState::Completed {
+        return Ok(());
+    }
+    let events = state.store.list_events(session_id)?;
+    let run = latest_recording_run(&events);
+    if has_summary_for_run(&events, &run) {
+        return Ok(());
+    }
+    let Some(failed_event) = events.iter().rev().find(|event| {
+        event.event_type == "session.summary.failed"
+            && event.payload["recording_run"].as_str() == Some(run.as_str())
+    }) else {
+        return Ok(());
+    };
+    let Some(failed_job_id) = failed_event.payload["job_id"].as_str() else {
+        return Ok(());
+    };
+    let Some(failed_job) = state.store.get_model_job(failed_job_id)? else {
+        return Ok(());
+    };
+    let failed_group_count = failed_job.input["complete_groups"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let has_paragraphs = events
+        .iter()
+        .any(|event| event.event_type == "paragraph.finalized");
+    let expected = events
+        .iter()
+        .filter_map(|event| {
+            if event.event_type
+                != if has_paragraphs {
+                    "paragraph.finalized"
+                } else {
+                    "segment.finalized"
+                }
+            {
+                return None;
+            }
+            event.payload[if has_paragraphs {
+                "paragraph_id"
+            } else {
+                "segment_id"
+            }]
+            .as_str()
+        })
+        .collect::<HashSet<_>>();
+    let covered = events
+        .iter()
+        .filter(|event| {
+            event.event_type == "explanation.card.created"
+                && event.payload["coverage_contract"] == "all_sources_v1"
+        })
+        .flat_map(|event| {
+            event.payload["result"]["evidence_segment_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect::<HashSet<_>>();
+    let completed_group_count = events
+        .iter()
+        .filter(|event| {
+            event.event_type == "explanation.card.created"
+                && event.payload["coverage_contract"] == "all_sources_v1"
+        })
+        .count();
+    // A model failure with the same complete input needs a deliberate manual
+    // retry; only newly arrived teaching evidence justifies automatic work.
+    if !expected.is_empty()
+        && expected.is_subset(&covered)
+        && completed_group_count > failed_group_count
+    {
+        enqueue_summary(state, session_id, "teaching_completed")?;
+    }
     Ok(())
 }
 
@@ -895,13 +983,12 @@ fn apply_summary_result(
         ));
     }
     if job.input["summary_contract"] == "complete_groups_v1"
-        && (!compiled
-            || summary
-                .evidence_segment_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<HashSet<_>>()
-                != allowed_segments
+        && (summary
+            .evidence_segment_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>()
+            != allowed_segments
             || summary
                 .asset_page_ids
                 .iter()
@@ -1211,18 +1298,27 @@ pub fn enqueue_summary(
         })
         .collect::<Vec<_>>();
     let pages = all_pages;
-    let complete_groups = events
+    let complete_group_events = events
         .iter()
         .filter(|event| event.event_type == "explanation.card.created")
         .filter(|event| event.payload["coverage_contract"] == "all_sources_v1")
+        .collect::<Vec<_>>();
+    let complete_groups = complete_group_events
+        .iter()
         .map(|event| json!({"coverage_contract": "all_sources_v1", "result": event.payload["result"]}))
         .collect::<Vec<_>>();
-    let evidence_key = segments
+    // A retry after teaching cards arrive must use their current snapshot.
+    // Include source text and pages too: a correction or confirmed upload
+    // must not replay a failed job with stale evidence.
+    let group_ids = complete_group_events
         .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join(":");
-    let idempotency_key = format!("summarize:{session_id}:{run}:{evidence_key}");
+        .map(|event| event.event_id.to_string())
+        .collect::<Vec<_>>();
+    let snapshot_key = serde_json::to_vec(&(segments.as_slice(), pages.as_slice(), group_ids))?;
+    let idempotency_key = format!(
+        "summarize:{session_id}:{run}:{}",
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, &snapshot_key).simple()
+    );
     if let Some(existing) = state.store.get_model_job_by_key(&idempotency_key)?
         && existing.status == "failed"
     {
@@ -1230,7 +1326,7 @@ pub fn enqueue_summary(
             .store
             .requeue_failed_summary_by_key(&idempotency_key)?;
     }
-    Ok(state.enqueue_job(NewModelJob {
+    let record = state.enqueue_job(NewModelJob {
         id: format!("job_{}", Uuid::now_v7().simple()),
         session_id: session_id.to_owned(),
         job_type: "summarize".to_owned(),
@@ -1238,7 +1334,24 @@ pub fn enqueue_summary(
         input: json!({"summary_contract": "complete_groups_v1", "segments": segments, "asset_pages": pages, "complete_groups": complete_groups, "target_language": session.target_language, "trigger": trigger, "recording_run": run}),
         input_object_hash: None,
         idempotency_key,
-    })?)
+    })?;
+    if record.status == "queued" {
+        state.emit_idempotent(
+            &format!(
+                "{}:summary_queued:{}",
+                record.id,
+                record.updated_at.timestamp_millis()
+            ),
+            session_id,
+            "model_scheduler",
+            "session.summary.queued",
+            0,
+            &record.id,
+            None,
+            json!({"job_id": record.id, "recording_run": run}),
+        )?;
+    }
+    Ok(record)
 }
 
 fn latest_recording_run(events: &[aialra_event_protocol::EventEnvelope]) -> String {
@@ -2011,6 +2124,254 @@ mod tests {
         assert!(super::apply_summary_result(&state, &job, &result, 1).is_err());
         result["evidence_segment_ids"] = all_ids;
         super::apply_summary_result(&state, &job, &result, 1).unwrap();
+    }
+
+    #[test]
+    fn summary_snapshot_refreshes_after_group_card_arrives() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "snapshot-session".to_owned(),
+                title: "Synthetic course".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .emit(
+                "snapshot-session",
+                "test",
+                "paragraph.finalized",
+                1,
+                "test",
+                None,
+                json!({"paragraph_id": "p1", "text": "Synthetic paragraph"}),
+            )
+            .unwrap();
+        let first = enqueue_summary(&state, "snapshot-session", "stop").unwrap();
+        assert!(
+            first.input["complete_groups"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            enqueue_summary(&state, "snapshot-session", "stop")
+                .unwrap()
+                .id,
+            first.id
+        );
+        state
+            .emit(
+                "snapshot-session",
+                "test",
+                "explanation.card.created",
+                2,
+                "test",
+                None,
+                json!({"coverage_contract": "all_sources_v1", "result": {
+                    "paragraph_summary": "Synthetic explanation", "terms": [],
+                    "evidence_segment_ids": ["p1"], "asset_page_ids": []
+                }}),
+            )
+            .unwrap();
+        let refreshed = enqueue_summary(&state, "snapshot-session", "manual").unwrap();
+        assert_ne!(refreshed.id, first.id);
+        assert_eq!(
+            refreshed.input["complete_groups"].as_array().unwrap().len(),
+            1
+        );
+        let queued = state
+            .store
+            .list_events("snapshot-session")
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "session.summary.queued")
+            .count();
+        assert_eq!(queued, 2);
+    }
+
+    #[test]
+    fn synthesized_summary_accepts_cuda_provider_with_full_coverage() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "cuda-summary".to_owned(),
+                title: "Synthetic course".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .emit(
+                "cuda-summary",
+                "test",
+                "paragraph.finalized",
+                1,
+                "test",
+                None,
+                json!({"paragraph_id": "p1", "text": "Synthetic paragraph"}),
+            )
+            .unwrap();
+        let job = enqueue_summary(&state, "cuda-summary", "stop").unwrap();
+        super::apply_summary_result(
+            &state,
+            &job,
+            &json!({
+                "overview": "完整的课程讲解", "key_points": [], "terminology": [],
+                "open_questions": [], "evidence_segment_ids": ["p1"], "asset_page_ids": [],
+                "provider": "ollama:test@cuda"
+            }),
+            1,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_summary_waits_for_all_group_cards_before_auto_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "auto-retry-summary".to_owned(),
+                title: "Synthetic course".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for next in [
+            super::SessionState::Ready,
+            super::SessionState::Recording,
+            super::SessionState::Stopping,
+            super::SessionState::Processing,
+            super::SessionState::Completed,
+        ] {
+            state
+                .store
+                .transition_session("auto-retry-summary", next)
+                .unwrap();
+        }
+        let start = state
+            .emit(
+                "auto-retry-summary",
+                "test",
+                "session.recording.started",
+                0,
+                "test",
+                None,
+                json!({}),
+            )
+            .unwrap();
+        for i in 1..=2 {
+            state
+                .emit(
+                    "auto-retry-summary",
+                    "test",
+                    "paragraph.finalized",
+                    i,
+                    "test",
+                    None,
+                    json!({"paragraph_id": format!("p{i}"), "text": format!("Synthetic {i}")}),
+                )
+                .unwrap();
+        }
+        let first = enqueue_summary(&state, "auto-retry-summary", "stop").unwrap();
+        state.emit("auto-retry-summary", "test", "session.summary.failed", 3, "test", None,
+            json!({"job_id": first.id, "recording_run": start.event_id.to_string(), "error_kind": "model_http_error"})).unwrap();
+        state
+            .emit(
+                "auto-retry-summary",
+                "test",
+                "explanation.card.created",
+                4,
+                "test",
+                None,
+                json!({"coverage_contract": "all_sources_v1", "result": {
+                    "paragraph_summary": "First idea", "terms": [], "evidence_segment_ids": ["p1"],
+                    "asset_page_ids": []
+                }}),
+            )
+            .unwrap();
+        super::maybe_retry_summary_after_explanation(&state, "auto-retry-summary").unwrap();
+        assert_eq!(
+            state
+                .store
+                .list_events("auto-retry-summary")
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == "session.summary.queued")
+                .count(),
+            1
+        );
+        state
+            .emit(
+                "auto-retry-summary",
+                "test",
+                "explanation.card.created",
+                5,
+                "test",
+                None,
+                json!({"coverage_contract": "all_sources_v1", "result": {
+                    "paragraph_summary": "Second idea", "terms": [], "evidence_segment_ids": ["p2"],
+                    "asset_page_ids": []
+                }}),
+            )
+            .unwrap();
+        super::maybe_retry_summary_after_explanation(&state, "auto-retry-summary").unwrap();
+        let events = state.store.list_events("auto-retry-summary").unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "session.summary.queued")
+                .count(),
+            2
+        );
+        let retry_id = events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "session.summary.queued")
+            .and_then(|event| event.payload["job_id"].as_str())
+            .unwrap();
+        assert_ne!(retry_id, first.id);
+        let retry = state.store.get_model_job(retry_id).unwrap().unwrap();
+        assert_eq!(retry.input["complete_groups"].as_array().unwrap().len(), 2);
+        assert_eq!(first.input["complete_groups"].as_array().unwrap().len(), 0);
+        state
+            .emit(
+                "auto-retry-summary",
+                "test",
+                "session.summary.failed",
+                6,
+                "test",
+                None,
+                json!({"job_id": retry_id, "recording_run": start.event_id.to_string()}),
+            )
+            .unwrap();
+        super::maybe_retry_summary_after_explanation(&state, "auto-retry-summary").unwrap();
+        assert_eq!(
+            state
+                .store
+                .list_events("auto-retry-summary")
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == "session.summary.queued")
+                .count(),
+            2
+        );
     }
 
     #[test]

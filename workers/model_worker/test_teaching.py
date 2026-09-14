@@ -59,6 +59,26 @@ def test_source_uncertainty_is_not_rejected_to_make_prose_sound_certain() -> Non
 
 
 @pytest.mark.asyncio
+async def test_course_synthesis_uses_bounded_notes_without_term_inventory() -> None:
+    async def infer(
+        system: str, user: str, schema: dict[str, Any], **options: Any,
+    ) -> dict[str, Any]:
+        assert "whole course" in system
+        assert json.loads(user)["source"] == "First, gates are modeled. Then their delays matter."
+        assert options["max_tokens"] == 1400
+        return {"prose": "先建立门电路模型，再考虑门延迟对结果的影响", "original_terms": []}
+
+    result = await generate_part(TeachingPartRequest(
+        phase="course", text="First, gates are modeled. Then their delays matter.",
+        target_language="zh-CN",
+    ), infer, "test", "cuda")
+    assert result is not None and result.provider == "ollama:test@cuda"
+    assert not valid_part({"prose": "有结论", "original_terms": ["gates"]}, TeachingPartRequest(
+        phase="course", text="gates", target_language="zh-CN",
+    ))
+
+
+@pytest.mark.asyncio
 async def test_part_generation_is_bounded_and_retains_source() -> None:
     async def infer(
         system: str, user: str, schema: dict[str, Any], **options: Any,

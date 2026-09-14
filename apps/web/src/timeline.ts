@@ -300,7 +300,7 @@ export function isRenderableDocumentItem(item: TimelineItem): boolean {
 const COURSE_EVENT_TYPES = new Set([
   "paragraph.finalized", "segment.finalized", "translation.finalized", "content.group.created",
   "explanation.card.created", "session.completed", "session.recording.started",
-  "session.summary.created", "session.summary.failed", "asset.page.extracted",
+  "session.summary.created", "session.summary.failed", "session.summary.queued", "asset.page.extracted",
   "model.job.failed", "model.job.retry_scheduled", "transcript.interim",
   "transcript.stable", "transcript.revised", "transcript.corrected",
   "course.question.asked", "course.question.answered",

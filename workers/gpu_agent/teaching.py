@@ -196,8 +196,16 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         else:
             for field in ("evidence_segment_ids", "asset_page_ids"):
                 existing[field] = list(dict.fromkeys([*existing[field], *entry[field]]))
+    detailed_prose = "\n\n".join(prose)
+    if sum(kind == "segment" for kind, _ in chunks) > 1 and len(detailed_prose.encode()) <= 3500:
+        guide = await generate({"phase": "group", "text": detailed_prose,
+                                "target_language": target})
+        heading = guide.get("prose")
+        if not isinstance(heading, str) or not heading.strip():
+            raise ValueError("teaching_group_synthesis_invalid")
+        detailed_prose = f"{heading.strip()}\n\n{detailed_prose}"
     return {
-        "paragraph_summary": "\n\n".join(prose), "terms": definitions,
+        "paragraph_summary": detailed_prose, "terms": definitions,
         "evidence_segment_ids": [item["id"] for item in segments],
         "asset_page_ids": [item["id"] for item in pages], "provider": provider,
     }

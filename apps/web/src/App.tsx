@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useReducer
 import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type RuntimeHealth } from "./api";
 import { BrowserCapture, listAudioInputs, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
 import { applySessionStateEvent } from "./sessionState";
+import { courseSummaryStatus } from "./summaryStatus";
 import { RecordingWakeLock } from "./wakeLock";
 import { clearStopIntent, readStopIntent, saveStopIntent, type RecordingStopIntent } from "./recordingStop";
 import { UserNotes } from "./UserNotes";
@@ -12,7 +13,7 @@ import { focusedParagraphId, insightForParagraph, mainDocumentItems } from "./do
 import { courseMarkdown, downloadCourseMarkdown } from "./courseExport";
 import type { NoiseSuppressionMode } from "./noiseSuppression";
 import { appendEvent, buildCourseDocument, isCourseEvent } from "./timeline";
-import type { EventEnvelope, LanguageView, Project, ReadWeavePreview, ReadWeaveStatus, RecordingLease, RecordingProjectStatus, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
+import type { EventEnvelope, LanguageView, Project, ReadWeaveStatus, RecordingLease, RecordingProjectStatus, Session, TimelineItem, WorkspaceFolder, WorkspaceSnapshot, WorkspaceTrashItem } from "./types";
 import { canDropWorkspaceTarget, formatAudioInputLabel, formatLocalTimestamp, isFolderDescendant, isRecordingResumable, recordingDisplayState, resumeSessionLabel, type WorkspaceDragTarget, type WorkspaceDropTarget } from "./uiState";
 
 const LEASE_STORAGE_KEY = "aialra-active-recording-lease";
@@ -883,6 +884,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [notice, setNotice] = useState("");
   const [retryingExplanation, setRetryingExplanation] = useState(false);
+  const [summaryRetryForEventId, setSummaryRetryForEventId] = useState<string | null>(null);
+  const [learningView, setLearningView] = useState<"group" | "course" | "questions">("group");
   const [busy, setBusy] = useState(false);
   const [lease, setLease] = useState<RecordingLease | null>(null);
   const [captureActive, setCaptureActive] = useState(false);
@@ -902,7 +905,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [stopPending, setStopPending] = useState(() => readStopIntent(project.id, initial.id) !== null);
   const [runtime, setRuntime] = useState<RuntimeHealth | null>(null);
   const [readWeave, setReadWeave] = useState<ReadWeaveStatus | null>(null);
-  const [readWeavePreview, setReadWeavePreview] = useState<ReadWeavePreview | null>(null);
   const [readWeaveConfirmUrl, setReadWeaveConfirmUrl] = useState<string | null>(null);
   const [readWeaveReconciling, setReadWeaveReconciling] = useState(false);
   const [visibleItemLimit, setVisibleItemLimit] = useState(TIMELINE_PAGE_SIZE);
@@ -1088,7 +1090,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
 
   useEffect(() => {
     void api.readWeaveStatus(project.id).then(setReadWeave).catch(() => setReadWeave(null));
-    void api.readWeavePreview(project.id).then(setReadWeavePreview).catch(() => setReadWeavePreview(null));
     const initialDeviceRefresh = window.setTimeout(() => void refreshAudioInputs(false).catch(() => undefined), 0);
     const onDeviceChange = () => void refreshAudioInputs(false).catch(() => undefined);
     navigator.mediaDevices?.addEventListener("devicechange", onDeviceChange);
@@ -1418,16 +1419,12 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
 
   const isRecording = ["recording", "degraded"].includes(session.state);
   const latestStartIndex = timeline.events.reduce((last, event, index) => event.event_type === "session.recording.started" ? index : last, -1);
-  const latestStart = timeline.events[latestStartIndex];
   const currentRunEvents = timeline.events.slice(Math.max(0, latestStartIndex));
-  const latestSummaryEvent = [...currentRunEvents].reverse().find((event) => {
-    if (event.event_type !== "session.summary.created" && event.event_type !== "session.summary.failed") return false;
-    const run = event.payload.recording_run;
-    return typeof run === "string" ? run === latestStart?.event_id : latestStart?.payload.resumed !== true;
-  });
-  const summaryRetryable = latestSummaryEvent?.event_type === "session.summary.failed";
+  const summaryStatus = courseSummaryStatus(timeline.events);
+  const summaryRetryRequested = summaryRetryForEventId !== null && summaryRetryForEventId === summaryStatus.eventId;
+  const summaryRetryable = summaryStatus.phase === "failed" && !summaryRetryRequested;
   const latestCompletedEvent = [...currentRunEvents].reverse().find((event) => event.event_type === "session.completed");
-  const summaryPending = latestCompletedEvent?.payload.summary_pending === true && !latestSummaryEvent;
+  const summaryPending = summaryStatus.phase === "queued";
   const translationDegraded = latestCompletedEvent?.payload.translation_degraded === true;
   const latestTranslationEventIndex = timeline.events.reduce((latest, event, index) => event.event_type === "translation.finalized" ? index : latest, -1);
   const latestTranslationIssueIndex = timeline.events.reduce((latest, event, index) => (
@@ -1461,7 +1458,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const visibleCaptureStatus = stopPending ? "本机不再收音；确认音频保存和课程结束后，才会完成本次停止"
     : session.state === "processing"
     ? "录音已停止，音频已保存，后台正在生成结果"
-    : session.state === "completed" && summaryPending ? "录音已完成，课程总结正在后台生成"
+    : session.state === "completed" && (summaryPending || summaryRetryRequested) ? "录音已完成，课程总结正在后台生成"
+      : session.state === "completed" && summaryStatus.phase === "failed" ? "录音和译文已保存；课程总结未完成，可在右侧重试"
       : session.state === "completed" ? "录音和模型处理均已完成" : captureStatus;
   const captureTone = stopPending ? "yellow" : capturePhaseTone(capturePhase, session.state, Boolean(lease), recordingStatusReady);
   const captureLabel = stopPending ? busy ? "正在完成停止" : "待完成停止"
@@ -1492,15 +1490,26 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         ? "可继续录制同一课程，不限续录次数；新音频按时间戳追加，历史内容和笔记保持不变。"
         : "正在保存尾音和收尾；完成后可继续录制同一课程，历史内容保持不变。";
   const readWeaveTone = !readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : readWeave.syncing > 0 || readWeave.queued > 0 ? "yellow" : "green";
-  const modelQueueDepth = (runtime?.model_queue?.queued ?? 0) + (runtime?.model_queue?.leased ?? 0);
-  const modelStatusTone = summaryRetryable ? "red" : translationIssue || modelQueueDepth > 0 ? "yellow" : "green";
   const section = routeSelection().section;
   const readWeaveNodeType = section === "user-notes" ? "user_notes" : section;
   const readWeaveUrl = readWeave?.targets?.find((target) => target.local_id === `${session.id}:${section === "user-notes" ? "user" : section}` || (!section && target.node_type === "session" && target.local_id === session.id))?.note_url ?? readWeave?.note_url;
   const visibleItems = mainDocumentItems(timeline.items, section, languageView, documentSearch);
   const renderedItems = visibleItems.slice(-visibleItemLimit);
   const documentFocusKey = `${section ?? "course"}:${renderedItems.map((item) => item.id).join("|")}`;
-  const latestCourseSummary = [...timeline.items].reverse().find((item) => item.kind === "session-summary");
+  const latestCourseSummary = summaryStatus.summaryId
+    ? timeline.items.find((item) => item.kind === "session-summary" && item.id === summaryStatus.summaryId)
+    : null;
+  const summaryResult = timeline.events.find((event) => event.event_type === "session.summary.created"
+    && event.payload.summary_id === summaryStatus.summaryId)?.payload.result;
+  const courseOverview = summaryResult && typeof summaryResult === "object" && !Array.isArray(summaryResult)
+    && "overview" in summaryResult && typeof summaryResult.overview === "string" ? summaryResult.overview : "";
+  const coursePoints = summaryResult && typeof summaryResult === "object" && !Array.isArray(summaryResult)
+    && "key_points" in summaryResult && Array.isArray(summaryResult.key_points)
+    ? summaryResult.key_points.filter((point): point is string => typeof point === "string" && Boolean(point.trim())) : [];
+  const courseTerms = summaryResult && typeof summaryResult === "object" && !Array.isArray(summaryResult)
+    && "terminology" in summaryResult && Array.isArray(summaryResult.terminology)
+    ? summaryResult.terminology.filter((term): term is { term: string; one_line: string; background_reference?: string } =>
+      Boolean(term && typeof term === "object" && typeof term.term === "string" && typeof term.one_line === "string")) : [];
   const hiddenItemCount = visibleItems.length - renderedItems.length;
   // A translation can arrive above the trailing preview. Track visible text,
   // not only item count or the final item's body, without following diagnostics.
@@ -1575,11 +1584,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             onDragLeave={(event) => { if (event.currentTarget === event.target || !event.currentTarget.contains(event.relatedTarget as Node)) setUploadDropActive(false); }}
             onDrop={(event) => { event.preventDefault(); setUploadDropActive(false); const file = event.dataTransfer.files[0]; if (file) chooseUpload(file); }}
           >
-            <div className="material-composer-heading"><div><h3>讲解与材料</h3><p>拖动文件到这里，或选择文件；确认上传后立即排队，自动加入讲解。</p></div><StatusBadge tone={modelStatusTone}>{summaryRetryable ? "总结可重试" : translationIssue ? "部分翻译待重试" : modelQueueDepth > 0 ? "队列处理中" : "可用"}</StatusBadge></div>
+            <div className="material-composer-heading"><div><h3>讲解与材料</h3><p>拖入或选择文件，确认后加入下一次讲解</p></div></div>
             {translationIssue && <p className="translation-degraded-notice" role="status">原文和音频已保存；部分译文正在重试，录音控制与已完成内容不受影响。</p>}
             <input ref={fileInput} className="visually-hidden" type="file" accept=".pptx,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) chooseUpload(file); }} />
-            <div className="material-composer-actions"><button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}>选择材料</button>
-            {summaryRetryable && <button className="secondary-button" disabled={busy || isRecording} onClick={() => void api.summarize(project.id, session.id).then(() => setNotice("课程总结已重新排队，完成后会在当前页面出现")).catch((caught) => setNotice(caught instanceof Error ? caught.message : "课程总结重试失败"))}>重试课程总结</button>}</div>
+            <div className="material-composer-actions"><button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}>选择材料</button></div>
             {pendingUpload && <div className="material-confirm" role="dialog" aria-modal="false" aria-label="确认上传材料">
               <div><strong>确认上传材料</strong><span>{pendingUpload.name}</span><small>{pendingUpload.type || "未知类型"} · {(pendingUpload.size / 1024 / 1024).toFixed(2)} MiB · 目标课程：{session.title}</small></div>
               <p>确认后将保存材料，并自动加入下一次讲解；不会覆盖已有字幕、译文或人工笔记。</p>
@@ -1590,10 +1598,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         <div className="session-sidebar">
            <section className="side-card capture-card">
              <div className="card-heading"><h3>录音</h3><StatusBadge tone={captureTone}>{captureLabel}</StatusBadge></div>
-             <div className="session-continuity"><strong>{stopPending ? "本机收音已停止" : isRecordingResumable(session.state) ? "可继续本次课程" : "本次课程历史"}</strong><span>{stopPending ? "已记住本次停止操作。重试只补传尚未确认的音频并结束课程，不会重新打开麦克风。" : sessionContinuity}</span></div>
              <details className="capture-advanced">
                <summary>设备与音量设置 <small>{captureMode === "microphone" ? selectedAudioLabel : "浏览器共享音频"}</small></summary>
                <div className="capture-advanced-body">
+             <div className="session-continuity"><strong>{stopPending ? "本机收音已停止" : isRecordingResumable(session.state) ? "可继续本次课程" : "本次课程历史"}</strong><span>{stopPending ? "已记住本次停止操作。重试只补传尚未确认的音频并结束课程，不会重新打开麦克风。" : sessionContinuity}</span></div>
              <label>音频来源<select value={captureMode} onChange={(event) => setCaptureMode(event.target.value as CaptureMode)} disabled={isRecording || busy || micTesting || audioPermissionPending}><option value="microphone">麦克风</option><option value="screen">浏览器标签或共享音频</option></select></label>
              {captureMode === "microphone" && <>
                <label>输入设备<select value={selectedAudioInput} onChange={(event) => { setSelectedAudioInput(event.target.value); setMicResult(null); }} disabled={isRecording || busy || micTesting || audioPermissionPending}><option value="">{defaultAudioLabel}</option>{audioInputs.filter((device) => device.deviceId !== "default" && device.deviceId !== "communications").map((device) => <option key={device.deviceId} value={device.deviceId}>{formatAudioInputLabel(device)}</option>)}</select></label>
@@ -1614,9 +1622,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             {keepScreenAwake && wakeLockNotice && <button type="button" className="text-link-button wake-lock-notice" onClick={() => void screenWake.request()}>{wakeLockNotice}</button>}
             {conflictingLeaseSeconds !== null && <div className="recording-lease-status" role="status"><strong>其他设备正在录制本项目</strong><span>{recordingStatus?.lease?.session_title ? `课程“${recordingStatus.lease.session_title}”` : "当前课程会话"} · 租约约 {conflictingLeaseSeconds} 秒后到期</span></div>}
             {capacityBlocked && <div className="recording-capacity-status" role="status"><strong>暂不接纳新的项目录音</strong><span>原因：{recordingStatus?.admission.reason === "asr_backlog" ? "ASR 队列积压" : recordingStatus?.admission.reason === "asr_degraded" ? "ASR/CUDA 状态降级" : "ASR Worker 暂时离线"} · 约 {recordingStatus?.admission.retry_after_seconds ?? 5} 秒后自动复查</span></div>}
-            {currentRecordingStatus?.recoverable && !lease && !stopPending && <div className="recording-recovery-status" role="status"><strong>可在本课程继续录音</strong><span>已确认的音频和历史内容仍保留。点击下方按钮并确认后续录，尚未完成的翻译会在后台处理。</span></div>}
             {recordingWaitsForQueue && <div className="recording-capacity-status" role="status"><strong>本次课程正在收尾</strong><span>还有 {currentRecordingStatus?.active_model_jobs ?? 0} 个后台任务；完成后会自动恢复继续入口。</span></div>}
-            {captureNotice && <div className={capturePhase === "error" || capturePhase === "blocked" ? "capture-inline-alert" : "recording-recovery-status"} role="status">{captureNotice}</div>}
+            {captureNotice && conflictingLeaseSeconds === null && !capacityBlocked && !recordingWaitsForQueue && <div className={capturePhase === "error" || capturePhase === "blocked" ? "capture-inline-alert" : "recording-recovery-status"} role="status">{captureNotice}</div>}
             <p className="capture-copy" aria-live="polite">{visibleCaptureStatus}</p>
             {stopPending ? (
               <button className="stop-button" disabled={busy} onClick={() => void stop()}>{busy ? "正在保存音频并结束课程" : "重试完成停止"}</button>
@@ -1634,18 +1641,41 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="primary-button" disabled>等待后台处理完成</button>
             )}
           </section>
-          <aside className="learning-sidebar" aria-label="课程讲解与状态">
-          {section === "overview" && <section className="side-card sidebar-outline"><CourseOutline items={timeline.items} onSeek={seekToCapture} /></section>}
-          {section !== "assets" && section !== "user-notes" && <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} focusKey={documentFocusKey} retryAvailable={explanationRetryAvailable} retrying={retryingExplanation} onRetry={() => void retryExplanations()} />}
-          {latestCourseSummary && <section className="side-card course-summary-panel" aria-label="课程总结"><h3>课程总结</h3><p>{latestCourseSummary.body}</p></section>}
-          <CourseQuestions sessionId={session.id} sessionState={session.state} events={timeline.events} onEvidence={(id) => {
+          <aside className="learning-sidebar" aria-label="课程讲解">
+          <div className="learning-tabs" role="group" aria-label="讲解内容">
+            <button type="button" aria-pressed={learningView === "group"} onClick={() => setLearningView("group")}>当前内容组</button>
+            <button type="button" aria-pressed={learningView === "course"} onClick={() => setLearningView("course")}>课程总结</button>
+            <button type="button" aria-pressed={learningView === "questions"} onClick={() => setLearningView("questions")}>课程问答</button>
+          </div>
+          {learningView === "group" && <div className="learning-content">
+            {section === "overview" && <section className="side-card sidebar-outline"><CourseOutline items={timeline.items} onSeek={seekToCapture} /></section>}
+            {section !== "assets" && section !== "user-notes" && <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} focusKey={documentFocusKey} retryAvailable={explanationRetryAvailable} retrying={retryingExplanation} onRetry={() => void retryExplanations()} />}
+          </div>}
+          {learningView === "course" && <section className="side-card course-summary-panel learning-content" aria-label="课程总结">
+            <div className="card-heading"><h3>课程总结</h3><StatusBadge tone={summaryPending || summaryRetryRequested ? "yellow" : summaryStatus.phase === "failed" ? "red" : latestCourseSummary ? "green" : "gray"}>{summaryStatus.phase === "failed" && !summaryRetryRequested ? "生成失败" : summaryPending || summaryRetryRequested ? "生成中" : latestCourseSummary ? "已生成" : "尚未生成"}</StatusBadge></div>
+            {latestCourseSummary ? <div className="course-summary-body">
+              <section><h4>这节课讲了什么</h4>{(courseOverview || latestCourseSummary.body).split(/\n\s*\n/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</section>
+              {coursePoints.length > 0 && <section><h4>按内容顺序回顾</h4><ol>{coursePoints.map((point, index) => <li key={index}>{point}</li>)}</ol></section>}
+              {courseTerms.length > 0 && <section><h4>专业名词与背景</h4><dl>{courseTerms.map((term, index) => <div key={`${term.term}:${index}`}><dt>{term.term}</dt><dd>{term.one_line}{term.background_reference && <a href={term.background_reference} target="_blank" rel="noopener noreferrer">查看来源 ↗</a>}</dd></div>)}</dl></section>}
+            </div> : <p>{summaryStatus.phase === "failed" && !summaryRetryRequested ? "本次课程的音频、原文和译文已保存，课程总结生成失败，可重新排队" : summaryPending || summaryRetryRequested ? "课程总结已排队，完成后会出现在这里" : "课程停止并完成处理后会生成课程总结"}</p>}
+            {summaryRetryable && <button type="button" className="secondary-button" disabled={busy} onClick={() => {
+              setSummaryRetryForEventId(summaryStatus.eventId);
+              void api.summarize(project.id, session.id)
+                .then(() => setNotice("课程总结已重新排队；已保存的录音和译文不受影响"))
+                .catch((caught) => { setSummaryRetryForEventId(null); setNotice(caught instanceof Error ? caught.message : "课程总结重新排队失败，请稍后重试"); });
+            }}>重新生成课程总结</button>}
+          </section>}
+          {learningView === "questions" && <div className="learning-content"><CourseQuestions sessionId={session.id} sessionState={session.state} events={timeline.events} onEvidence={(id) => {
             navigate(project.id, session.id, "transcript");
             window.setTimeout(() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
-          }} />
-          <GpuPanel runtime={runtime} />
+          }} /></div>}
+          </aside>
+          {notice && <div className="notice-box session-notice" role="status">{notice}</div>}
+        </div>
+        <details className="session-system-details"><summary>运行状态 <StatusBadge tone={runtime?.worker?.online ? "green" : "yellow"}>{runtime?.worker?.online ? "GPU 在线" : "GPU 待连接"}</StatusBadge><StatusBadge tone={readWeaveTone}>ReadWeave {!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "有冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></summary>
+          <div className="system-details-content"><GpuPanel runtime={runtime} />
           <section className="side-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
-            <p>{readWeavePreview?.sessions?.find((item) => item.session_id === session.id)?.latest_entries[0]?.translation ?? "稳定字幕和讲解会自动进入对应笔记"}</p>
             <dl className="readweave-connection">
               <div><dt>连接目标</dt><dd>{readWeave?.connection?.public_url ?? (readWeave?.configured ? "已连接（地址受保护）" : "未配置")}</dd></div>
               <div><dt>同步范围</dt><dd>{readWeave?.connection?.policy ?? "仅同步稳定内容，不同步原始音频或秘密配置"}</dd></div>
@@ -1661,9 +1691,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             {readWeaveUrl && <button className="text-link-button" onClick={() => setReadWeaveConfirmUrl(readWeaveUrl)}>打开{readWeaveNodeType ? "对应" : "项目"}笔记 →</button>}
             {readWeaveConfirmUrl && <div className="inline-confirm" role="dialog" aria-label="确认打开 ReadWeave"><p>即将打开 ReadWeave 对应目标：</p><code>{readWeaveConfirmUrl}</code><div><button className="secondary-button" onClick={() => setReadWeaveConfirmUrl(null)}>取消</button><button className="primary-button" onClick={() => { const url = readWeaveConfirmUrl; setReadWeaveConfirmUrl(null); window.location.assign(url); }}>确认打开</button></div></div>}
           </section>
-          {notice && <div className="notice-box" role="status">{notice}</div>}
-          </aside>
-        </div>
+          </div>
+        </details>
       </main>
     </div>
   );

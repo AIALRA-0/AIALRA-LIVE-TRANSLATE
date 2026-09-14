@@ -4,9 +4,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from workers.gpu_agent.teaching import PartCaller, assemble_explanation, source_records
+from workers.gpu_agent.teaching import PartCaller, source_pieces, source_records
 
-COMPILED_PROVIDER = "compiled:content-groups-v1@cpu"
+COMPILED_PROVIDER = "compiled:content-groups-v1@cpu"  # Historical result compatibility only.
+
+
+def note_batches(notes: list[str], capacity: int = 3500) -> list[str]:
+    batches: list[str] = []
+    pending: list[str] = []
+    used = 0
+    for note in notes:
+        for piece in source_pieces(note, capacity):
+            size = len(piece.encode()) + (2 if pending else 0)
+            if pending and used + size > capacity:
+                batches.append("\n\n".join(pending))
+                pending, used = [], 0
+            pending.append(piece)
+            used += len(piece.encode()) + (2 if len(pending) > 1 else 0)
+    if pending:
+        batches.append("\n\n".join(pending))
+    return batches
 
 
 async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[str, Any]:
@@ -14,6 +31,20 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
     pages = source_records(model_input.get("asset_pages", []))
     positions = {source["id"]: index for index, source in enumerate(segments)}
     page_ids = {source["id"] for source in pages}
+    provider = ""
+
+    async def synthesize(text: str, phase: str = "course") -> str:
+        nonlocal provider
+        result = await call({"phase": phase, "text": text,
+                             "target_language": model_input["target_language"]})
+        observed, prose = result.get("provider"), result.get("prose")
+        if (not isinstance(observed, str) or not observed.startswith("ollama:")
+                or not observed.endswith("@cuda") or (provider and provider != observed)
+                or not isinstance(prose, str) or not prose.strip()):
+            raise ValueError("course_synthesis_invalid")
+        provider = observed
+        return prose.strip()
+
     reusable: dict[int, dict[str, Any]] = {}
     for group in model_input.get("complete_groups", []):
         if not isinstance(group, dict) or group.get("coverage_contract") != "all_sources_v1":
@@ -48,10 +79,15 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
             end = cursor + 1
             while end < len(segments) and end not in reusable and end - cursor < 20:
                 end += 1
-            group = await assemble_explanation({
-                "segments": segments[cursor:end], "asset_pages": [],
-                "target_language": model_input["target_language"],
-            }, call)
+            missing = segments[cursor:end]
+            group = {
+                "paragraph_summary": "\n\n".join([
+                    await synthesize(batch, "group")
+                    for batch in note_batches([source["text"] for source in missing])
+                ]),
+                "terms": [], "evidence_segment_ids": [source["id"] for source in missing],
+                "asset_page_ids": [],
+            }
             cursor = end
         groups.append(group)
 
@@ -59,15 +95,12 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
     for page in pages:
         if page["id"] in covered_pages:
             continue
-        # The same bounded prose/definition contract works for a material page;
-        # restore its page reference before composing the public result.
-        group = await assemble_explanation({
-            "segments": [page], "asset_pages": [],
-            "target_language": model_input["target_language"],
-        }, call)
-        group["asset_page_ids"], group["evidence_segment_ids"] = [page["id"]], []
-        for term in group["terms"]:
-            term["asset_page_ids"], term["evidence_segment_ids"] = [page["id"]], []
+        group = {
+            "paragraph_summary": "\n\n".join([
+                await synthesize(batch, "group") for batch in note_batches([page["text"]])
+            ]),
+            "terms": [], "asset_page_ids": [page["id"]], "evidence_segment_ids": [],
+        }
         groups.append(group)
     expected_ids = [source["id"] for source in segments]
     if [ref for group in groups for ref in group["evidence_segment_ids"]] != expected_ids:
@@ -90,10 +123,28 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
                 for ref in term[field]:
                     if ref not in indexed_terms[key][field]:
                         indexed_terms[key][field].append(ref)
+    notes = [group["paragraph_summary"].strip() for group in groups]
+    batches = note_batches(notes)
+    if len(batches) == 1:
+        overview = await synthesize(batches[0])
+        chapters = notes if len(notes) > 1 else []
+    else:
+        chapters = [await synthesize(batch) for batch in batches]
+        remaining = chapters
+        for _ in range(4):
+            if len("\n\n".join(remaining).encode()) <= 3500:
+                break
+            next_level = [await synthesize(batch) for batch in note_batches(remaining)]
+            if len(next_level) >= len(remaining):
+                raise ValueError("course_synthesis_capacity_exceeded")
+            remaining = next_level
+        else:
+            raise ValueError("course_synthesis_capacity_exceeded")
+        overview = await synthesize("\n\n".join(remaining))
     return {
-        "overview": "\n\n".join(group["paragraph_summary"] for group in groups),
-        "key_points": [], "terminology": terms, "open_questions": [],
+        "overview": overview,
+        "key_points": chapters, "terminology": terms, "open_questions": [],
         "evidence_segment_ids": expected_ids,
         "asset_page_ids": [source["id"] for source in pages],
-        "provider": COMPILED_PROVIDER,
+        "provider": provider,
     }
