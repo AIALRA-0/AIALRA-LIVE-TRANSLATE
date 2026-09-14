@@ -38,6 +38,7 @@ previous_image_id=''
 previous_image_ref=''
 previous_image_archive_ref=''
 build_id_file="$release_dir/BUILD_ID"
+minimum_available_gib="${AIALRA_DEPLOY_MIN_AVAILABLE_GIB:-20}"
 
 read_env_value() {
   local key="$1"
@@ -80,10 +81,15 @@ if [[ ! "$build_id" =~ ^[0-9a-f]{40}$ ]]; then
   exit 65
 fi
 
+if [[ ! "$minimum_available_gib" =~ ^[0-9]+$ ]] || (( minimum_available_gib < 10 || minimum_available_gib > 100 )); then
+  printf 'AIALRA_DEPLOY_MIN_AVAILABLE_GIB must be an integer between 10 and 100\n' >&2
+  exit 64
+fi
+
 available_kib="$(df -Pk "$platform_root" | awk 'NR==2 {print $4}')"
 available_percent="$(df -Pk "$platform_root" | awk 'NR==2 {gsub(/%/, "", $5); print 100-$5}')"
-if (( available_kib < 20 * 1024 * 1024 && available_percent < 5 )); then
-  printf 'deployment requires at least 20 GiB or 5%% free space\n' >&2
+if (( available_kib < minimum_available_gib * 1024 * 1024 && available_percent < 5 )); then
+  printf 'deployment requires at least %s GiB or 5%% free space\n' "$minimum_available_gib" >&2
   exit 75
 fi
 
