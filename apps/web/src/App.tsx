@@ -919,7 +919,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [stopPending, setStopPending] = useState(() => readStopIntent(project.id, initial.id) !== null);
   const [runtime, setRuntime] = useState<RuntimeHealth | null>(null);
   const [readWeave, setReadWeave] = useState<ReadWeaveStatus | null>(null);
-  const readWeaveRequest = useRef(0);
+  const readWeaveRefreshInFlight = useRef<Promise<void> | null>(null);
+  const readWeaveRefreshPending = useRef(false);
   const [readWeaveConfirmUrl, setReadWeaveConfirmUrl] = useState<string | null>(null);
   const [readWeaveReconciling, setReadWeaveReconciling] = useState(false);
   const [visibleItemLimit, setVisibleItemLimit] = useState(TIMELINE_PAGE_SIZE);
@@ -947,15 +948,24 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     }, 3_000);
   }, []);
 
-  const refreshReadWeave = useCallback(async (): Promise<void> => {
-    const requestId = ++readWeaveRequest.current;
-    try {
-      const next = await api.readWeaveStatus(project.id);
-      if (requestId === readWeaveRequest.current) setReadWeave(next);
-    } catch {
-      // A short reconnect must not replace the last confirmed state with an
-      // alarming empty card. The next poll or event will refresh it.
+  const refreshReadWeave = useCallback((): Promise<void> => {
+    if (readWeaveRefreshInFlight.current) {
+      readWeaveRefreshPending.current = true;
+      return readWeaveRefreshInFlight.current;
     }
+    const run = (async () => {
+      do {
+        readWeaveRefreshPending.current = false;
+        try {
+          setReadWeave(await api.readWeaveStatus(project.id));
+        } catch {
+          // A short reconnect must not replace the last confirmed state with an
+          // alarming empty card. The next poll or event will refresh it.
+        }
+      } while (readWeaveRefreshPending.current);
+    })();
+    readWeaveRefreshInFlight.current = run.finally(() => { readWeaveRefreshInFlight.current = null; });
+    return readWeaveRefreshInFlight.current;
   }, [project.id]);
 
   const refreshRecordingStatus = useCallback(async (): Promise<RecordingProjectStatus | null> => {
