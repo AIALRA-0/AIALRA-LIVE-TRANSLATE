@@ -10,10 +10,22 @@ from workers.model_worker.teaching import (
     TeachingPartRequest,
     bound_inventory,
     generate_part,
+    readable_synthesis,
     source_surface,
     valid_part,
 )
 from workers.model_worker.terminology import matching_technical_terms
+
+
+def test_synthesis_rejects_transcript_narration_and_thin_long_source_summary() -> None:
+    assert not readable_synthesis("当我在讲解这个问题时，你会看到我所说的内容", "材料")
+    assert not readable_synthesis("很短的总结", "source " * 80)
+    assert readable_synthesis(
+        "这部分先定义故障模型，再说明测试向量怎样激励电路并暴露响应中的异常；"
+        "随后比较不同故障对输出的影响，解释覆盖率反映哪些目标已经被测试；"
+        "最后区分检测到故障与定位故障的边界，并保留材料没有给出的实现条件",
+        "source " * 80,
+    )
 
 
 def test_fm_naming_requires_partitioning_context() -> None:
@@ -116,7 +128,10 @@ async def test_adjacent_source_context_reaches_model_without_becoming_inventory(
         assert "context_reference" in system
         if phase == "prose":
             return {"prose": "这里使用 FM 算法", "original_terms": ["FM", "radio"]}
-        return {"term": "FM 算法", "definition": "电路划分算法"}
+        return {"term": "FM 算法", "definition": (
+            "这是一种用于电路划分的启发式算法；它通过移动单元来减少跨区连接；"
+            "它适合在规模约束下改进已有划分，并不保证找到全局最优结果"
+        )}
 
     result = await generate_part(TeachingPartRequest(
         phase=phase, text="FM is the algorithm used here.", context=context,
@@ -129,7 +144,10 @@ async def test_adjacent_source_context_reaches_model_without_becoming_inventory(
 
 @pytest.mark.asyncio
 async def test_generated_definition_style_does_not_change_source_or_raw_result() -> None:
-    raw = {"term": "Register (寄存器)", "definition": "保留 1.25 V。不是所有输入都适用。"}
+    raw = {"term": "Register (寄存器)", "definition": (
+        "寄存器是用于保存数字状态的电路单元；它在控制时刻接收并保持输入值；"
+        "这里保留 1.25 V，但这个示例并不表示所有输入都适用。"
+    )}
 
     async def infer(
         system: str, user: str, schema: dict[str, Any], **options: Any,
@@ -143,6 +161,9 @@ async def test_generated_definition_style_does_not_change_source_or_raw_result()
     ), infer, "test", "cuda")
     assert result is not None
     assert result.term == "寄存器（Register）"
-    assert result.definition == "保留 1.25 V；不是所有输入都适用"
+    assert result.definition == (
+        "寄存器是用于保存数字状态的电路单元；它在控制时刻接收并保持输入值；"
+        "这里保留 1.25 V，但这个示例并不表示所有输入都适用"
+    )
     assert raw["term"] == "Register (寄存器)"
     assert raw["definition"].endswith("。")

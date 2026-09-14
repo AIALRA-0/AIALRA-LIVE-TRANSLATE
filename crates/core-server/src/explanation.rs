@@ -4,7 +4,11 @@ use crate::app::AppState;
 use aialra_event_store::{ModelJobRecord, NewModelJob};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use uuid::Uuid;
+
+const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v44";
+const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
 
 pub fn enqueue_explanation(
     state: &AppState,
@@ -60,6 +64,111 @@ pub fn enqueue_explanation_for_paragraphs(
             session.target_language
         )
     })
+}
+
+/// Append corrected revisions for legacy cards that plainly violate the
+/// learner-facing writing contract. Existing events remain immutable, and the
+/// versioned idempotency key makes repeated page visits harmless.
+pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usize> {
+    let session = state
+        .store
+        .get_session(session_id)?
+        .context("session not found")?;
+    let events = state.store.list_events(session_id)?;
+    let paragraph_text = events
+        .iter()
+        .filter(|event| event.event_type == "paragraph.finalized")
+        .filter_map(|event| {
+            Some((
+                event.payload.get("paragraph_id")?.as_str()?.to_owned(),
+                event.payload.get("text")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut latest = BTreeMap::<String, (Vec<String>, Value)>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "explanation.card.created")
+    {
+        let result = &event.payload["result"];
+        let ids = result["evidence_segment_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            latest.insert(ids.join(":"), (ids, result.clone()));
+        }
+    }
+    let chinese = session
+        .target_language
+        .to_ascii_lowercase()
+        .starts_with("zh");
+    let mut queued = 0;
+    for (key, (ids, result)) in latest {
+        if queued == MAX_QUALITY_REPAIRS_PER_ENSURE {
+            break;
+        }
+        let source_characters = ids
+            .iter()
+            .filter_map(|id| paragraph_text.get(id))
+            .map(|text| text.chars().count())
+            .sum();
+        if !explanation_needs_quality_repair(&result, source_characters, chinese) {
+            continue;
+        }
+        let idempotency_key = format!("explain:{session_id}:{QUALITY_REPAIR_TRIGGER}:{key}");
+        if state
+            .store
+            .get_model_job_by_key(&idempotency_key)?
+            .is_some()
+        {
+            continue;
+        }
+        enqueue_explanation_for_paragraphs(state, session_id, QUALITY_REPAIR_TRIGGER, &ids)?;
+        queued += 1;
+    }
+    Ok(queued)
+}
+
+fn explanation_needs_quality_repair(
+    result: &Value,
+    source_characters: usize,
+    chinese: bool,
+) -> bool {
+    let summary = result["paragraph_summary"]
+        .as_str()
+        .or_else(|| result["summary"].as_str())
+        .unwrap_or_default()
+        .trim();
+    let transcript_narration = [
+        "当我在讲解",
+        "你会看到我所说",
+        "老师说",
+        "讲者提到",
+        "本段话讲了",
+        "本段内容讲了",
+        "让我们来看",
+    ];
+    if summary.is_empty()
+        || transcript_narration
+            .iter()
+            .any(|phrase| summary.contains(phrase))
+        || (source_characters >= 240 && summary.chars().count() < 80)
+    {
+        return true;
+    }
+    if !chinese {
+        return false;
+    }
+    result["terms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|term| term["explanation"].as_str())
+        .any(|definition| definition.chars().count() < 50 || definition.matches('；').count() < 2)
 }
 
 fn enqueue_with_evidence(
@@ -284,6 +393,95 @@ mod tests {
     use crate::app::AppState;
     use aialra_event_store::{NewModelJob, NewSession};
     use serde_json::json;
+
+    #[test]
+    fn quality_contract_rejects_narration_thin_summaries_and_shallow_definitions() {
+        assert!(super::explanation_needs_quality_repair(
+            &json!({"paragraph_summary": "当我在讲解故障模拟时，你会看到我所说的建模是什么意思", "terms": []}),
+            400,
+            true,
+        ));
+        assert!(super::explanation_needs_quality_repair(
+            &json!({"paragraph_summary": "内容太短", "terms": []}),
+            400,
+            true,
+        ));
+        assert!(super::explanation_needs_quality_repair(
+            &json!({"paragraph_summary": "这段内容先定义故障模型，再说明模型怎样把复杂电路抽象为可控制和可观察的测试对象，并进一步解释该抽象只覆盖测试目标，不等同于真实器件的全部物理行为", "terms": [{"explanation": "一家芯片公司"}]}),
+            400,
+            true,
+        ));
+        assert!(!super::explanation_needs_quality_repair(
+            &json!({"paragraph_summary": "这段内容先定义故障模型，再说明模型怎样把复杂电路抽象为可控制和可观察的测试对象。抽象后的模型让工程师能围绕明确故障设计测试，但它只覆盖测试目标，不能代表真实器件中的全部物理行为，因此使用时还要保留模型适用范围和实际电路条件。", "terms": [{"explanation": "晶圆代工厂是按客户设计制造芯片的专业制造企业；它负责工艺开发、晶圆生产和质量控制；客户提供电路设计，代工厂用制造流程把设计变为芯片；它与销售自有品牌芯片的厂商不同"}]}),
+            400,
+            true,
+        ));
+    }
+
+    #[test]
+    fn legacy_card_quality_repair_is_append_only_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session-quality-repair".to_owned(),
+                title: "Synthetic quality repair".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for index in 0..4 {
+            state.emit_idempotent(
+                &format!("quality-paragraph-{index}"),
+                "session-quality-repair",
+                "fixture",
+                "paragraph.finalized",
+                index,
+                &format!("paragraph-{index}"),
+                None,
+                json!({"paragraph_id": format!("paragraph-{index}"), "text": "A complete synthetic technical paragraph used only to verify queue behavior."}),
+            ).unwrap();
+        }
+        state.emit_idempotent(
+            "legacy-quality-card",
+            "session-quality-repair",
+            "fixture",
+            "explanation.card.created",
+            0,
+            "legacy-card",
+            None,
+            json!({"result": {"paragraph_summary": "老师说了一个主题", "terms": [],
+                "evidence_segment_ids": ["paragraph-0", "paragraph-1", "paragraph-2", "paragraph-3"]}}),
+        ).unwrap();
+
+        assert_eq!(
+            super::enqueue_quality_repairs(&state, "session-quality-repair").unwrap(),
+            1
+        );
+        assert_eq!(
+            super::enqueue_quality_repairs(&state, "session-quality-repair").unwrap(),
+            0
+        );
+        let jobs = state
+            .store
+            .model_queue_counts(Some("session-quality-repair"))
+            .unwrap();
+        assert_eq!(jobs.queued, 1);
+        assert_eq!(
+            state
+                .store
+                .list_events("session-quality-repair")
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == "explanation.card.created")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn recent_material_context_preserves_complete_contiguous_paragraphs() {

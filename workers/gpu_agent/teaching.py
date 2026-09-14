@@ -203,7 +203,10 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         heading = guide.get("prose")
         if not isinstance(heading, str) or not heading.strip():
             raise ValueError("teaching_group_synthesis_invalid")
-        detailed_prose = f"{heading.strip()}\n\n{detailed_prose}"
+        # The group synthesis already covers all bounded notes. Publishing the
+        # intermediate per-piece drafts beneath it repeats ideas and often
+        # reads like stitched transcript fragments in the narrow learning rail.
+        detailed_prose = heading.strip()
     return {
         "paragraph_summary": detailed_prose, "terms": definitions,
         "evidence_segment_ids": [item["id"] for item in segments],

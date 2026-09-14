@@ -489,7 +489,10 @@ pub async fn session_audio_index(
     ))
 }
 
-const MAX_PLAYBACK_RANGE: u64 = 1024 * 1024;
+// Four MiB is about 131 seconds of our 16 kHz mono PCM. It keeps each
+// response bounded while avoiding a new authenticated request every 16–33
+// seconds during normal or 2× playback.
+const MAX_PLAYBACK_RANGE: u64 = 4 * 1024 * 1024;
 
 fn playback_range(request: Option<&HeaderValue>, total: u64) -> Result<(u64, u64, bool), ApiError> {
     let Some(value) = request else {

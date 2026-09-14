@@ -94,7 +94,7 @@ function currentLocalLease(): RecordingLease | null {
 }
 
 function stateLabel(state: string): string {
-  if (state === "recording_interrupted") return "录音已中断，可恢复";
+  if (state === "recording_interrupted") return "可以续录";
   if (state === "recording_checking") return "正在确认收音状态";
   return ({ ready: "已就绪", recording: "录音中", degraded: "降级录音中", stopping: "正在停止", processing: "后台收尾中", completed: "已完成", failed: "失败", archived: "已归档" } as Record<string, string>)[state] ?? state;
 }
@@ -123,11 +123,11 @@ function capturePhaseLabel(phase: CapturePhase, sessionState: string, hasLease: 
   if (phase === "connecting") return "正在连接服务器";
   if (phase === "recording") return "正在收音";
   if (phase === "blocked") return "项目录音已被其他设备占用";
-  if (phase === "recoverable") return "本次课程可恢复";
+  if (phase === "recoverable") return "可以继续录音";
   if (phase === "stopping") return "正在停止并保存尾音";
   if (phase === "processing") return "后台生成结果";
   if (phase === "error") return "录音需要处理";
-  if (sessionState === "recording" && !hasLease) return "需要重新连接本次收音";
+  if (sessionState === "recording" && !hasLease) return "可以继续录音";
   if (sessionState === "processing") return "后台生成结果";
   if (sessionState === "completed") return "已完成";
   if (sessionState === "failed") return "处理失败";
@@ -142,7 +142,7 @@ function capturePhaseTone(phase: CapturePhase, sessionState: string, hasLease: b
   if (phase === "blocked") return "yellow";
   if (phase === "recoverable") return "green";
   if (["checking-status", "requesting-permission", "acquiring-lease", "connecting", "stopping", "processing"].includes(phase) || sessionState === "processing") return "yellow";
-  if (sessionState === "recording" && !hasLease) return "yellow";
+  if (sessionState === "recording" && !hasLease) return "green";
   if (sessionState === "ready" || sessionState === "completed") return "green";
   return "gray";
 }
@@ -218,6 +218,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());
   const [allProjectsVisible, setAllProjectsVisible] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(
     () => new Set(snapshot.folders.filter((folder) => folder.parent_id === null).map((folder) => folder.id)),
@@ -443,6 +444,15 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     if (window.confirm(`永久删除“${trashTitle(item)}”及其关联内容？此操作不可恢复。`)) void onPurgeTrash(item);
   }
 
+  async function purgeAllTrash(): Promise<void> {
+    const roots = trashItems.filter((item) => !isNestedTrashItem(item));
+    if (!roots.length) return;
+    if (!window.confirm(`清空回收站会永久删除 ${trashItems.length} 项内容，且无法恢复。是否继续？`)) return;
+    if (!window.confirm("请再次确认：永久删除回收站中的全部内容？")) return;
+    for (const item of roots) await onPurgeTrash(item);
+    setTrashOpen(false);
+  }
+
   function parseDrag(event: React.DragEvent): WorkspaceTarget | null {
     if (dragging) return dragging;
     try {
@@ -656,9 +666,12 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
           {dragging && dragging.entityType !== "session" && <li>{renderDropZone({ entityType: "root" }, "root")}</li>}
         </ul>
       </nav>
-      <section className="workspace-trash" aria-label="回收站">
-        <div className="trash-heading"><span>回收站</span><small>{trashItems.length ? `${trashItems.length} 项 · 右键管理` : "暂无内容"}</small></div>
-        {trashItems.filter((item) => !isNestedTrashItem(item)).map((item) => <button key={`${item.entity_type}:${item.entity_id}`} className="trash-item" onClick={() => restoreTrash(item)} onContextMenu={(event) => showTrashMenu(event, item)}><span aria-hidden="true">⌫</span><span>{trashTitle(item)}</span><small>{item.entity_type === "folder" ? "文件夹" : item.entity_type === "project" ? "项目" : "课程"}</small></button>)}
+      <section className={`workspace-trash${trashOpen ? " open" : ""}`} aria-label="回收站">
+        <div className="trash-heading"><button type="button" aria-expanded={trashOpen} onClick={() => setTrashOpen((current) => !current)}><span aria-hidden="true">{trashOpen ? "▾" : "▸"}</span> 回收站</button><small>{trashItems.length ? `${trashItems.length} 项` : "暂无内容"}</small></div>
+        {trashOpen && <div className="trash-contents">
+          {trashItems.filter((item) => !isNestedTrashItem(item)).map((item) => <button key={`${item.entity_type}:${item.entity_id}`} className="trash-item" onClick={() => restoreTrash(item)} onContextMenu={(event) => showTrashMenu(event, item)}><span aria-hidden="true">⌫</span><span>{trashTitle(item)}</span><small>{item.entity_type === "folder" ? "文件夹" : item.entity_type === "project" ? "项目" : "课程"}</small></button>)}
+          {trashItems.length > 0 && <button type="button" className="trash-purge-all" onClick={() => void purgeAllTrash()}>清空回收站</button>}
+        </div>}
       </section>
       {dialog && <div className="workspace-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialog(null); }}><dialog className="workspace-dialog" open aria-modal="true" aria-labelledby="workspace-dialog-title" onCancel={() => setDialog(null)}>
         <form method="dialog" onSubmit={(event) => void submitDialog(event)}>
@@ -813,7 +826,7 @@ function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, r
   const summary = insight?.sections?.find((section) => section.label === "当前内容组总结");
   const terms = insight?.sections?.filter((section) => section.label.startsWith("知识补充")) ?? [];
   return (
-    <section className="side-card paragraph-insight-panel" data-testid="paragraph-insight-panel">
+    <section className="paragraph-insight-panel" data-testid="paragraph-insight-panel">
       <div className="card-heading"><h3>当前内容组</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "积累内容"}</StatusBadge></div>
       {insight?.groupReason === "capacity_continuation" && <p className="form-help">同主题续接：这一组达到单次整理容量，后续内容会继续保留，不代表老师已经换话题</p>}
       {paragraph && <small className="insight-anchor">对应左侧 {new Date(paragraph.occurredAt).toLocaleTimeString("zh-CN", { hour12: false })} 的段落</small>}
@@ -872,9 +885,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [documentSearch, setDocumentSearch] = useState("");
   const seekToCapture = (capturedAtMs: number) => setSeekRequest((previous) => ({ capturedAtMs, serial: (previous?.serial ?? 0) + 1 }));
   const [timeline, dispatch] = useReducer(timelineReducer, { events: [], items: [] });
-  const [streamConnected, setStreamConnected] = useState(false);
+  const [sessionStreamConnected, setSessionStreamConnected] = useState(false);
+  const sessionStreamDisconnectTimer = useRef<number | null>(null);
   const [lastActivityAt, setLastActivityAt] = useState(initial.updated_at);
-  const [captureStatus, setCaptureStatus] = useState("尚未连接麦克风");
+  const [captureStatus, setCaptureStatus] = useState("开始录音时才会连接所选设备");
   const [capturePhase, setCapturePhase] = useState<CapturePhase>("idle");
   const [captureNotice, setCaptureNotice] = useState("");
   const [recordingStatus, setRecordingStatus] = useState<RecordingProjectStatus | null>(null);
@@ -905,6 +919,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [stopPending, setStopPending] = useState(() => readStopIntent(project.id, initial.id) !== null);
   const [runtime, setRuntime] = useState<RuntimeHealth | null>(null);
   const [readWeave, setReadWeave] = useState<ReadWeaveStatus | null>(null);
+  const readWeaveRequest = useRef(0);
   const [readWeaveConfirmUrl, setReadWeaveConfirmUrl] = useState<string | null>(null);
   const [readWeaveReconciling, setReadWeaveReconciling] = useState(false);
   const [visibleItemLimit, setVisibleItemLimit] = useState(TIMELINE_PAGE_SIZE);
@@ -917,6 +932,31 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const followDocumentRef = useRef(true);
   const [newItemsPending, setNewItemsPending] = useState(false);
   const [screenWake] = useState(() => new RecordingWakeLock(setWakeLockNotice));
+
+  const reportSessionConnection = useCallback((connected: boolean) => {
+    if (connected) {
+      if (sessionStreamDisconnectTimer.current !== null) window.clearTimeout(sessionStreamDisconnectTimer.current);
+      sessionStreamDisconnectTimer.current = null;
+      setSessionStreamConnected(true);
+      return;
+    }
+    if (sessionStreamDisconnectTimer.current !== null) return;
+    sessionStreamDisconnectTimer.current = window.setTimeout(() => {
+      sessionStreamDisconnectTimer.current = null;
+      setSessionStreamConnected(false);
+    }, 3_000);
+  }, []);
+
+  const refreshReadWeave = useCallback(async (): Promise<void> => {
+    const requestId = ++readWeaveRequest.current;
+    try {
+      const next = await api.readWeaveStatus(project.id);
+      if (requestId === readWeaveRequest.current) setReadWeave(next);
+    } catch {
+      // A short reconnect must not replace the last confirmed state with an
+      // alarming empty card. The next poll or event will refresh it.
+    }
+  }, [project.id]);
 
   const refreshRecordingStatus = useCallback(async (): Promise<RecordingProjectStatus | null> => {
     const requestId = ++recordingStatusRequest.current;
@@ -946,10 +986,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         const currentStatus = next.sessions?.find((item) => item.session_id === initial.id);
         if (currentStatus?.recoverable) {
           setCapturePhase("recoverable");
-          setCaptureNotice("本次课程没有活动录音租约；确认后接续历史。未完成的翻译不会阻止继续收音。");
+          setCaptureNotice("");
         } else if (currentStatus?.reason === "processing") {
           setCapturePhase("processing");
-          setCaptureNotice("录音已停止，正在保存尾音和整理结果。收尾完成后可在本课程继续录音，不需要新建课程。");
+          setCaptureNotice("");
         } else {
           setCapturePhase((current) => {
             if (!["blocked", "recoverable", "processing"].includes(current)) return current;
@@ -1020,12 +1060,16 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     void api.documentSnapshot(initial.id).then(({ events, cursor }) => {
       if (!active) return;
       dispatch({ type: "reset", events });
-      unsubscribe = subscribeEvents(initial.id, onEvent, setStreamConnected, cursor ?? undefined);
+      unsubscribe = subscribeEvents(initial.id, onEvent, reportSessionConnection, cursor ?? undefined);
     }).catch(() => {
-      if (active) unsubscribe = subscribeEvents(initial.id, onEvent, setStreamConnected);
+      if (active) unsubscribe = subscribeEvents(initial.id, onEvent, reportSessionConnection);
     });
     return () => { active = false; unsubscribe(); };
-  }, [initial.id]);
+  }, [initial.id, reportSessionConnection]);
+
+  useEffect(() => () => {
+    if (sessionStreamDisconnectTimer.current !== null) window.clearTimeout(sessionStreamDisconnectTimer.current);
+  }, []);
 
   useEffect(() => {
     if (topicEnsureStarted.current) return;
@@ -1038,14 +1082,17 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           ? (event.payload.result as Record<string, unknown>).evidence_segment_ids : null;
       if (Array.isArray(evidence)) for (const id of evidence) if (typeof id === "string") assigned.add(id);
     }
-    if (paragraphs.filter((id) => !assigned.has(id)).length < 8) return;
+    const unassigned = paragraphs.filter((id) => !assigned.has(id)).length;
+    if (paragraphs.length === 0) return;
     // EventSource replays the full history. Wait for the replay to settle so an
     // old card arriving after the eighth paragraph cannot trigger new work.
     const timer = window.setTimeout(() => {
       if (topicEnsureStarted.current) return;
       topicEnsureStarted.current = true;
-      void api.ensureTopics(project.id, initial.id).catch(() => {
-        setNotice("当前内容组尚未整理完成，请稍后重新打开课程重试");
+      void api.ensureTopics(project.id, initial.id).then((result) => {
+        if (result.repaired > 0) setNotice(`正在重新整理 ${result.repaired} 个旧版内容组；录音和历史结果保持不变`);
+      }).catch(() => {
+        if (unassigned >= 8) setNotice("当前内容组尚未整理完成，请稍后重新打开课程重试");
       });
     }, 1_500);
     return () => window.clearTimeout(timer);
@@ -1062,10 +1109,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     if (update.update_type.startsWith("recording.lease.") && !refreshTimer) {
       refreshTimer = setTimeout(() => { refreshTimer = undefined; void refreshRecordingStatus(); }, 150);
     }
-    if (update.update_type.startsWith("readweave.")) void api.readWeaveStatus(project.id).then(setReadWeave).catch(() => setReadWeave(null));
-    }, setStreamConnected);
+    if (update.update_type.startsWith("readweave.")) void refreshReadWeave();
+    }, () => undefined);
     return () => { unsubscribe(); clearTimeout(refreshTimer); };
-  }, [project.id, initial.id, refreshRecordingStatus]);
+  }, [project.id, initial.id, refreshRecordingStatus, refreshReadWeave]);
 
   useEffect(() => {
     let active = true;
@@ -1089,15 +1136,16 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   }, [recordingStatus?.lease?.holder, recordingStatus?.lease?.expires_at, recordingStatus?.server_time, refreshRecordingStatus]);
 
   useEffect(() => {
-    void api.readWeaveStatus(project.id).then(setReadWeave).catch(() => setReadWeave(null));
+    const initialReadWeaveRefresh = window.setTimeout(() => void refreshReadWeave(), 0);
     const initialDeviceRefresh = window.setTimeout(() => void refreshAudioInputs(false).catch(() => undefined), 0);
     const onDeviceChange = () => void refreshAudioInputs(false).catch(() => undefined);
     navigator.mediaDevices?.addEventListener("devicechange", onDeviceChange);
     return () => {
+      window.clearTimeout(initialReadWeaveRefresh);
       window.clearTimeout(initialDeviceRefresh);
       navigator.mediaDevices?.removeEventListener("devicechange", onDeviceChange);
     };
-  }, [project.id, initial.id, refreshAudioInputs]);
+  }, [project.id, initial.id, refreshAudioInputs, refreshReadWeave]);
 
   useEffect(() => {
     let active = true;
@@ -1138,7 +1186,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
 
   useEffect(() => {
     let active = true;
-    const refresh = () => void api.health().then((value) => { if (active) setRuntime(value); }).catch(() => { if (active) setRuntime(null); });
+    const refresh = () => void api.health().then((value) => { if (active) setRuntime(value); }).catch(() => undefined);
     refresh(); const timer = window.setInterval(refresh, 5_000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
@@ -1246,7 +1294,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       // Use the displayed snapshot for preflight. The acquire endpoint remains
       // authoritative. Do not await network before requesting browser input.
       const status = recordingStatus;
-      if (status?.lease?.holder === "other") {
+      if (status?.lease?.holder === "other" && new Date(status.lease.expires_at).getTime() > statusClock) {
         setCapturePhase("blocked");
         setCaptureNotice("这个项目当前由其他设备录音；租约释放或到期后可以重新尝试。");
         return;
@@ -1264,7 +1312,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       }
       if ((currentStatus?.recoverable || ["completed", "failed"].includes(session.state)) && !window.confirm("本次课程已有历史内容。确认后将接续原课程，新的录音按时间戳追加，不会覆盖历史。")) {
         setCapturePhase("recoverable");
-        setCaptureNotice("已保留本次课程历史；确认后才会重新获取录音租约。");
+        setCaptureNotice("");
         return;
       }
       if (status && !status.lease && !status.admission.allowed && !["recording", "degraded"].includes(session.state)) {
@@ -1321,7 +1369,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
       }
       setCapturePhase(code === "recording_lease_conflict" ? "blocked" : code === "recording_session_processing" ? "processing" : "error");
       if (code === "recording_lease_conflict" || code === "recording_lease_expired") void refreshRecordingStatus();
-      if (!acquired) setCaptureStatus("尚未连接麦克风");
+      if (!acquired) setCaptureStatus("开始录音时才会连接所选设备");
     } finally { setBusy(false); inputOperation.current = false; }
   }
 
@@ -1448,7 +1496,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     setRetryingExplanation(true);
     try {
       const result = await api.ensureTopics(project.id, initial.id);
-      setNotice(result.retried ? `已重新排队 ${result.retried} 项讲解；录音内容保持不变` : "当前没有可重试的讲解任务");
+      const count = result.retried + result.repaired;
+      setNotice(count ? `已重新排队 ${count} 项讲解；录音内容保持不变` : "当前没有可重试的讲解任务");
     } catch {
       setNotice("讲解重新排队失败，请稍后重试；已保存的录音不受影响");
     } finally {
@@ -1466,9 +1515,10 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     : !recordingStatusReady && ["completed", "failed"].includes(session.state) ? "正在核对续录状态"
       : capturePhaseLabel(capturePhase, session.state, Boolean(lease), captureMode, recordingStatusReady);
   const currentRecordingStatus = recordingStatus?.sessions?.find((item) => item.session_id === initial.id);
-  const conflictingLeaseSeconds = recordingStatus?.lease?.holder === "other"
-    ? Math.max(0, Math.ceil((new Date(recordingStatus.lease.expires_at).getTime() - statusClock) / 1_000))
-    : null;
+  const conflictingLeaseRemaining = recordingStatus?.lease?.holder === "other"
+    ? Math.ceil((new Date(recordingStatus.lease.expires_at).getTime() - statusClock) / 1_000)
+    : 0;
+  const conflictingLeaseSeconds = conflictingLeaseRemaining > 0 ? conflictingLeaseRemaining : null;
   const capacityBlocked = Boolean(recordingStatus && !recordingStatus.lease && !recordingStatus.admission.allowed && !["recording", "degraded"].includes(session.state));
   const recordingWaitsForQueue = Boolean(
     !lease
@@ -1532,7 +1582,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     <div className="session-workspace">
       <header className="session-header">
         <div><p className="eyebrow">{project.title}</p><h1>{session.title}</h1><div className="session-meta"><span>建立：{formatLocalTimestamp(session.created_at)}</span><span>最近活动：{formatLocalTimestamp(lastActivityAt)}</span></div></div>
-        <div className="header-status"><StatusBadge tone={streamConnected ? "green" : "yellow"}>{streamConnected ? "多端已同步" : "正在恢复同步"}</StatusBadge><StatusBadge tone={stopPending ? "yellow" : stateTone(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}>{stopPending ? "本机已停麦，待完成停止" : stateLabel(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}</StatusBadge></div>
+        <div className="header-status"><StatusBadge tone={sessionStreamConnected ? "green" : "yellow"}>{sessionStreamConnected ? "内容已同步" : "正在重新连接"}</StatusBadge><StatusBadge tone={stopPending ? "yellow" : stateTone(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}>{stopPending ? "本机已停麦，待完成停止" : stateLabel(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}</StatusBadge></div>
       </header>
       <SessionPlayer sessionId={session.id} sessionState={session.state} seekRequest={seekRequest} onReady={setWholeAudioReady} />
       <main className="session-layout">
@@ -1623,7 +1673,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             {conflictingLeaseSeconds !== null && <div className="recording-lease-status" role="status"><strong>其他设备正在录制本项目</strong><span>{recordingStatus?.lease?.session_title ? `课程“${recordingStatus.lease.session_title}”` : "当前课程会话"} · 租约约 {conflictingLeaseSeconds} 秒后到期</span></div>}
             {capacityBlocked && <div className="recording-capacity-status" role="status"><strong>暂不接纳新的项目录音</strong><span>原因：{recordingStatus?.admission.reason === "asr_backlog" ? "ASR 队列积压" : recordingStatus?.admission.reason === "asr_degraded" ? "ASR/CUDA 状态降级" : "ASR Worker 暂时离线"} · 约 {recordingStatus?.admission.retry_after_seconds ?? 5} 秒后自动复查</span></div>}
             {recordingWaitsForQueue && <div className="recording-capacity-status" role="status"><strong>本次课程正在收尾</strong><span>还有 {currentRecordingStatus?.active_model_jobs ?? 0} 个后台任务；完成后会自动恢复继续入口。</span></div>}
-            {captureNotice && conflictingLeaseSeconds === null && !capacityBlocked && !recordingWaitsForQueue && <div className={capturePhase === "error" || capturePhase === "blocked" ? "capture-inline-alert" : "recording-recovery-status"} role="status">{captureNotice}</div>}
+            {captureNotice && (capturePhase === "error" || capturePhase === "blocked") && conflictingLeaseSeconds === null && !capacityBlocked && !recordingWaitsForQueue && <div className="capture-inline-alert" role="status">{captureNotice}</div>}
             <p className="capture-copy" aria-live="polite">{visibleCaptureStatus}</p>
             {stopPending ? (
               <button className="stop-button" disabled={busy} onClick={() => void stop()}>{busy ? "正在保存音频并结束课程" : "重试完成停止"}</button>
@@ -1672,9 +1722,9 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           </aside>
           {notice && <div className="notice-box session-notice" role="status">{notice}</div>}
         </div>
-        <details className="session-system-details"><summary>运行状态 <StatusBadge tone={runtime?.worker?.online ? "green" : "yellow"}>{runtime?.worker?.online ? "GPU 在线" : "GPU 待连接"}</StatusBadge><StatusBadge tone={readWeaveTone}>ReadWeave {!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "有冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></summary>
+        <details className="session-system-details"><summary>运行状态 <StatusBadge tone={runtime?.worker?.online ? "green" : "yellow"}>{runtime?.worker?.online ? "GPU 在线" : "GPU 待连接"}</StatusBadge><StatusBadge tone={!readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : "green"}>ReadWeave {!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "有冲突" : "已连接"}</StatusBadge></summary>
           <div className="system-details-content"><GpuPanel runtime={runtime} />
-          <section className="side-card readweave-card">
+          <section className="side-card system-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
             <dl className="readweave-connection">
               <div><dt>连接目标</dt><dd>{readWeave?.connection?.public_url ?? (readWeave?.configured ? "已连接（地址受保护）" : "未配置")}</dd></div>

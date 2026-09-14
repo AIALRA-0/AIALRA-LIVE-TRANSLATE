@@ -34,6 +34,7 @@ ADC_REFERENCE = (
 CRC_REFERENCE = "https://www.rfc-editor.org/rfc/rfc3385"
 PARTITION_REFERENCE = "https://limsk.ece.gatech.edu/book/papers/fm.pdf"
 NETLIST_REFERENCE = "https://docs.amd.com/r/en-US/ug893-vivado-ide/Using-the-Netlist-Window"
+TSMC_REFERENCE = "https://www.tsmc.com/english/dedicatedFoundry"
 
 
 def reviewed_definition(
@@ -52,6 +53,21 @@ def reviewed_definition(
     pipeline = re.search(r"\b(load|pipeline|instruction|register|operand|bypass)\b", domain, re.I)
     circuit = re.search(r"\b(clock|circuit|voltage|logic|switching|timing)\b", domain, re.I)
     partition = re.search(r"\b(partition|partitioning|cutsize|cut.size|hypergraph)\b", domain, re.I)
+    semiconductor = re.search(
+        r"\b(chip|semiconductor|foundry|fab|process|eda|circuit)\b", domain, re.I
+    )
+    if semiconductor and key in {
+        "tsmc", "taiwan semiconductor manufacturing company",
+        "taiwan semiconductor manufacturing company limited",
+    }:
+        return Definition(
+            "TSMC 台积电（Taiwan Semiconductor Manufacturing Company Limited）",
+            "台积电是一家专门为客户制造半导体产品的晶圆代工公司；"
+            "它把客户提供的芯片设计转换为可量产的晶圆，并提供相应制程与设计支持；"
+            "芯片设计团队通常在选定制造工艺、验证设计规则和准备流片时使用这些服务；"
+            "晶圆代工负责制造客户设计，不等同于自行设计并销售自有品牌芯片",
+            TSMC_REFERENCE,
+        )
     if circuit and key in {"partition", "partitioning", "circuit partitioning"}:
         return Definition(
             "电路划分（Circuit Partitioning）",

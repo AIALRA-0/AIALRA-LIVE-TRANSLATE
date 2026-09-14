@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 const WINDOW_PARAGRAPHS: usize = 20;
 const WINDOW_BYTES: usize = 4_000;
+const MIN_SEMANTIC_GROUP: usize = 4;
 
 /// Counts throttle analysis, never decide where a topic ends.
 pub fn enqueue_pending(state: &AppState, session_id: &str, force: bool) -> Result<bool> {
@@ -135,7 +136,7 @@ pub fn apply_result(state: &AppState, job: &ModelJobRecord, result: &Value) -> R
     let capacity = job.input["capacity"].as_bool().unwrap_or(false);
     let mut previous = 0;
     for &cut in &result.boundaries {
-        if cut < previous + 2 || cut + 2 > ids.len() {
+        if cut < previous + MIN_SEMANTIC_GROUP || cut + MIN_SEMANTIC_GROUP > ids.len() {
             bail!("topic boundary lacks contiguous supporting paragraphs");
         }
         previous = cut;

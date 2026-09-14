@@ -23,15 +23,20 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
   const [index, setIndex] = useState<SessionAudioIndex | null>(null);
   const [position, setPosition] = useState(0);
   const [speed, setSpeed] = useState(1);
+  const [playing, setPlaying] = useState(false);
+  const [buffering, setBuffering] = useState(false);
+  const [mediaReady, setMediaReady] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     let active = true;
     api.sessionAudioIndex(sessionId).then((next) => {
-      if (active) { setIndex(next); setError(""); onReady(true); }
+      if (active) { setIndex(next); setError(""); }
     }).catch(() => { if (active) { setIndex(null); onReady(false); } });
     return () => { active = false; };
   }, [sessionId, sessionState, onReady]);
+
+  useEffect(() => { onReady(Boolean(index && mediaReady)); }, [index, mediaReady, onReady]);
 
   useEffect(() => {
     if (!seekRequest || !index || !audio.current || lastSeekSerial.current === seekRequest.serial) return;
@@ -39,23 +44,42 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
     if (time === null) return;
     lastSeekSerial.current = seekRequest.serial;
     audio.current.currentTime = time;
-    void audio.current.play().catch(() => setError("浏览器未能开始回放，请点击播放器的播放键"));
+    void audio.current.play().catch(() => setError("浏览器未能开始回放，请点击播放"));
   }, [seekRequest, index]);
 
   if (!index) return null;
+  const duration = index.duration_ms / 1000;
+  const seek = (next: number) => {
+    if (!audio.current) return;
+    audio.current.currentTime = Math.max(0, Math.min(duration, next));
+    setPosition(audio.current.currentTime);
+  };
+  const toggle = () => {
+    if (!audio.current) return;
+    if (audio.current.paused) void audio.current.play().catch(() => setError("浏览器未能开始回放，请重试"));
+    else audio.current.pause();
+  };
   return <section className="session-player" aria-label="整节课程录音回放">
-    <div className="session-player-label"><strong>整节课程回放</strong><span>{clock(position)} / {clock(index.duration_ms / 1000)}</span></div>
-    <audio ref={audio} controls preload="metadata" src={`/api/v1/sessions/${sessionId}/audio`}
+    <div className="session-player-label"><strong>整节课程回放</strong><span>{clock(position)} / {clock(duration)}</span></div>
+    <audio ref={audio} preload="auto" src={`/api/v1/sessions/${sessionId}/audio`}
+      onLoadedMetadata={() => { setMediaReady(true); setBuffering(false); }}
+      onCanPlay={() => { setMediaReady(true); setBuffering(false); }}
+      onWaiting={() => setBuffering(true)} onStalled={() => setBuffering(true)}
+      onPlaying={() => { setPlaying(true); setBuffering(false); setError(""); }}
+      onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)}
       onTimeUpdate={(event) => setPosition(event.currentTarget.currentTime)}
-      onError={() => setError("录音暂时无法读取，请稍后重试")}
+      onError={() => { setMediaReady(false); setBuffering(false); setError("录音暂时无法读取，请稍后重试"); }}
       aria-label="课程录音" />
-    <div className="session-player-actions">
-      <button type="button" onClick={() => { if (audio.current) audio.current.currentTime = Math.max(0, audio.current.currentTime - 15); }}>后退 15 秒</button>
-      <button type="button" onClick={() => { if (audio.current) audio.current.currentTime = Math.min(index.duration_ms / 1000, audio.current.currentTime + 15); }}>前进 15 秒</button>
-      <label>速度 <select value={speed} onChange={(event) => { const next = Number(event.target.value); setSpeed(next); if (audio.current) audio.current.playbackRate = next; }}>
+    <div className="session-player-controls">
+      <button type="button" className="player-icon-button" onClick={toggle} disabled={!mediaReady} aria-label={playing ? "暂停回放" : "播放课程"}>{playing ? "Ⅱ" : "▶"}</button>
+      <button type="button" onClick={() => seek(position - 15)}>后退 15 秒</button>
+      <input aria-label="回放位置" type="range" min={0} max={Math.max(duration, 0.1)} step={0.1} value={Math.min(position, duration)} onChange={(event) => seek(Number(event.target.value))} />
+      <button type="button" onClick={() => seek(position + 15)}>前进 15 秒</button>
+      <label><span>速度</span><select aria-label="回放速度" value={speed} onChange={(event) => { const next = Number(event.target.value); setSpeed(next); if (audio.current) audio.current.playbackRate = next; }}>
         {[0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{value}×</option>)}
       </select></label>
     </div>
-    {error && <small role="status">{error}</small>}
+    {buffering && !error && <small className="player-loading" role="status">正在加载下一段录音</small>}
+    {error && <small role="alert">{error}</small>}
   </section>;
 }

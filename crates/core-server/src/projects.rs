@@ -719,7 +719,14 @@ pub async fn ensure_session_topics(
     } else {
         state.store.requeue_failed_explanations(&session_id)?
     };
-    Ok(Json(json!({"queued": queued, "retried": retried})))
+    let repaired = if has_active_lease {
+        0
+    } else {
+        crate::explanation::enqueue_quality_repairs(&state, &session_id)?
+    };
+    Ok(Json(
+        json!({"queued": queued, "retried": retried, "repaired": repaired}),
+    ))
 }
 
 fn project_sse_event(update: &ProjectUpdateRecord) -> Event {
