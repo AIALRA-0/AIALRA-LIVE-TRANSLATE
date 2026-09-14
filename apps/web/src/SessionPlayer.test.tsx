@@ -42,6 +42,6 @@ it("shows buffering without replacing the playback controls", async () => {
   const audio = screen.getByLabelText("课程录音");
   fireEvent.loadedMetadata(audio);
   fireEvent.waiting(audio);
-  expect(screen.getByRole("status")).toHaveTextContent("正在加载下一段录音");
+  expect(screen.getByRole("status")).toHaveTextContent("正在加载当前录音");
   expect(screen.getByRole("slider", { name: "回放位置" })).toBeInTheDocument();
 });

@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type SessionAudioIndex } from "./api";
 import { playbackTimeForCapture } from "./sessionPlayback";
+
+const SEGMENT_SECONDS = 120;
+const PREFETCH_SECONDS = 30;
 
 function clock(seconds: number): string {
   if (!Number.isFinite(seconds)) return "00:00";
@@ -12,6 +15,10 @@ function clock(seconds: number): string {
     : `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
 }
 
+function segmentUrl(sessionId: string, startSeconds: number): string {
+  return `/api/v1/sessions/${sessionId}/audio/segment?start_ms=${Math.round(startSeconds * 1000)}&duration_ms=${SEGMENT_SECONDS * 1000}`;
+}
+
 export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }: {
   sessionId: string;
   sessionState: string;
@@ -20,55 +27,145 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
 }) {
   const audio = useRef<HTMLAudioElement>(null);
   const lastSeekSerial = useRef(0);
+  const resumeAfterLoad = useRef(false);
+  const pendingOffset = useRef(0);
+  const activeBlobUrl = useRef<string | null>(null);
+  const prefetched = useRef<{ start: number; url: string } | null>(null);
+  const prefetchingStart = useRef<number | null>(null);
   const [index, setIndex] = useState<SessionAudioIndex | null>(null);
   const [position, setPosition] = useState(0);
+  const [segmentStart, setSegmentStart] = useState(0);
+  const [source, setSource] = useState(() => segmentUrl(sessionId, 0));
   const [speed, setSpeed] = useState(1);
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(false);
-  const [mediaReady, setMediaReady] = useState(false);
   const [error, setError] = useState("");
+
+  const releasePrefetch = useCallback(() => {
+    if (prefetched.current) URL.revokeObjectURL(prefetched.current.url);
+    prefetched.current = null;
+    prefetchingStart.current = null;
+  }, []);
+
+  const selectSegment = useCallback((start: number, offset: number, resume: boolean) => {
+    if (activeBlobUrl.current) {
+      URL.revokeObjectURL(activeBlobUrl.current);
+      activeBlobUrl.current = null;
+    }
+    const cached = prefetched.current;
+    if (cached && cached.start === start) {
+      activeBlobUrl.current = cached.url;
+      prefetched.current = null;
+      setSource(cached.url);
+    } else {
+      releasePrefetch();
+      setSource(segmentUrl(sessionId, start));
+    }
+    pendingOffset.current = offset;
+    resumeAfterLoad.current = resume;
+    setSegmentStart(start);
+    setBuffering(resume);
+    setError("");
+  }, [releasePrefetch, sessionId]);
 
   useEffect(() => {
     let active = true;
     api.sessionAudioIndex(sessionId).then((next) => {
-      if (active) { setIndex(next); setError(""); }
+      if (active) {
+        setIndex(next);
+        setPosition(0);
+        setSegmentStart(0);
+        setSource(segmentUrl(sessionId, 0));
+        setError("");
+      }
     }).catch(() => { if (active) { setIndex(null); onReady(false); } });
     return () => { active = false; };
   }, [sessionId, sessionState, onReady]);
 
-  useEffect(() => { onReady(Boolean(index && mediaReady)); }, [index, mediaReady, onReady]);
+  useEffect(() => { onReady(Boolean(index)); }, [index, onReady]);
+
+  useEffect(() => () => {
+    if (activeBlobUrl.current) URL.revokeObjectURL(activeBlobUrl.current);
+    releasePrefetch();
+  }, [releasePrefetch]);
+
+  const seek = useCallback((requested: number, resume = playing) => {
+    if (!index || !audio.current) return;
+    const duration = index.duration_ms / 1000;
+    const next = Math.max(0, Math.min(duration, requested));
+    const nextSegment = Math.floor(next / SEGMENT_SECONDS) * SEGMENT_SECONDS;
+    const offset = next - nextSegment;
+    setPosition(next);
+    if (nextSegment === segmentStart && audio.current.readyState > 0) {
+      audio.current.currentTime = offset;
+      if (resume) void audio.current.play().catch(() => setError("浏览器未能开始回放，请重试"));
+      return;
+    }
+    selectSegment(nextSegment, offset, resume);
+  }, [index, playing, segmentStart, selectSegment]);
 
   useEffect(() => {
-    if (!seekRequest || !index || !audio.current || lastSeekSerial.current === seekRequest.serial) return;
+    if (!seekRequest || !index || lastSeekSerial.current === seekRequest.serial) return;
     const time = playbackTimeForCapture(index, seekRequest.capturedAtMs);
     if (time === null) return;
     lastSeekSerial.current = seekRequest.serial;
-    audio.current.currentTime = time;
-    void audio.current.play().catch(() => setError("浏览器未能开始回放，请点击播放"));
-  }, [seekRequest, index]);
+    seek(time, true);
+  }, [seekRequest, index, seek]);
+
+  useEffect(() => {
+    if (!index || !playing) return;
+    const duration = index.duration_ms / 1000;
+    const nextStart = segmentStart + SEGMENT_SECONDS;
+    if (nextStart >= duration || position < nextStart - PREFETCH_SECONDS || prefetched.current?.start === nextStart || prefetchingStart.current === nextStart) return;
+    prefetchingStart.current = nextStart;
+    void fetch(segmentUrl(sessionId, nextStart))
+      .then((response) => {
+        if (!response.ok) throw new Error("prefetch failed");
+        return response.blob();
+      })
+      .then((blob) => {
+        if (prefetchingStart.current !== nextStart) return;
+        releasePrefetch();
+        prefetched.current = { start: nextStart, url: URL.createObjectURL(blob) };
+      })
+      .catch(() => { if (prefetchingStart.current === nextStart) prefetchingStart.current = null; });
+  }, [index, playing, position, releasePrefetch, segmentStart, sessionId]);
 
   if (!index) return null;
   const duration = index.duration_ms / 1000;
-  const seek = (next: number) => {
-    if (!audio.current) return;
-    audio.current.currentTime = Math.max(0, Math.min(duration, next));
-    setPosition(audio.current.currentTime);
-  };
   const toggle = () => {
     if (!audio.current) return;
-    if (audio.current.paused) void audio.current.play().catch(() => setError("浏览器未能开始回放，请重试"));
-    else audio.current.pause();
+    if (audio.current.paused) {
+      setBuffering(true);
+      void audio.current.play().catch(() => { setBuffering(false); setError("浏览器未能开始回放，请重试"); });
+    } else audio.current.pause();
+  };
+  const advance = () => {
+    const nextStart = segmentStart + SEGMENT_SECONDS;
+    if (nextStart >= duration) { setPlaying(false); setPosition(duration); return; }
+    setPosition(nextStart);
+    selectSegment(nextStart, 0, true);
   };
   return <section className="session-player" aria-label="整节课程录音回放">
     <div className="session-player-label"><strong>整节课程回放</strong><span>{clock(position)} / {clock(duration)}</span></div>
-    <audio ref={audio} preload="none" src={`/api/v1/sessions/${sessionId}/audio`}
-      onLoadedMetadata={() => { setMediaReady(true); setBuffering(false); }}
-      onCanPlay={() => { setMediaReady(true); setBuffering(false); }}
+    <audio ref={audio} preload="none" src={source}
+      onLoadedMetadata={(event) => {
+        event.currentTarget.playbackRate = speed;
+        const mediaDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : SEGMENT_SECONDS;
+        event.currentTarget.currentTime = Math.min(pendingOffset.current, Math.max(0, mediaDuration - 0.01));
+        pendingOffset.current = 0;
+        setBuffering(false);
+        if (resumeAfterLoad.current) {
+          resumeAfterLoad.current = false;
+          void event.currentTarget.play().catch(() => setError("浏览器未能继续回放，请点击播放"));
+        }
+      }}
+      onCanPlay={() => setBuffering(false)}
       onWaiting={() => setBuffering(true)} onStalled={() => setBuffering(true)}
       onPlaying={() => { setPlaying(true); setBuffering(false); setError(""); }}
-      onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)}
-      onTimeUpdate={(event) => setPosition(event.currentTarget.currentTime)}
-      onError={() => { setMediaReady(false); setBuffering(false); setError("录音暂时无法读取，请稍后重试"); }}
+      onPause={() => setPlaying(false)} onEnded={advance}
+      onTimeUpdate={(event) => setPosition(Math.min(duration, segmentStart + event.currentTarget.currentTime))}
+      onError={() => { setBuffering(false); setError("录音暂时无法读取，请稍后重试"); }}
       aria-label="课程录音" />
     <div className="session-player-controls">
       <button type="button" className="player-icon-button" onClick={toggle} aria-label={playing ? "暂停回放" : "播放课程"}>{playing ? "Ⅱ" : "▶"}</button>
@@ -79,7 +176,7 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
         {[0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{value}×</option>)}
       </select></label>
     </div>
-    {buffering && !error && <small className="player-loading" role="status">正在加载下一段录音</small>}
+    {buffering && !error && <small className="player-loading" role="status">正在加载当前录音</small>}
     {error && <small role="alert">{error}</small>}
   </section>;
 }

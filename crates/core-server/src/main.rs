@@ -77,6 +77,10 @@ async fn main() -> Result<()> {
             get(course_content::session_audio_index),
         )
         .route(
+            "/sessions/{session_id}/audio/segment",
+            get(course_content::session_audio_segment),
+        )
+        .route(
             "/sessions/{session_id}/audio",
             get(course_content::session_audio),
         )

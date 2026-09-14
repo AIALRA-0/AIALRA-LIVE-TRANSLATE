@@ -7,7 +7,7 @@ use aialra_event_store::NewModelJob;
 use axum::{
     Json,
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -493,6 +493,69 @@ pub async fn session_audio_index(
 // response bounded while avoiding a new authenticated request every 16–33
 // seconds during normal or 2× playback.
 const MAX_PLAYBACK_RANGE: u64 = 4 * 1024 * 1024;
+const MAX_PLAYBACK_SEGMENT_MS: u64 = 120_000;
+
+#[derive(Deserialize)]
+pub struct PlaybackSegmentQuery {
+    start_ms: Option<u64>,
+    duration_ms: Option<u64>,
+}
+
+/// Return a small, self-contained WAV instead of asking the browser to decode
+/// one virtual multi-hour WAV. Chromium keeps WAV input in memory, so bounded
+/// segments are both faster to start and safer on phones and long courses.
+pub async fn session_audio_segment(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    Query(query): Query<PlaybackSegmentQuery>,
+) -> Result<Response, ApiError> {
+    let (entries, pcm_size) = playback_chunks(&state, &session)?;
+    let start_ms = query.start_ms.unwrap_or(0);
+    let duration_ms = query
+        .duration_ms
+        .unwrap_or(MAX_PLAYBACK_SEGMENT_MS)
+        .clamp(1_000, MAX_PLAYBACK_SEGMENT_MS);
+    let start = start_ms
+        .checked_mul(32)
+        .ok_or_else(|| ApiError::bad_request("回放位置超出课程范围"))?;
+    if start >= pcm_size {
+        return Err(ApiError::bad_request("回放位置超出课程范围"));
+    }
+    let end = start
+        .saturating_add(duration_ms.saturating_mul(32))
+        .min(pcm_size);
+    let mut pcm = Vec::with_capacity((end - start) as usize);
+    for entry in &entries {
+        let chunk_start = entry.offset;
+        let chunk_end = chunk_start + entry.chunk.size_bytes;
+        if chunk_start >= end || chunk_end <= start {
+            continue;
+        }
+        let bytes = state.objects.read(&entry.chunk.object_hash)?;
+        if bytes.len() as u64 != entry.chunk.size_bytes {
+            return Err(ApiError::bad_request("这段录音未能完整读取"));
+        }
+        let from = start.max(chunk_start) - chunk_start;
+        let until = end.min(chunk_end) - chunk_start;
+        pcm.extend_from_slice(&bytes[from as usize..until as usize]);
+    }
+    if pcm.len() as u64 != end - start {
+        return Err(ApiError::bad_request("这段录音未能完整读取"));
+    }
+    let wav = pcm_wav(&pcm);
+    let mut response = Response::new(Body::from(wav));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/wav"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
 
 fn playback_range(request: Option<&HeaderValue>, total: u64) -> Result<(u64, u64, bool), ApiError> {
     let Some(value) = request else {
@@ -985,6 +1048,24 @@ mod tests {
         assert_eq!(index["duration_ms"], 200);
         assert_eq!(index["positions"][1]["playback_start_ms"], 100);
         assert_eq!(index["positions"][1]["captured_at_ms"], 20_000);
+
+        let segment = session_audio_segment(
+            State(state.clone()),
+            Path("session_content_test".into()),
+            Query(PlaybackSegmentQuery {
+                start_ms: Some(100),
+                duration_ms: Some(100),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(segment.status(), StatusCode::OK);
+        assert_eq!(segment.headers()[header::CONTENT_TYPE], "audio/wav");
+        let segment_body = axum::body::to_bytes(segment.into_body(), 4_000)
+            .await
+            .unwrap();
+        assert_eq!(segment_body.len(), 3_244);
+        assert!(segment_body[44..].iter().all(|byte| *byte == 2));
 
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, HeaderValue::from_static("bytes=3240-3247"));
