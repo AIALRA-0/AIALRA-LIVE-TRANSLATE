@@ -12,6 +12,29 @@ from workers.model_worker.terminology import matching_technical_terms
 PartCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 MAX_GROUP_TERMS = 8
 MAX_DEFINITION_BATCH = 2
+_BANNED_NARRATION = (
+    "当我在讲解", "你会看到我所说", "老师说", "讲者提到",
+    "本段话讲了", "本段内容讲了", "让我们来看",
+)
+
+
+def valid_summary(value: str, source_characters: int, language: str) -> bool:
+    del language  # Core's final gate is content-based; language is checked by the Worker.
+    text = value.strip()
+    return bool(
+        text
+        and not any(phrase in text for phrase in _BANNED_NARRATION)
+        and (source_characters < 240 or len(text) >= 80)
+    )
+
+
+def valid_definition(value: str, language: str) -> bool:
+    text = value.strip()
+    return bool(
+        text
+        and (not language.casefold().startswith("zh")
+             or (len(text) >= 50 and text.count("；") >= 2))
+    )
 
 
 def contains_term(term: str, source: str) -> bool:
@@ -183,11 +206,15 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
     def append_definition(
         term_source: dict[str, Any], term: Any, definition: Any, reference: str | None = None,
     ) -> None:
-        if not isinstance(term, str) or not term.strip():
-            raise ValueError("teaching_term_missing")
-        if not isinstance(definition, str) or not definition.strip():
-            raise ValueError("teaching_definition_missing")
-        if redundant_bilingual_name(term):
+        # Glossary entries are useful but optional. One malformed entry must
+        # never discard complete, evidence-bound teaching prose.
+        if (
+            not isinstance(term, str)
+            or not term.strip()
+            or not isinstance(definition, str)
+            or not valid_definition(definition, target)
+            or redundant_bilingual_name(term)
+        ):
             return
         entry = {
             "term": term.strip(), "explanation": definition.strip(),
@@ -275,7 +302,7 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                     raise ValueError("teaching_definitions_invalid")
                 append_definition(term_source, item.get("term"), item.get("definition"))
     detailed_prose = "\n\n".join(prose)
-    if len(segments) > 1 and len(detailed_prose.encode()) <= 3500:
+    if (len(segments) > 1 or pages) and len(detailed_prose.encode()) <= 3500:
         try:
             guide = await generate({"phase": "group", "text": detailed_prose,
                                     "target_language": target})
@@ -294,6 +321,9 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         # intermediate per-piece drafts beneath it repeats ideas and often
         # reads like stitched transcript fragments in the narrow learning rail.
         detailed_prose = heading.strip()
+    source_characters = sum(len(item["text"]) for item in segments)
+    if not valid_summary(detailed_prose, source_characters, target):
+        raise ValueError("teaching_summary_quality_invalid")
     return {
         "paragraph_summary": detailed_prose, "terms": definitions,
         "evidence_segment_ids": [item["id"] for item in segments],

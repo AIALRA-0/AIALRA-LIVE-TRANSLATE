@@ -81,6 +81,12 @@ def readable_synthesis(text: str, source: str) -> bool:
     return True
 
 
+def narration_free(text: str) -> bool:
+    """Teaching prose describes the subject directly at every generation phase."""
+
+    return not _SPEECH_ACT_SUMMARY.search(text.strip())
+
+
 def source_surface(term: str, text: str) -> str | None:
     """Case-only normalization binds to the actual source spelling, not a paraphrase."""
     if not term.strip():
@@ -123,6 +129,7 @@ def valid_part(payload: dict[str, Any], request: TeachingPartRequest) -> bool:
             and (request.phase == "prose" or not terms)
             and len(terms) == len({term.casefold() for term in terms})
             and requested_language(prose, request.target_language)
+            and narration_free(prose)
             and (request.phase not in {"group", "course"}
                  or readable_synthesis(prose, request.text))
         )
@@ -318,8 +325,9 @@ async def generate_part(
             "Return every original_terms item exactly once and in order. Apply the complete "
             "definition contract to each item; do not merge terms or add another term."
             if request.phase == "definitions" else
-            "Copy each original_terms item from source verbatim, not the context. "
-            "Keep explicit facts and uncertainty; never invent missing quantities or quotes."
+            "Write directly about the subject without narrating what a speaker or teacher said. "
+            "Copy each original_terms item from source verbatim, not the context. Keep explicit "
+            "facts and uncertainty; never invent missing quantities or quotes."
         ),
     )
     if raw is None:

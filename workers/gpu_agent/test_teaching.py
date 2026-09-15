@@ -11,6 +11,13 @@ from workers.gpu_agent.teaching import (
     redundant_bilingual_name,
     source_pieces,
     teaching_chunks,
+    valid_definition,
+    valid_summary,
+)
+
+COMPLETE_DEFINITION = (
+    "这是一个经过核对的定义对象；它用于说明当前来源中的专业概念和实际用途；"
+    "这里补充它的工作方式、适用条件以及与相近概念之间容易混淆的边界"
 )
 
 
@@ -26,6 +33,14 @@ def test_redundant_bilingual_name_is_not_a_technical_term() -> None:
     assert redundant_bilingual_name("Alice (Alice)")
     assert redundant_bilingual_name(" Alice（alice） ")
     assert not redundant_bilingual_name("台积电（TSMC）")
+
+
+def test_agent_quality_gate_matches_core_contract() -> None:
+    assert valid_summary("完整说明", 100, "zh-CN")
+    assert not valid_summary("当我在讲解一个主题", 100, "zh-CN")
+    assert not valid_summary("过短", 240, "zh-CN")
+    assert valid_definition(COMPLETE_DEFINITION, "zh-CN")
+    assert not valid_definition("只有一句很短的定义", "zh-CN")
 
 
 def test_self_introduced_person_is_not_a_technical_term() -> None:
@@ -50,7 +65,8 @@ async def test_group_caps_model_generated_glossary_to_key_concepts() -> None:
             }
         if body["phase"] == "definition":
             definition_calls += 1
-            return {"provider": provider, "term": body["original_term"], "definition": "定义"}
+            return {"provider": provider, "term": body["original_term"],
+                    "definition": COMPLETE_DEFINITION}
         if body["phase"] == "definitions":
             definition_calls += 1
             largest_definition_batch = max(
@@ -61,7 +77,7 @@ async def test_group_caps_model_generated_glossary_to_key_concepts() -> None:
                 "definitions": [{
                     "original_term": term,
                     "term": term,
-                    "definition": "定义",
+                    "definition": COMPLETE_DEFINITION,
                 } for term in body["original_terms"]],
             }
         return {"provider": provider, "prose": body["text"]}
@@ -86,7 +102,8 @@ async def test_term_reference_does_not_include_a_substring_only_paragraph() -> N
         if body["phase"] == "prose":
             return {"provider": "ollama:synthetic@cuda", "prose": "合成说明",
                     "original_terms": ["net"]}
-        return {"provider": "ollama:synthetic@cuda", "term": "线网", "definition": "连接关系"}
+        return {"provider": "ollama:synthetic@cuda", "term": "线网",
+                "definition": COMPLETE_DEFINITION}
 
     result = await assemble_explanation({"segments": [
         {"id": "a", "text": "The net connects cells."},
@@ -129,7 +146,8 @@ async def test_card_covers_all_sources_and_defines_repeated_term_only_once() -> 
             return {"provider": provider, "prose": body["text"]}
         if body["phase"] == "prose":
             return {"provider": provider, "prose": body["text"], "original_terms": ["latch"]}
-        return {"provider": provider, "term": "锁存器", "definition": "受使能控制的存储元件"}
+        return {"provider": provider, "term": "锁存器",
+                "definition": COMPLETE_DEFINITION}
 
     result = await assemble_explanation({
         "segments": [{"id": "a", "text": "A latch stores a bit."},
@@ -194,7 +212,8 @@ async def test_group_inventory_cites_only_sources_containing_the_term() -> None:
         if body["phase"] == "prose":
             return {"provider": "ollama:synthetic@cuda", "prose": "连贯解释",
                     "original_terms": ["latch"]}
-        return {"provider": "ollama:synthetic@cuda", "term": "锁存器", "definition": "存储元件"}
+        return {"provider": "ollama:synthetic@cuda", "term": "锁存器",
+                "definition": COMPLETE_DEFINITION}
 
     result = await assemble_explanation({
         "segments": [{"id": "a", "text": "A latch stores a bit."},
@@ -238,7 +257,7 @@ async def test_failed_definition_batch_falls_back_without_losing_the_card() -> N
             raise RuntimeError("model_http_error")
         if body["original_term"] == "beta":
             raise RuntimeError("model_http_error")
-        return {"provider": provider, "term": "Alpha", "definition": "可核对定义"}
+        return {"provider": provider, "term": "Alpha", "definition": COMPLETE_DEFINITION}
 
     result = await assemble_explanation({
         "segments": [{"id": "a", "text": "alpha and beta are compared."}],
@@ -247,6 +266,42 @@ async def test_failed_definition_batch_falls_back_without_losing_the_card() -> N
     assert phases == ["prose", "definitions", "definition", "definition"]
     assert result["paragraph_summary"] == "完整解释"
     assert [term["term"] for term in result["terms"]] == ["Alpha"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_optional_definition_is_dropped_without_losing_prose() -> None:
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        if body["phase"] == "prose":
+            return {"provider": "ollama:synthetic@cuda", "prose": "完整解释",
+                    "original_terms": ["alpha"]}
+        return {"provider": "ollama:synthetic@cuda", "term": "Alpha", "definition": "过短"}
+
+    result = await assemble_explanation({
+        "segments": [{"id": "a", "text": "alpha is compared."}],
+        "target_language": "zh-CN",
+    }, call)
+    assert result["paragraph_summary"] == "完整解释"
+    assert result["terms"] == []
+
+
+@pytest.mark.asyncio
+async def test_segment_and_page_receive_one_group_synthesis() -> None:
+    phases: list[str] = []
+
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        phases.append(body["phase"])
+        if body["phase"] == "group":
+            return {"provider": "ollama:synthetic@cuda", "prose": "组合后的完整说明"}
+        return {"provider": "ollama:synthetic@cuda", "prose": "分块说明",
+                "original_terms": []}
+
+    result = await assemble_explanation({
+        "segments": [{"id": "a", "text": "First premise."}],
+        "asset_pages": [{"id": "p", "text": "Supporting page."}],
+        "target_language": "zh-CN",
+    }, call)
+    assert phases == ["prose", "prose", "group"]
+    assert result["paragraph_summary"] == "组合后的完整说明"
 
 
 @pytest.mark.asyncio
@@ -269,7 +324,7 @@ async def test_failed_group_synthesis_keeps_verified_piece_explanation() -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["foreign_term", "missing_definition", "changed_provider"])
+@pytest.mark.parametrize("failure", ["foreign_term", "changed_provider"])
 async def test_bad_part_never_returns_a_partial_card(failure: str) -> None:
     async def call(body: dict[str, Any]) -> dict[str, Any]:
         if body["phase"] == "prose":
@@ -277,7 +332,7 @@ async def test_bad_part_never_returns_a_partial_card(failure: str) -> None:
                     "original_terms": ["unknown" if failure == "foreign_term" else "latch"]}
         return {"provider": "ollama:other@cuda" if failure == "changed_provider"
                 else "ollama:synthetic@cuda", "term": "锁存器",
-                "definition": "" if failure == "missing_definition" else "存储元件"}
+                "definition": COMPLETE_DEFINITION}
 
     with pytest.raises(ValueError):
         await assemble_explanation({"segments": [{"id": "a", "text": "A latch."}],
