@@ -178,36 +178,23 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                         and source["id"] not in record["segment_ids"]):
                     record["segment_ids"].append(source["id"])
     definitions: list[dict[str, Any]] = []
-    for term_source in list(term_sources.values())[:MAX_GROUP_TERMS]:
-        reviewed = reviewed_definition(
-            term_source["original_term"], term_source["text"], target, term_source["context"],
-        )
-        if reviewed is not None:
-            # The card provider describes its generated prose. This reviewed
-            # glossary entry uses no GPU call and is not attributed to inference.
-            result = {"term": reviewed.term, "definition": reviewed.explanation}
-        else:
-            result = await generate({
-                "phase": "definition", "text": term_source["text"],
-                "context": term_source["context"],
-                "original_term": term_source["original_term"], "target_language": target,
-            })
-        term, definition = result.get("term"), result.get("definition")
+
+    def append_definition(
+        term_source: dict[str, Any], term: Any, definition: Any, reference: str | None = None,
+    ) -> None:
         if not isinstance(term, str) or not term.strip():
             raise ValueError("teaching_term_missing")
         if not isinstance(definition, str) or not definition.strip():
             raise ValueError("teaching_definition_missing")
         if redundant_bilingual_name(term):
-            continue
+            return
         entry = {
             "term": term.strip(), "explanation": definition.strip(),
             "evidence_segment_ids": term_source["segment_ids"],
             "asset_page_ids": term_source["page_ids"],
         }
-        if reviewed is not None:
-            entry["background_reference"] = reviewed.reference
-        # Equivalent source spellings can resolve to the same reviewed concept.
-        # Merge only identical definitions, never homonyms with different meaning.
+        if reference is not None:
+            entry["background_reference"] = reference
         existing = next((
             item for item in definitions
             if item["term"].casefold() == entry["term"].casefold()
@@ -219,6 +206,54 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         else:
             for field in ("evidence_segment_ids", "asset_page_ids"):
                 existing[field] = list(dict.fromkeys([*existing[field], *entry[field]]))
+
+    unresolved: list[dict[str, Any]] = []
+    for term_source in list(term_sources.values())[:MAX_GROUP_TERMS]:
+        reviewed = reviewed_definition(
+            term_source["original_term"], term_source["text"], target, term_source["context"],
+        )
+        if reviewed is not None:
+            # The card provider describes its generated prose. This reviewed
+            # glossary entry uses no GPU call and is not attributed to inference.
+            append_definition(
+                term_source, reviewed.term, reviewed.explanation, reviewed.reference,
+            )
+        else:
+            unresolved.append(term_source)
+
+    while unresolved:
+        first = unresolved.pop(0)
+        batch = [first]
+        for candidate in list(unresolved):
+            if len(batch) == 4:
+                break
+            if candidate["text"] == first["text"] and candidate["context"] == first["context"]:
+                batch.append(candidate)
+                unresolved.remove(candidate)
+        if len(batch) == 1:
+            result = await generate({
+                "phase": "definition", "text": first["text"],
+                "context": first["context"],
+                "original_term": first["original_term"], "target_language": target,
+            })
+            append_definition(first, result.get("term"), result.get("definition"))
+        else:
+            result = await generate({
+                "phase": "definitions", "text": first["text"],
+                "context": first["context"],
+                "original_terms": [item["original_term"] for item in batch],
+                "target_language": target,
+            })
+            generated = result.get("definitions")
+            if not isinstance(generated, list) or len(generated) != len(batch):
+                raise ValueError("teaching_definitions_invalid")
+            for term_source, item in zip(batch, generated, strict=True):
+                if (
+                    not isinstance(item, dict)
+                    or item.get("original_term") != term_source["original_term"]
+                ):
+                    raise ValueError("teaching_definitions_invalid")
+                append_definition(term_source, item.get("term"), item.get("definition"))
     detailed_prose = "\n\n".join(prose)
     if len(segments) > 1 and len(detailed_prose.encode()) <= 3500:
         guide = await generate({"phase": "group", "text": detailed_prose,

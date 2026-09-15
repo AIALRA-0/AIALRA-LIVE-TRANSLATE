@@ -50,6 +50,16 @@ async def test_group_caps_model_generated_glossary_to_key_concepts() -> None:
         if body["phase"] == "definition":
             definition_calls += 1
             return {"provider": provider, "term": body["original_term"], "definition": "定义"}
+        if body["phase"] == "definitions":
+            definition_calls += 1
+            return {
+                "provider": provider,
+                "definitions": [{
+                    "original_term": term,
+                    "term": term,
+                    "definition": "定义",
+                } for term in body["original_terms"]],
+            }
         return {"provider": provider, "prose": body["text"]}
 
     result = await assemble_explanation({
@@ -59,7 +69,7 @@ async def test_group_caps_model_generated_glossary_to_key_concepts() -> None:
         }],
         "target_language": "zh-CN",
     }, call)
-    assert definition_calls == 8
+    assert definition_calls == 2
     assert len(result["terms"]) == 8
 
 

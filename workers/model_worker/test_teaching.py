@@ -61,6 +61,27 @@ def test_definition_requires_exact_source_and_bounded_context() -> None:
     assert raw["original_terms"] == ["Latch", "latch", "memory bank"]
 
 
+def test_batched_definitions_preserve_source_order_and_full_contract() -> None:
+    request = TeachingPartRequest(
+        phase="definitions",
+        text="A latch is controlled by a clock.",
+        original_terms=["latch", "clock"],
+        target_language="zh-CN",
+    )
+    complete = (
+        "这是一个技术概念；它用于解释合成测试中的作用；"
+        "具体机制按来源上下文确定；使用时必须保留适用条件、限制和与相近概念之间的区别"
+    )
+    assert valid_part({"definitions": [
+        {"original_term": "latch", "term": "锁存器（latch）", "definition": complete},
+        {"original_term": "clock", "term": "时钟（clock）", "definition": complete},
+    ]}, request)
+    assert not valid_part({"definitions": [
+        {"original_term": "clock", "term": "时钟（clock）", "definition": complete},
+        {"original_term": "latch", "term": "锁存器（latch）", "definition": complete},
+    ]}, request)
+
+
 def test_source_uncertainty_is_not_rejected_to_make_prose_sound_certain() -> None:
     request = TeachingPartRequest(
         phase="prose", text="The comparison is unclear. We have no final measurement.",
