@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { focusedParagraphId, insightForParagraph, mainDocumentItems } from "./documentLayout";
 import type { TimelineItem } from "./types";
 
-const item = (kind: TimelineItem["kind"], id: string, evidenceIds: string[] = []): TimelineItem => ({
-  kind, id, title: id, body: id, evidenceIds, occurredAt: "2026-09-13T00:00:00Z",
+const item = (kind: TimelineItem["kind"], id: string, evidenceIds: string[] = [], occurredAt = "2026-09-13T00:00:00Z"): TimelineItem => ({
+  kind, id, title: id, body: id, evidenceIds, occurredAt,
 });
 
 describe("course reading columns", () => {
@@ -28,6 +28,11 @@ describe("course reading columns", () => {
     const twoGroups = [item("insight", "first-group", ["first"]), item("insight", "second-group", ["second"]), item("insight", "first-revision", ["first"])];
     expect(insightForParagraph(twoGroups, "first")?.id).toBe("first-revision");
     expect(insightForParagraph(twoGroups, "second")?.id).toBe("second-group");
+    const newestFirst = [
+      item("insight", "quality-repair", ["first", "second", "third", "fourth"], "2026-09-15T00:00:00Z"),
+      item("insight", "legacy-tail", ["first", "second"], "2026-09-13T00:00:00Z"),
+    ];
+    expect(insightForParagraph(newestFirst, "first")?.id).toBe("quality-repair");
   });
 
   it("tracks the paragraph crossing the reading position while scrolling", () => {

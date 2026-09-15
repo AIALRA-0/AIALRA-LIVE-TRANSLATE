@@ -16,7 +16,16 @@ export function mainDocumentItems(items: TimelineItem[], section: string | null,
 
 export function insightForParagraph(items: TimelineItem[], paragraphId: string | null): TimelineItem | undefined {
   if (!paragraphId) return undefined;
-  return [...items].reverse().find((item) => item.kind === "insight" && item.evidenceIds.includes(paragraphId));
+  return items
+    .filter((item) => item.kind === "insight" && item.evidenceIds.includes(paragraphId))
+    .reduce<TimelineItem | undefined>((latest, item) => {
+      if (!latest) return item;
+      const itemTime = Date.parse(item.occurredAt);
+      const latestTime = Date.parse(latest.occurredAt);
+      if (itemTime > latestTime) return item;
+      if (itemTime === latestTime) return item;
+      return latest;
+    }, undefined);
 }
 
 export function focusedParagraphId(positions: Array<{ id: string; bottom: number }>, anchor: number): string | null {
