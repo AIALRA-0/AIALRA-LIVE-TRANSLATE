@@ -45,6 +45,23 @@ read_env_value() {
   awk -v key="$key" 'index($0, key "=") == 1 { sub("^[^=]*=", ""); value=$0 } END { sub("\\r$", "", value); print value }' "$env_file"
 }
 
+reconcile_auth_with_retry() {
+  local attempt=''
+  local maximum_attempts=5
+  for (( attempt = 1; attempt <= maximum_attempts; attempt += 1 )); do
+    if "$reconcile_auth"; then
+      return 0
+    fi
+    if (( attempt < maximum_attempts )); then
+      printf 'authentication reconciliation failed (attempt %s/%s); retrying\n' \
+        "$attempt" "$maximum_attempts" >&2
+      sleep $((attempt * 2))
+    fi
+  done
+  printf 'authentication reconciliation failed after %s attempts\n' "$maximum_attempts" >&2
+  return 1
+}
+
 if [[ -s "$env_file" ]]; then
   if [[ -z "${AIALRA_DATA_PATH+x}" ]]; then
     configured_data_path="$(read_env_value AIALRA_DATA_PATH)"
@@ -249,7 +266,7 @@ jq \
   "$apps_file" > "$apps_stage"
 install -o root -g root -m 0644 "$apps_stage" "$apps_file"
 rm -f -- "$apps_stage"
-"$reconcile_auth"
+reconcile_auth_with_retry
 systemctl restart "$auth_service"
 
 http_stage="$(mktemp "$backup_dir/.nginx-http.XXXXXX")"
