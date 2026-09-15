@@ -20,6 +20,7 @@ from workers.model_worker.terminology import matching_technical_terms
 def test_synthesis_rejects_transcript_narration_and_thin_long_source_summary() -> None:
     assert not readable_synthesis("当我在讲解这个问题时，你会看到我所说的内容", "材料")
     assert not readable_synthesis("很短的总结", "source " * 80)
+    assert not readable_synthesis("长" * 1201, "source " * 80)
     assert readable_synthesis(
         "这部分先定义故障模型，再说明测试向量怎样激励电路并暴露响应中的异常；"
         "随后比较不同故障对输出的影响，解释覆盖率反映哪些目标已经被测试；"

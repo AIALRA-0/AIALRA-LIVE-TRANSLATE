@@ -40,6 +40,21 @@ LOGGER = logging.getLogger("aialra.gpu_agent")
 ERROR_STAGES = frozenset(
     {"gateway_response", "job_payload", "model_http", "model_json", "execution_device"}
 )
+SAFE_TEACHING_FAILURE_KINDS = frozenset({
+    "course_synthesis_capacity_exceeded",
+    "course_synthesis_invalid",
+    "summary_source_coverage_invalid",
+    "teaching_group_synthesis_invalid",
+    "teaching_language_required",
+    "teaching_part_invalid",
+    "teaching_provider_changed",
+    "teaching_provider_unverified",
+    "teaching_source_duplicate",
+    "teaching_source_empty",
+    "teaching_source_invalid",
+    "teaching_sources_required",
+    "teaching_summary_quality_invalid",
+})
 
 
 @dataclass(frozen=True)
@@ -86,6 +101,13 @@ class JobExecutionError(RuntimeError):
     def __init__(self, report: FailureReport) -> None:
         super().__init__(report.error_kind)
         self.report = report
+
+
+def safe_teaching_failure_kind(error: ValueError) -> str:
+    """Expose only allowlisted contract stages, never model or course text."""
+
+    candidate = str(error)
+    return candidate if candidate in SAFE_TEACHING_FAILURE_KINDS else "teaching_contract_invalid"
 
 
 def new_diagnostic_id() -> str:
@@ -579,7 +601,7 @@ async def execute_job(
             raise JobExecutionError(FailureReport("model_http", "model_request_failed")) from error
         except ValueError as error:
             raise JobExecutionError(
-                FailureReport("model_json", "teaching_contract_invalid")
+                FailureReport("model_json", safe_teaching_failure_kind(error))
             ) from error
         if timings is not None:
             timings["inference_ms"] = int((time.monotonic() - started) * 1000)

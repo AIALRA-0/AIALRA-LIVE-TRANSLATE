@@ -256,6 +256,7 @@ def test_dedicated_translation_path_returns_plain_provider_result(
     monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "hy-mt")
     monkeypatch.setattr(model_worker, "HYMT_MODEL", "test/hy-mt")
     monkeypatch.setattr(model_worker, "HYMT_DEVICE", "cuda")
+    monkeypatch.setattr(model_worker, "HYMT_RUNTIME", "transformers")
     monkeypatch.setattr(model_worker, "_configured_translation_importable", lambda: True)
     monkeypatch.setattr(model_worker, "_translate_hymt_sync", lambda _request: "注意力使用上下文。")
 
@@ -299,6 +300,7 @@ async def test_quantized_hymt_keeps_dedicated_provider_and_native_plain_prompt(
         return model == "synthetic-hymt-q8"
 
     monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "hy-mt")
+    monkeypatch.setattr(model_worker, "HYMT_RUNTIME", "transformers")
     monkeypatch.setattr(model_worker, "HYMT_RUNTIME", "ollama")
     monkeypatch.setattr(model_worker, "HYMT_OLLAMA_MODEL", "synthetic-hymt-q8")
     monkeypatch.setattr(model_worker, "HYMT_DEVICE", "cuda")
@@ -369,6 +371,7 @@ def test_nominal_same_language_still_translates_a_sustained_foreign_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "hy-mt")
+    monkeypatch.setattr(model_worker, "HYMT_RUNTIME", "transformers")
     monkeypatch.setattr(model_worker, "_configured_translation_importable", lambda: True)
     monkeypatch.setattr(
         model_worker,
@@ -1309,7 +1312,8 @@ async def test_split_teaching_releases_realtime_weights_and_restores_gpu_lane(
     ))
     assert result.prose == "完整解释。"
     assert calls == [
-        "unload_background", "unload_background", "release_realtime", "generate", "restore",
+        "unload_background", "unload_background", "unload_background",
+        "release_realtime", "generate", "restore",
     ]
 
 

@@ -21,6 +21,7 @@ from workers.gpu_agent.main import (
     privacy_safe_failure_fields,
     provider_proves_local_execution,
     report_stage,
+    safe_teaching_failure_kind,
     sanitize_worker_id,
 )
 
@@ -156,6 +157,15 @@ def test_failure_log_fields_never_include_provider_body_or_job_identity() -> Non
     assert "session_id" not in serialized
     assert "transcript" not in serialized
     assert "token" not in serialized
+
+
+def test_teaching_failure_kind_exposes_only_allowlisted_contract_stages() -> None:
+    assert safe_teaching_failure_kind(
+        ValueError("teaching_group_synthesis_invalid")
+    ) == "teaching_group_synthesis_invalid"
+    assert safe_teaching_failure_kind(
+        ValueError("private course text")
+    ) == "teaching_contract_invalid"
 
 
 def test_execute_job_classifies_all_failure_stages() -> None:

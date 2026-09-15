@@ -1929,7 +1929,7 @@ impl EventStore {
         let now = Utc::now().to_rfc3339();
         let connection = self.lock()?;
         Ok(connection.execute(
-            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?3, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?3, completed_at = NULL WHERE session_id = ?1 AND job_type = 'explain' AND status = 'failed' AND last_error_kind IN ('explanation_content_rejected', 'teaching_contract_invalid', 'model_http_error', 'provider_unavailable') AND json_extract(input_json, '$.trigger') = ?2",
+            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?3, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?3, completed_at = NULL WHERE session_id = ?1 AND job_type = 'explain' AND status = 'failed' AND last_error_kind IN ('explanation_content_rejected', 'teaching_contract_invalid', 'teaching_group_synthesis_invalid', 'teaching_language_required', 'teaching_part_invalid', 'teaching_provider_changed', 'teaching_provider_unverified', 'teaching_source_duplicate', 'teaching_source_empty', 'teaching_source_invalid', 'teaching_sources_required', 'teaching_summary_quality_invalid', 'model_http_error', 'provider_unavailable') AND json_extract(input_json, '$.trigger') = ?2",
             params![session_id, trigger, now],
         )?)
     }
@@ -3920,6 +3920,11 @@ mod tests {
                 "teaching_contract_invalid",
             ),
             (
+                "matching-teaching-summary",
+                "quality_contract_v46",
+                "teaching_summary_quality_invalid",
+            ),
+            (
                 "old-transient",
                 "quality_contract_v45",
                 "provider_unavailable",
@@ -3951,7 +3956,7 @@ mod tests {
                     "quality_contract_v46",
                 )
                 .unwrap(),
-            3
+            4
         );
         assert_eq!(
             store.get_model_job("matching").unwrap().unwrap().status,
@@ -3976,6 +3981,14 @@ mod tests {
         assert_eq!(
             store
                 .get_model_job("matching-teaching-contract")
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
+        );
+        assert_eq!(
+            store
+                .get_model_job("matching-teaching-summary")
                 .unwrap()
                 .unwrap()
                 .status,

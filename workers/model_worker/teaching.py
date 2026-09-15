@@ -74,7 +74,7 @@ _SPEECH_ACT_SUMMARY = re.compile(
 def readable_synthesis(text: str, source: str) -> bool:
     """Reject transcript-like narration before it reaches a teaching card."""
     value = text.strip()
-    if not value or _SPEECH_ACT_SUMMARY.search(value):
+    if not value or len(value) > 1200 or _SPEECH_ACT_SUMMARY.search(value):
         return False
     if len(source) >= 240 and len(value) < 80:
         return False
