@@ -81,6 +81,7 @@ pub fn valid_background_reference(reference: Option<&str>) -> bool {
                     | "www.rfc-editor.org"
                     | "limsk.ece.gatech.edu"
                     | "rocmdocs.amd.com"
+                    | "www.tsmc.com"
             )
         )
 }
@@ -94,6 +95,9 @@ mod reference_tests {
         assert!(valid_background_reference(None));
         assert!(valid_background_reference(Some(
             "https://www.rfc-editor.org/rfc/rfc3385"
+        )));
+        assert!(valid_background_reference(Some(
+            "https://www.tsmc.com/english/dedicatedFoundry"
         )));
         for value in [
             "javascript:alert(1)",

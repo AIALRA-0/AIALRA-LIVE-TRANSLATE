@@ -1901,6 +1901,21 @@ impl EventStore {
         )?)
     }
 
+    /// Retry only versioned repair jobs rejected by the reference/evidence gate after that
+    /// exact contract has been repaired. Other historical content failures remain terminal.
+    pub fn requeue_failed_explanation_content_for_trigger(
+        &self,
+        session_id: &str,
+        trigger: &str,
+    ) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?3, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?3, completed_at = NULL WHERE session_id = ?1 AND job_type = 'explain' AND status = 'failed' AND last_error_kind = 'explanation_content_rejected' AND json_extract(input_json, '$.trigger') = ?2",
+            params![session_id, trigger, now],
+        )?)
+    }
+
     /// Expired leases return to the queue before one compatible job is leased atomically.
     pub fn lease_model_job(
         &self,
@@ -3851,6 +3866,70 @@ mod tests {
         assert_eq!(retried.attempts, 0);
         assert_eq!(
             store.get_model_job("permanent").unwrap().unwrap().status,
+            "failed"
+        );
+    }
+
+    #[test]
+    fn versioned_content_retry_does_not_reopen_unrelated_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = EventStore::open(temp.path().join("events.sqlite")).unwrap();
+        store.create_session(&test_session()).unwrap();
+        for (id, trigger, kind) in [
+            (
+                "matching",
+                "quality_contract_v46",
+                "explanation_content_rejected",
+            ),
+            (
+                "old-version",
+                "quality_contract_v45",
+                "explanation_content_rejected",
+            ),
+            (
+                "wrong-kind",
+                "quality_contract_v46",
+                "explanation_quality_rejected",
+            ),
+        ] {
+            let job = store
+                .enqueue_model_job(&NewModelJob {
+                    id: id.to_owned(),
+                    session_id: "session_test".to_owned(),
+                    job_type: "explain".to_owned(),
+                    priority: 40,
+                    input: json!({"segments": [], "trigger": trigger}),
+                    input_object_hash: None,
+                    idempotency_key: format!("explain:{id}"),
+                })
+                .unwrap();
+            store
+                .lease_model_job_for("worker", &["explain".into()], 60, Some(&job.id))
+                .unwrap()
+                .unwrap();
+            store
+                .retry_or_fail_model_job(&job.id, "worker", kind, false, 1)
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .requeue_failed_explanation_content_for_trigger(
+                    "session_test",
+                    "quality_contract_v46",
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.get_model_job("matching").unwrap().unwrap().status,
+            "queued"
+        );
+        assert_eq!(
+            store.get_model_job("old-version").unwrap().unwrap().status,
+            "failed"
+        );
+        assert_eq!(
+            store.get_model_job("wrong-kind").unwrap().unwrap().status,
             "failed"
         );
     }

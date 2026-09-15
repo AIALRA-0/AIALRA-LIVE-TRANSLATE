@@ -11,6 +11,12 @@ const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v46";
 const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
 const MIN_REPAIR_GROUP_PARAGRAPHS: usize = 6;
 
+pub fn requeue_versioned_content_repairs(state: &AppState, session_id: &str) -> Result<usize> {
+    state
+        .store
+        .requeue_failed_explanation_content_for_trigger(session_id, QUALITY_REPAIR_TRIGGER)
+}
+
 pub fn enqueue_explanation(
     state: &AppState,
     session_id: &str,

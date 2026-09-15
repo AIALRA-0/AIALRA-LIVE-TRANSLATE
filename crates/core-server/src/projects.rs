@@ -718,6 +718,7 @@ pub async fn ensure_session_topics(
         0
     } else {
         state.store.requeue_failed_explanations(&session_id)?
+            + crate::explanation::requeue_versioned_content_repairs(&state, &session_id)?
     };
     let repaired = if has_active_lease {
         0
