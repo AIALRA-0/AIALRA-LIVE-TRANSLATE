@@ -1767,6 +1767,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsRuntime, setSettingsRuntime] = useState<RuntimeHealth | null>(null);
   const [settingsReadWeave, setSettingsReadWeave] = useState<ReadWeaveStatus | null>(null);
+  const workspaceRefreshInFlight = useRef<Promise<WorkspaceSnapshot> | null>(null);
+  const workspaceRefreshPending = useRef(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1774,16 +1776,29 @@ export default function App() {
     window.localStorage.setItem("aialra-theme", theme);
   }, [theme]);
 
-  const refresh = useCallback(async (): Promise<WorkspaceSnapshot> => {
-    const next = await api.workspace(deviceId); setSnapshot(next); return next;
+  const refresh = useCallback((): Promise<WorkspaceSnapshot> => {
+    if (workspaceRefreshInFlight.current) {
+      workspaceRefreshPending.current = true;
+      return workspaceRefreshInFlight.current;
+    }
+    const run = (async () => {
+      let next: WorkspaceSnapshot;
+      do {
+        workspaceRefreshPending.current = false;
+        next = await api.workspace(deviceId);
+        setSnapshot(next);
+      } while (workspaceRefreshPending.current);
+      return next;
+    })();
+    workspaceRefreshInFlight.current = run.finally(() => { workspaceRefreshInFlight.current = null; });
+    return workspaceRefreshInFlight.current;
   }, [deviceId]);
 
   useEffect(() => {
     if (window.location.pathname === "/" || !window.location.pathname.startsWith("/app")) window.history.replaceState({}, "", "/app");
     const updateRoute = () => setRoute(routeSelection());
     window.addEventListener("popstate", updateRoute);
-    void api.workspace(deviceId).then((next) => {
-      setSnapshot(next);
+    void refresh().then((next) => {
       const selected = routeSelection();
       const preferredProjectId = next.preference?.active_project_id;
       const preferredProjectVisible = preferredProjectId && next.projects.some((project) => project.id === preferredProjectId)
@@ -1802,12 +1817,19 @@ export default function App() {
       }
     }).catch((caught) => setError(caught instanceof Error ? caught.message : "工作区加载失败"));
     const refreshQuietly = () => { void refresh().catch(() => undefined); };
-    const unsubscribe = subscribeWorkspace(refreshQuietly, () => undefined);
+    let streamRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleStreamRefresh = () => {
+      window.clearTimeout(streamRefreshTimer);
+      streamRefreshTimer = window.setTimeout(refreshQuietly, 200);
+    };
+    // Workspace SSE replays durable history on reconnect. Collapse that replay
+    // into one snapshot request so it cannot starve audio and user actions.
+    const unsubscribe = subscribeWorkspace(scheduleStreamRefresh, () => undefined);
     // Lease expiry produces no new durable session event. Refresh the activity
     // projection even when SSE is healthy, without rewriting course history.
     const timer = window.setInterval(refreshQuietly, 10_000);
     window.addEventListener("focus", refreshQuietly);
-    return () => { window.removeEventListener("popstate", updateRoute); window.removeEventListener("focus", refreshQuietly); window.clearInterval(timer); unsubscribe(); };
+    return () => { window.removeEventListener("popstate", updateRoute); window.removeEventListener("focus", refreshQuietly); window.clearInterval(timer); window.clearTimeout(streamRefreshTimer); unsubscribe(); };
   }, [deviceId, refresh]);
 
   const activeProject = snapshot?.projects.find((project) => {
