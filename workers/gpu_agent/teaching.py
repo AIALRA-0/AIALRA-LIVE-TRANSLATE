@@ -10,6 +10,7 @@ from workers.gpu_agent.reviewed_definitions import reviewed_definition
 from workers.model_worker.terminology import matching_technical_terms
 
 PartCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+MAX_GROUP_TERMS = 8
 
 
 def contains_term(term: str, source: str) -> bool:
@@ -25,6 +26,18 @@ def redundant_bilingual_name(value: str) -> bool:
     """Reject labels such as ``Alice (Alice)`` before publication."""
     matched = re.fullmatch(r"\s*([^()（）]+?)\s*[（(]\s*([^()（）]+?)\s*[）)]\s*", value)
     return bool(matched and matched.group(1).casefold() == matched.group(2).casefold())
+
+
+def person_reference(term: str, source: str) -> bool:
+    """A self-introduced speaker name is evidence about a person, not a concept."""
+    candidate = re.escape(term.strip())
+    if not candidate:
+        return False
+    patterns = [
+        rf"\b(?:my name is|i am|i'm|call me|professor)\s+{candidate}\b",
+        rf"\b{candidate}\s+(?:is my name|is the (?:speaker|professor|instructor))\b",
+    ]
+    return any(re.search(pattern, source, re.IGNORECASE) for pattern in patterns)
 
 
 def source_pieces(text: str, capacity: int = 1400) -> list[str]:
@@ -128,6 +141,8 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         for term in terms:
             if not isinstance(term, str) or not contains_term(term, piece):
                 raise ValueError("teaching_term_source_invalid")
+            if person_reference(term, piece):
+                continue
             matching = [source for source in sources if contains_term(term, source["text"])]
             if not matching:
                 raise ValueError("teaching_term_source_invalid")
@@ -163,7 +178,7 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                         and source["id"] not in record["segment_ids"]):
                     record["segment_ids"].append(source["id"])
     definitions: list[dict[str, Any]] = []
-    for term_source in term_sources.values():
+    for term_source in list(term_sources.values())[:MAX_GROUP_TERMS]:
         reviewed = reviewed_definition(
             term_source["original_term"], term_source["text"], target, term_source["context"],
         )

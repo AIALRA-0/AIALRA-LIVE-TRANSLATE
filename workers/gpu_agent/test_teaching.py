@@ -7,6 +7,7 @@ import pytest
 from workers.gpu_agent.teaching import (
     assemble_explanation,
     contains_term,
+    person_reference,
     redundant_bilingual_name,
     source_pieces,
     teaching_chunks,
@@ -25,6 +26,41 @@ def test_redundant_bilingual_name_is_not_a_technical_term() -> None:
     assert redundant_bilingual_name("Alice (Alice)")
     assert redundant_bilingual_name(" Alice（alice） ")
     assert not redundant_bilingual_name("台积电（TSMC）")
+
+
+def test_self_introduced_person_is_not_a_technical_term() -> None:
+    assert person_reference("Alice", "My name is Alice and I teach this course.")
+    assert person_reference("Alice Smith", "Professor Alice Smith explains testing.")
+    assert not person_reference("latch", "A latch stores one bit.")
+
+
+@pytest.mark.asyncio
+async def test_group_caps_model_generated_glossary_to_key_concepts() -> None:
+    definition_calls = 0
+
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        nonlocal definition_calls
+        provider = "ollama:synthetic@cuda"
+        if body["phase"] == "prose":
+            return {
+                "provider": provider,
+                "prose": "完整解释",
+                "original_terms": [f"term{index}" for index in range(12)],
+            }
+        if body["phase"] == "definition":
+            definition_calls += 1
+            return {"provider": provider, "term": body["original_term"], "definition": "定义"}
+        return {"provider": provider, "prose": body["text"]}
+
+    result = await assemble_explanation({
+        "segments": [{
+            "id": "a",
+            "text": " ".join(f"term{index}" for index in range(12)),
+        }],
+        "target_language": "zh-CN",
+    }, call)
+    assert definition_calls == 8
+    assert len(result["terms"]) == 8
 
 
 @pytest.mark.asyncio
