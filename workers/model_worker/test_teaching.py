@@ -82,6 +82,37 @@ def test_batched_definitions_preserve_source_order_and_full_contract() -> None:
     ]}, request)
 
 
+@pytest.mark.asyncio
+async def test_batched_definition_generation_uses_one_structured_call() -> None:
+    calls = 0
+    complete = (
+        "这是一个技术概念；它用于解释同步电路中的作用；"
+        "具体机制由输入上下文确定；使用时必须保留适用条件、限制和相近概念的区别"
+    )
+
+    async def infer(
+        system: str, user: str, schema: dict[str, Any], **options: Any,
+    ) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        assert json.loads(user)["original_terms"] == ["latch", "clock"]
+        assert schema["properties"]["definitions"]["minItems"] == 2
+        assert options["max_tokens"] == 840
+        return {"definitions": [
+            {"original_term": "latch", "term": "锁存器（latch）", "definition": complete},
+            {"original_term": "clock", "term": "时钟（clock）", "definition": complete},
+        ]}
+
+    result = await generate_part(TeachingPartRequest(
+        phase="definitions",
+        text="A latch is controlled by a clock.",
+        original_terms=["latch", "clock"],
+        target_language="zh-CN",
+    ), infer, "test", "cuda")
+    assert calls == 1
+    assert result is not None and len(result.definitions) == 2
+
+
 def test_source_uncertainty_is_not_rejected_to_make_prose_sound_certain() -> None:
     request = TeachingPartRequest(
         phase="prose", text="The comparison is unclear. We have no final measurement.",
