@@ -745,7 +745,39 @@ async def complete_job(
         # Core already finalized or requeued the job after this worker lost its
         # lease.  Do not turn that expected race into a second failure event.
         return
-    response.raise_for_status()
+    if response.is_error:
+        error_kind = f"gateway_completion_http_{response.status_code}"
+        if response.status_code == 400:
+            try:
+                message = str(response.json().get("error") or "")
+            except (ValueError, AttributeError):
+                message = ""
+            error_kind = {
+                "explanation does not satisfy the learner-facing quality contract":
+                    "explanation_quality_rejected",
+                "explanation returned an invalid evidence reference":
+                    "explanation_evidence_rejected",
+                "explanation source coverage is incomplete":
+                    "explanation_coverage_rejected",
+                "explanation content or term evidence is invalid":
+                    "explanation_content_rejected",
+                "model runtime proof belongs to a different worker":
+                    "runtime_worker_rejected",
+                "model runtime proof does not match the returned provider":
+                    "runtime_provider_rejected",
+                "model runtime proof does not match provider execution details":
+                    "runtime_device_rejected",
+                "model runtime proof timestamp is outside the acceptance window":
+                    "runtime_timestamp_rejected",
+            }.get(message, "gateway_completion_bad_request")
+        raise JobExecutionError(FailureReport(
+            "gateway_response",
+            error_kind,
+            retryable=response.status_code >= 500,
+            http_status=response.status_code,
+            response_bytes=len(response.content),
+            response_sha256=hashlib.sha256(response.content).hexdigest(),
+        ))
 
 
 async def report_stage(

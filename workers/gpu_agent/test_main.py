@@ -12,6 +12,7 @@ from workers.gpu_agent.main import (
     FailureReport,
     GpuScheduler,
     JobExecutionError,
+    complete_job,
     execute_job,
     fail_job,
     failure_request_payload,
@@ -236,6 +237,35 @@ def test_failure_report_retries_with_the_same_diagnostic_id() -> None:
     payloads = asyncio.run(scenario())
     assert len(payloads) == 2
     assert {payload["diagnostic_id"] for payload in payloads} == {"diag_0123456789abcdef"}
+
+
+def test_completion_rejection_is_classified_without_copying_response_text() -> None:
+    async def scenario() -> FailureReport:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={
+                "code": "bad_request",
+                "error": "explanation source coverage is incomplete",
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as gateway:
+            try:
+                await complete_job(
+                    gateway,
+                    LANES[2],
+                    {"idempotency_key": "stable"},
+                    "job_test",
+                    {"provider": "ollama:test@cuda"},
+                    10,
+                )
+            except JobExecutionError as error:
+                return error.report
+        raise AssertionError("completion rejection was accepted")
+
+    report = asyncio.run(scenario())
+    assert report.error_kind == "explanation_coverage_rejected"
+    assert report.error_stage == "gateway_response"
+    assert report.retryable is False
+    assert report.http_status == 400
 
 
 def test_stage_reporting_is_bounded_and_does_not_log_response_body() -> None:
