@@ -228,11 +228,16 @@ fn redundant_bilingual_name(value: &str) -> bool {
     let Some(close) = value.rfind([')', '）']) else {
         return false;
     };
-    if close <= open {
+    let opening_len = value[open..]
+        .chars()
+        .next()
+        .map(char::len_utf8)
+        .unwrap_or_default();
+    if close < open + opening_len {
         return false;
     }
     let outer = value[..open].trim();
-    let inner = value[open + 1..close].trim();
+    let inner = value[open + opening_len..close].trim();
     !outer.is_empty() && outer.eq_ignore_ascii_case(inner)
 }
 
@@ -486,6 +491,14 @@ mod tests {
             400,
             true,
         ));
+    }
+
+    #[test]
+    fn bilingual_name_check_handles_ascii_and_fullwidth_parentheses() {
+        assert!(super::redundant_bilingual_name("Nandie（Nandie）"));
+        assert!(super::redundant_bilingual_name("ASCII (ASCII)"));
+        assert!(!super::redundant_bilingual_name("概率（P）"));
+        assert!(!super::redundant_bilingual_name("台积电（TSMC）"));
     }
 
     #[test]
