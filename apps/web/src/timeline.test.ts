@@ -37,6 +37,28 @@ describe("timeline mapping", () => {
     expect(buildCourseDocument([paragraph, translation, first, second, updated])[0])
       .toMatchObject({ original: "final correction", translation: "revised translation", translationStale: false });
   });
+  it("shows an append-only human translation revision and keeps the machine result available", () => {
+    const paragraph = event("paragraph.finalized", { paragraph_id: "p1", text: "source" });
+    const machine = { ...event("translation.finalized", {
+      paragraph_id: "p1", source_text: "source", text: "机器译文",
+    }), event_id: "machine-translation" };
+    const correction = { ...event("translation.corrected", {
+      paragraph_id: "p1", source_text: "source", text: "人工修订译文",
+    }), source_id: "human_translation", event_id: "translation-correction" };
+    expect(buildCourseDocument([paragraph, machine, correction])[0]).toMatchObject({
+      translation: "人工修订译文",
+      recognizedTranslation: "机器译文",
+      translationCorrectionRevision: 1,
+      translationStale: false,
+    });
+
+    const sourceCorrection = { ...event("transcript.corrected", {
+      paragraph_id: "p1", text: "new source",
+    }), source_id: "human_correction", event_id: "source-correction" };
+    expect(buildCourseDocument([paragraph, machine, correction, sourceCorrection])[0]).toMatchObject({
+      original: "new source", translationStale: true, translation: undefined,
+    });
+  });
   it("keeps course questions out of transcript paragraphs", () => {
     expect(buildCourseDocument([
       event("course.question.asked", { job_id: "j1", question: "synthetic question" }),
@@ -167,6 +189,19 @@ describe("timeline mapping", () => {
     expect(item.kind).toBe("insight");
     expect(item.sections).toHaveLength(2);
     expect(item.sections?.map((section) => section.label)).toEqual(["当前内容组总结", "知识补充 · token"]);
+  });
+
+  it("hides superseded teaching cards while retaining their events", () => {
+    const paragraph = event("paragraph.finalized", { paragraph_id: "para-1", text: "source" });
+    const oldCard = event("explanation.card.created", {
+      card_id: "old-card", result: { paragraph_summary: "旧讲解", evidence_segment_ids: ["para-1"] },
+    });
+    const newCard = { ...event("explanation.card.created", {
+      card_id: "new-card", result: { paragraph_summary: "新讲解", evidence_segment_ids: ["para-1"] },
+    }), event_id: "new-card-event", sequence: 2 };
+    const items = buildCourseDocument([paragraph, oldCard, newCard]);
+    expect(items.filter((item) => item.kind === "insight")).toMatchObject([{ id: "new-card" }]);
+    expect([paragraph, oldCard, newCard]).toHaveLength(3);
   });
 
   it("labels capacity continuation without displaying internal grouping events", () => {

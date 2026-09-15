@@ -35,6 +35,7 @@ CRC_REFERENCE = "https://www.rfc-editor.org/rfc/rfc3385"
 PARTITION_REFERENCE = "https://limsk.ece.gatech.edu/book/papers/fm.pdf"
 NETLIST_REFERENCE = "https://docs.amd.com/r/en-US/ug893-vivado-ide/Using-the-Netlist-Window"
 TSMC_REFERENCE = "https://www.tsmc.com/english/dedicatedFoundry"
+FPGA_REFERENCE = "https://docs.amd.com/r/en-US/ug574-ultrascale-clb/CLB-Overview"
 
 
 def reviewed_definition(
@@ -67,6 +68,17 @@ def reviewed_definition(
             "芯片设计团队通常在选定制造工艺、验证设计规则和准备流片时使用这些服务；"
             "晶圆代工负责制造客户设计，不等同于自行设计并销售自有品牌芯片",
             TSMC_REFERENCE,
+        )
+    if circuit and key in {
+        "fpga", "field-programmable gate array", "field programmable gate array",
+    }:
+        return Definition(
+            "FPGA 现场可编程门阵列（Field-Programmable Gate Array）",
+            "现场可编程门阵列是制造完成后仍能配置数字逻辑功能的集成电路；"
+            "它用可配置逻辑单元、片上存储和可编程互连实现用户指定的数据通路与控制逻辑；"
+            "设计工具把硬件描述转换为配置数据，器件加载配置后直接用硬件执行相应逻辑；"
+            "它常用于原型验证、可重构计算和需要并行处理的系统，不等同于只在软件中计算电路行为的仿真器，也不保证任何任务都会自动加速",
+            FPGA_REFERENCE,
         )
     if circuit and key in {"partition", "partitioning", "circuit partitioning"}:
         return Definition(

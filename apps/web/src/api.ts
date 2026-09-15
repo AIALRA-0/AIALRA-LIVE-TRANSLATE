@@ -95,6 +95,10 @@ export const api = {
     checked<{text: string; revision: number; translation_queued: boolean}>(fetch(`/api/v1/sessions/${sessionId}/paragraphs/${encodeURIComponent(paragraphId)}/correction`, {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, base_revision }),
     })),
+  correctTranslation: (sessionId: string, paragraphId: string, text: string, base_revision: number) =>
+    checked<{text: string; revision: number}>(fetch(`/api/v1/sessions/${sessionId}/paragraphs/${encodeURIComponent(paragraphId)}/translation-correction`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, base_revision }),
+    })),
   askCourseQuestion: (sessionId: string, question: string) =>
     checked<{ job_id: string; status: string }>(fetch(`/api/v1/sessions/${sessionId}/questions`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question }),

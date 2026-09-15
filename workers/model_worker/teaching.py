@@ -204,6 +204,11 @@ async def generate_part(
             "what I said', filler acknowledgements, or a line-by-line retelling. Use natural "
             "paragraphs, concrete subjects and explicit referents. Do not expose source "
             "checking, pipeline, model or coverage labels in learner-facing prose. "
+            "For every number or comparison, preserve both compared objects, units and the "
+            "direction of the relationship exactly. If the notes are contradictory or do not "
+            "make that direction clear, state that it remains unclear instead of repairing, "
+            "reversing or rationalizing it. Playback or simulation speed is not physical chip "
+            "speed unless the notes explicitly establish that relationship. "
             "Return only a JSON object with one field named prose. "
         )
     if request.phase in {"prose", "group", "course"}:
@@ -219,6 +224,8 @@ async def generate_part(
             "Naming hints disambiguate a few "
             "names, but do not limit which concepts you inventory. "
             "Do not invent a quotation or complete a broken statement as an established fact. "
+            "Keep the subject and direction of every quantitative comparison exact; never "
+            "convert a playback or simulator multiplier into a claim about physical chip speed. "
             "Explain uncertainty about quantities or comparisons in ordinary reader-facing "
             "language when the source leaves it unresolved. Do not hide that uncertainty "
             "merely to produce smoother prose."
@@ -320,7 +327,8 @@ async def generate_part(
         repair_instruction=(
             "Return only a coherent direct explanation in prose. Remove speech-act narration, "
             "filler acknowledgements and line-by-line retelling; retain all consequential facts, "
-            "conditions and distinctions."
+            "conditions and distinctions. Preserve both sides and the direction of every "
+            "comparison; mark ambiguity instead of inventing a relationship."
             if request.phase in {"group", "course"} else
             "Return every original_terms item exactly once and in order. Apply the complete "
             "definition contract to each item; do not merge terms or add another term."

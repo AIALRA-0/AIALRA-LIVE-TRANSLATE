@@ -128,6 +128,8 @@ async def test_course_synthesis_uses_bounded_notes_without_term_inventory() -> N
         system: str, user: str, schema: dict[str, Any], **options: Any,
     ) -> dict[str, Any]:
         assert "whole course" in system
+        assert "direction of the relationship" in system
+        assert "physical chip speed" in system
         assert json.loads(user)["source"] == "First, gates are modeled. Then their delays matter."
         assert options["max_tokens"] == 1400
         assert list(schema["properties"]) == ["prose"]

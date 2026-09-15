@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { api, type SessionAudioIndex } from "./api";
 import { playbackTimeForCapture } from "./sessionPlayback";
 
-const SEGMENT_SECONDS = 120;
-const PREFETCH_SECONDS = 30;
+const SEGMENT_SECONDS = 45;
+const PREFETCH_SECONDS = 15;
 
 function clock(seconds: number): string {
   if (!Number.isFinite(seconds)) return "00:00";
@@ -29,6 +29,9 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
   const lastSeekSerial = useRef(0);
   const resumeAfterLoad = useRef(false);
   const pendingOffset = useRef(0);
+  const pendingAbsoluteSeek = useRef<number | null>(null);
+  const positionRef = useRef(0);
+  const segmentStartRef = useRef(0);
   const activeBlobUrl = useRef<string | null>(null);
   const prefetched = useRef<{ start: number; url: string } | null>(null);
   const prefetchingStart = useRef<number | null>(null);
@@ -62,7 +65,9 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
       setSource(segmentUrl(sessionId, start));
     }
     pendingOffset.current = offset;
+    pendingAbsoluteSeek.current = start + offset;
     resumeAfterLoad.current = resume;
+    segmentStartRef.current = start;
     setSegmentStart(start);
     setBuffering(resume);
     setError("");
@@ -73,7 +78,9 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
     api.sessionAudioIndex(sessionId).then((next) => {
       if (active) {
         setIndex(next);
+        positionRef.current = 0;
         setPosition(0);
+        segmentStartRef.current = 0;
         setSegmentStart(0);
         setSource(segmentUrl(sessionId, 0));
         setError("");
@@ -95,14 +102,23 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
     const next = Math.max(0, Math.min(duration, requested));
     const nextSegment = Math.floor(next / SEGMENT_SECONDS) * SEGMENT_SECONDS;
     const offset = next - nextSegment;
+    positionRef.current = next;
     setPosition(next);
-    if (nextSegment === segmentStart && audio.current.readyState > 0) {
-      audio.current.currentTime = offset;
-      if (resume) void audio.current.play().catch(() => setError("浏览器未能开始回放，请重试"));
+    pendingAbsoluteSeek.current = next;
+    if (nextSegment === segmentStartRef.current) {
+      pendingOffset.current = offset;
+      resumeAfterLoad.current = resume;
+      if (audio.current.readyState === 0) {
+        setBuffering(resume);
+        audio.current.load();
+      } else {
+        audio.current.currentTime = offset;
+        if (resume) void audio.current.play().catch(() => setError("浏览器未能开始回放，请重试"));
+      }
       return;
     }
     selectSegment(nextSegment, offset, resume);
-  }, [index, playing, segmentStart, selectSegment]);
+  }, [index, playing, selectSegment]);
 
   useEffect(() => {
     if (!seekRequest || !index || lastSeekSerial.current === seekRequest.serial) return;
@@ -141,14 +157,16 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
     } else audio.current.pause();
   };
   const advance = () => {
-    const nextStart = segmentStart + SEGMENT_SECONDS;
-    if (nextStart >= duration) { setPlaying(false); setPosition(duration); return; }
+    const nextStart = segmentStartRef.current + SEGMENT_SECONDS;
+    if (nextStart >= duration) { setPlaying(false); positionRef.current = duration; setPosition(duration); return; }
+    positionRef.current = nextStart;
     setPosition(nextStart);
     selectSegment(nextStart, 0, true);
   };
+  const progress = duration > 0 ? Math.min(100, Math.max(0, position / duration * 100)) : 0;
   return <section className="session-player" aria-label="整节课程录音回放">
     <div className="session-player-label"><strong>整节课程回放</strong><span>{clock(position)} / {clock(duration)}</span></div>
-    <audio ref={audio} preload="none" src={source}
+    <audio ref={audio} preload="metadata" src={source}
       onLoadedMetadata={(event) => {
         event.currentTarget.playbackRate = speed;
         const mediaDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : SEGMENT_SECONDS;
@@ -164,14 +182,21 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
       onWaiting={() => setBuffering(true)} onStalled={() => setBuffering(true)}
       onPlaying={() => { setPlaying(true); setBuffering(false); setError(""); }}
       onPause={() => setPlaying(false)} onEnded={advance}
-      onTimeUpdate={(event) => setPosition(Math.min(duration, segmentStart + event.currentTarget.currentTime))}
+      onTimeUpdate={(event) => {
+        const absolute = Math.min(duration, segmentStartRef.current + event.currentTarget.currentTime);
+        const target = pendingAbsoluteSeek.current;
+        if (target !== null && Math.abs(absolute - target) > 0.75) return;
+        pendingAbsoluteSeek.current = null;
+        positionRef.current = absolute;
+        setPosition(absolute);
+      }}
       onError={() => { setBuffering(false); setError("录音暂时无法读取，请稍后重试"); }}
       aria-label="课程录音" />
     <div className="session-player-controls">
       <button type="button" className="player-icon-button" onClick={toggle} aria-label={playing ? "暂停回放" : "播放课程"}>{playing ? "Ⅱ" : "▶"}</button>
-      <button type="button" onClick={() => seek(position - 15)}>后退 15 秒</button>
-      <input aria-label="回放位置" type="range" min={0} max={Math.max(duration, 0.1)} step={0.1} value={Math.min(position, duration)} onChange={(event) => seek(Number(event.target.value))} />
-      <button type="button" onClick={() => seek(position + 15)}>前进 15 秒</button>
+      <button type="button" onClick={() => seek(positionRef.current - 15)}>后退 15 秒</button>
+      <input aria-label="回放位置" type="range" min={0} max={Math.max(duration, 0.1)} step={0.1} value={Math.min(position, duration)} style={{ "--player-progress": `${progress}%` } as CSSProperties} onChange={(event) => seek(Number(event.target.value))} />
+      <button type="button" onClick={() => seek(positionRef.current + 15)}>前进 15 秒</button>
       <label><span>速度</span><select aria-label="回放速度" value={speed} onChange={(event) => { const next = Number(event.target.value); setSpeed(next); if (audio.current) audio.current.playbackRate = next; }}>
         {[0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{value}×</option>)}
       </select></label>

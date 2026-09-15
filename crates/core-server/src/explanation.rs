@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
-const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v45";
+const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v46";
 const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
 const MIN_REPAIR_GROUP_PARAGRAPHS: usize = 6;
 
@@ -97,7 +97,7 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
                 .map(str::to_owned)
         })
         .collect::<Vec<_>>();
-    let mut latest = BTreeMap::<String, (Vec<String>, Value)>::new();
+    let mut latest = BTreeMap::<String, (Vec<String>, Value, String)>::new();
     for event in events
         .iter()
         .filter(|event| event.event_type == "explanation.card.created")
@@ -111,7 +111,13 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
             .map(str::to_owned)
             .collect::<Vec<_>>();
         if !ids.is_empty() {
-            latest.insert(ids.join(":"), (ids, result.clone()));
+            let trigger = event
+                .payload
+                .get("trigger")
+                .and_then(Value::as_str)
+                .unwrap_or("legacy")
+                .to_owned();
+            latest.insert(ids.join(":"), (ids, result.clone(), trigger));
         }
     }
     let chinese = session
@@ -120,7 +126,7 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
         .starts_with("zh");
     let mut queued = 0;
     let mut planned = HashSet::new();
-    for (_key, (ids, result)) in latest {
+    for (_key, (ids, result, trigger)) in latest {
         if queued == MAX_QUALITY_REPAIRS_PER_ENSURE {
             break;
         }
@@ -129,7 +135,9 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
             .filter_map(|id| paragraph_text.get(id))
             .map(|text| text.chars().count())
             .sum();
-        if ids.len() >= 4 && !explanation_needs_quality_repair(&result, source_characters, chinese)
+        if trigger == QUALITY_REPAIR_TRIGGER
+            && ids.len() >= 4
+            && !explanation_needs_quality_repair(&result, source_characters, chinese)
         {
             continue;
         }
@@ -522,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_card_quality_repair_is_append_only_and_idempotent() {
+    fn legacy_card_version_repair_is_append_only_and_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
         state
@@ -557,7 +565,7 @@ mod tests {
             0,
             "legacy-card",
             None,
-            json!({"result": {"paragraph_summary": "老师说了一个主题", "terms": [],
+            json!({"trigger": "quality_contract_v45", "result": {"paragraph_summary": "这段合成材料完整说明测试目标怎样决定故障模型，再说明测试向量怎样激励电路并观察输出，最后保留抽象模型不能覆盖全部物理缺陷这一适用边界，内容仅用于验证版本化重生成队列", "terms": [],
                 "evidence_segment_ids": ["paragraph-0", "paragraph-1", "paragraph-2", "paragraph-3"]}}),
         ).unwrap();
 

@@ -73,6 +73,10 @@ async fn main() -> Result<()> {
             axum::routing::put(course_content::correct_transcript),
         )
         .route(
+            "/sessions/{session_id}/paragraphs/{paragraph_id}/translation-correction",
+            axum::routing::put(course_content::correct_translation),
+        )
+        .route(
             "/sessions/{session_id}/audio/index",
             get(course_content::session_audio_index),
         )

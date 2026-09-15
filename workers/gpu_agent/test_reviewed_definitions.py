@@ -37,6 +37,7 @@ def test_new_reviewed_background_keeps_conditions_and_does_not_guess_domains() -
         ("gates", "The circuit has gates", "不是线网数量"),
         ("partition", "A circuit partition", "不等于完成布局布线"),
         ("TSMC", "TSMC is the semiconductor foundry used for this chip", "不等同于自行设计"),
+        ("FPGA", "The circuit is implemented on an FPGA", "不等同于只在软件中计算"),
     ]
     for term, source, condition in cases:
         definition = reviewed_definition(term, source, "zh-CN")

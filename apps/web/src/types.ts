@@ -207,7 +207,9 @@ export interface TimelineItem {
   imageUrl?: string;
   original?: string;
   translation?: string;
+  recognizedTranslation?: string;
   correctionRevision?: number;
+  translationCorrectionRevision?: number;
   recognizedOriginal?: string;
   translationStale?: boolean;
   translationMode?: "same_language";

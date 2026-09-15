@@ -8,6 +8,7 @@ const project = { id: "project_synthetic", owner_subject: "local-user", title: "
 const session = { id: "session_synthetic", title: "Synthetic lecture", source_language: "en", target_language: "zh-CN", privacy_mode: "local_only", consent_confirmed: true, demo_mode: false, state: "completed", created_at: now, updated_at: now };
 const second = { ...session, id: "session_second", title: "Synthetic second lecture" };
 let archived = false;
+let translationCorrectionSaved = false;
 const snapshot = () => ({ folders: [], projects: [project], project_placements: [{ project_id: project.id, folder_id: null, sort_order: 0, archived_at: null, updated_at: now }],
   sessions: [session, second], session_projects: { [session.id]: project.id, [second.id]: project.id },
   session_metadata: [session, second].map((item) => ({ session_id: item.id, pinned: false, sort_order: 0, archived_at: item.id === session.id && archived ? now : null, updated_at: now })),
@@ -48,8 +49,9 @@ wav.writeUInt32LE(pcm.length, 40); pcm.copy(wav, 44);
 
 const browser = await chromium.launch({ channel: process.env.AIALRA_BROWSER_CHANNEL || "msedge", headless: true });
 try {
-  for (const [width, stress] of [[1440, false], [390, false], [1440, true]]) {
+  for (const [width, stress] of [[1440, false], [870, false], [390, false], [1440, true]]) {
     archived = false;
+    translationCorrectionSaved = false;
     const page = await browser.newPage({ viewport: { width, height: 900 }, acceptDownloads: true });
     page.on("dialog", (dialog) => void dialog.accept());
     await page.route("**/api/v1/**", async (route) => {
@@ -58,10 +60,11 @@ try {
       if (path.endsWith("/stream")) return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
       if (path.endsWith("/workspace")) return route.fulfill({ json: snapshot() });
       if (path.endsWith("/document-snapshot")) return route.fulfill({ json: { events: stress ? stressEvents : events, cursor: events.at(-1).event_id } });
-      if (path.endsWith("/audio/index")) return route.fulfill({ json: stress ? { duration_ms: 5551000, positions: stressPositions } : { duration_ms: 2000, positions: [
-        { captured_at_ms: 1000, duration_ms: 1000, playback_start_ms: 0, playback_end_ms: 1000 },
-        { captured_at_ms: 20_000, duration_ms: 1000, playback_start_ms: 1000, playback_end_ms: 2000 },
+      if (path.endsWith("/audio/index")) return route.fulfill({ json: stress ? { duration_ms: 5551000, positions: stressPositions } : { duration_ms: 60000, positions: [
+        { captured_at_ms: 1000, duration_ms: 30000, playback_start_ms: 0, playback_end_ms: 30000 },
+        { captured_at_ms: 20_000, duration_ms: 30000, playback_start_ms: 30000, playback_end_ms: 60000 },
       ] } });
+      if (path.endsWith("/audio/segment")) return route.fulfill({ status: 200, contentType: "audio/wav", body: wav });
       if (path.endsWith("/audio")) {
         const range = route.request().headers().range;
         const start = range ? Number(range.match(/bytes=(\d+)/)?.[1] ?? 0) : 0;
@@ -72,6 +75,11 @@ try {
       if (path.endsWith("/readweave/preview")) return route.fulfill({ json: { sessions: [] } });
       if (path.endsWith("/readweave")) return route.fulfill({ json: { configured: false, queued: 0, syncing: 0, completed: 0, conflicts: 0, updated_at: null, note_url: null } });
       if (path.endsWith("/health")) return route.fulfill({ json: { status: "ok", service: "test", version: "synthetic", build_id: "synthetic", deployment_mode: "local", processing_location: "local", worker: null, model_queue: { queued: 0, leased: 0, completed: 0, failed: 0 } } });
+      if (path.endsWith("/translation-correction") && route.request().method() === "PUT") {
+        const body = route.request().postDataJSON();
+        translationCorrectionSaved = body.text === "人工校对后的合成译文" && body.base_revision === 0;
+        return route.fulfill({ json: { text: body.text, revision: 1 } });
+      }
       if (path.includes("/workspace/trash/") && route.request().method() === "POST") { archived = true; return route.fulfill({ json: { accepted: true } }); }
       if (route.request().method() !== "GET") return route.fulfill({ json: { accepted: true } });
       return route.fulfill({ status: 404, json: { code: "not_found" } });
@@ -81,6 +89,7 @@ try {
     await page.getByRole("heading", { name: session.title }).waitFor();
     await page.getByRole("region", { name: "整节课程录音回放" }).waitFor();
     await page.getByTestId("course-paragraph").first().waitFor();
+    if (width <= 820) await page.getByRole("button", { name: "打开课程树" }).click();
     if (stress) {
       const elapsed = Date.now() - started;
       if (elapsed > 5000) throw new Error(`long course took ${elapsed} ms to become readable`);
@@ -88,6 +97,28 @@ try {
       await page.close();
       continue;
     }
+    const projectTitleX = await page.locator(".tree-project > .tree-item-row .tree-item-button span:nth-child(2)").first().evaluate((node) => node.getBoundingClientRect().x);
+    const sessionTitleX = await page.locator(".tree-sessions > li > .tree-item-row .tree-item-button span:nth-child(2)").first().evaluate((node) => node.getBoundingClientRect().x);
+    const moduleTitleX = await page.locator(".system-notes button").first().evaluate((node) => {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      return range.getBoundingClientRect().x;
+    });
+    const sessionIndent = sessionTitleX - projectTitleX;
+    if (sessionIndent < 12 || sessionIndent > 28 || Math.abs(moduleTitleX - sessionTitleX) > 4) {
+      throw new Error(`tree hierarchy is misaligned: project ${projectTitleX} px, session ${sessionTitleX} px, module ${moduleTitleX} px`);
+    }
+    const playbackSlider = page.getByRole("slider", { name: "回放位置" });
+    if (await playbackSlider.inputValue() !== "0") throw new Error("playback slider did not start at zero");
+    await page.getByRole("button", { name: "前进 15 秒" }).click();
+    await page.waitForTimeout(500);
+    if (Number(await playbackSlider.inputValue()) < 14.5) throw new Error("forward skip was reset by stale media time");
+    await page.getByRole("button", { name: "后退 15 秒" }).click();
+    if (Number(await playbackSlider.inputValue()) > 0.5) throw new Error("backward skip did not return to the start");
+    await page.getByRole("button", { name: "修订译文" }).first().click();
+    await page.getByLabel("修订译文").fill("人工校对后的合成译文");
+    await page.getByRole("button", { name: "保存译文" }).click();
+    if (!translationCorrectionSaved) throw new Error("translation correction was not saved append-only");
     await page.getByRole("searchbox", { name: "搜索课程原文和译文" }).fill("覆盖率");
     await page.getByText("找到 1 条匹配内容").waitFor();
     await page.getByRole("searchbox", { name: "搜索课程原文和译文" }).fill("");
@@ -96,7 +127,6 @@ try {
     await page.getByRole("button", { name: "导出课程笔记" }).click();
     const download = await downloadPromise;
     if (!download.suggestedFilename().endsWith(".md")) throw new Error("Markdown export is missing");
-    if (width <= 390) await page.getByRole("button", { name: "打开课程树" }).click();
     await page.getByRole("button", { name: "课程概览" }).click();
     await page.getByRole("region", { name: "课程章节与观点树" }).waitFor();
     if (await page.locator(".course-outline > details").count() !== 2) throw new Error("topic chapters were not separated");

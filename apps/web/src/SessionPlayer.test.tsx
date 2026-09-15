@@ -13,6 +13,8 @@ beforeEach(() => {
     duration_ms: 180_000,
     positions: [{ captured_at_ms: 1_000, duration_ms: 180_000, playback_start_ms: 0, playback_end_ms: 180_000 }],
   });
+  vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => undefined);
+  vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
 });
 
 afterEach(cleanup);
@@ -24,7 +26,7 @@ it("does not preload long recordings, keeps playback available, and reports read
 
   const audio = screen.getByLabelText("课程录音") as HTMLAudioElement;
   expect(audio).not.toHaveAttribute("controls");
-  expect(audio).toHaveAttribute("preload", "none");
+  expect(audio).toHaveAttribute("preload", "metadata");
   expect(screen.getByRole("button", { name: "播放课程" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "后退 15 秒" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "前进 15 秒" })).toBeInTheDocument();
@@ -34,6 +36,35 @@ it("does not preload long recordings, keeps playback available, and reports read
   fireEvent.loadedMetadata(audio);
   expect(onReady).toHaveBeenLastCalledWith(true);
   expect(container.querySelectorAll("audio")).toHaveLength(1);
+});
+
+it("keeps a skip target when a stale media time update arrives", async () => {
+  render(<SessionPlayer sessionId="session-test" sessionState="completed" seekRequest={null} onReady={vi.fn()} />);
+  await act(async () => undefined);
+  const audio = screen.getByLabelText("课程录音") as HTMLAudioElement;
+  Object.defineProperty(audio, "readyState", { configurable: true, value: 4 });
+  fireEvent.loadedMetadata(audio);
+
+  fireEvent.click(screen.getByRole("button", { name: "前进 15 秒" }));
+  expect(screen.getByRole("slider", { name: "回放位置" })).toHaveValue("15");
+  audio.currentTime = 0;
+  fireEvent.timeUpdate(audio);
+  expect(screen.getByRole("slider", { name: "回放位置" })).toHaveValue("15");
+
+  audio.currentTime = 15;
+  fireEvent.timeUpdate(audio);
+  fireEvent.click(screen.getByRole("button", { name: "前进 15 秒" }));
+  expect(screen.getByRole("slider", { name: "回放位置" })).toHaveValue("30");
+});
+
+it("loads the current segment before the first skip instead of resetting it", async () => {
+  render(<SessionPlayer sessionId="session-test" sessionState="completed" seekRequest={null} onReady={vi.fn()} />);
+  await act(async () => undefined);
+  const audio = screen.getByLabelText("课程录音") as HTMLAudioElement;
+  Object.defineProperty(audio, "readyState", { configurable: true, value: 0 });
+  fireEvent.click(screen.getByRole("button", { name: "前进 15 秒" }));
+  expect(audio.load).toHaveBeenCalledOnce();
+  expect(screen.getByRole("slider", { name: "回放位置" })).toHaveValue("15");
 });
 
 it("shows buffering without replacing the playback controls", async () => {

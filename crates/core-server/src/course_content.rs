@@ -27,6 +27,115 @@ pub struct CorrectTranscript {
     pub base_revision: u64,
 }
 
+pub async fn correct_translation(
+    State(state): State<AppState>,
+    Path((session, paragraph)): Path<(String, String)>,
+    Json(request): Json<CorrectTranscript>,
+) -> Result<Json<Value>, ApiError> {
+    let corrected = request.text.trim();
+    if corrected.is_empty() || corrected.len() > 16 * 1024 {
+        return Err(ApiError::bad_request("修订内容应为 1 到 16384 字节"));
+    }
+    let (event, changed) = {
+        let _guard = state
+            .sequence_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("translation correction lock unavailable"))?;
+        let document = state
+            .store
+            .document_event(&session, &paragraph)?
+            .ok_or_else(|| ApiError::not_found("段落不存在"))?;
+        let source_correction = state
+            .store
+            .latest_paragraph_correction(&session, &paragraph)?;
+        let source_text = source_correction
+            .as_ref()
+            .and_then(|event| event.payload.get("text"))
+            .and_then(Value::as_str)
+            .or_else(|| document.payload.get("text").and_then(Value::as_str))
+            .ok_or_else(|| ApiError::not_found("段落原文不存在"))?;
+        let translations = state.store.list_events(&session)?;
+        let machine = translations.iter().rev().find(|candidate| {
+            if candidate.event_type != "translation.finalized" {
+                return false;
+            }
+            let id = candidate
+                .payload
+                .get("paragraph_id")
+                .or_else(|| candidate.payload.get("segment_id"))
+                .and_then(Value::as_str);
+            let source = candidate.payload.get("source_text").and_then(Value::as_str);
+            id == Some(paragraph.as_str())
+                && (source == Some(source_text) || source_correction.is_none())
+        });
+        let current = state
+            .store
+            .latest_translation_correction(&session, &paragraph)?;
+        let revision = current.as_ref().map_or(0, |candidate| candidate.sequence);
+        let current_matches_source = current
+            .as_ref()
+            .and_then(|candidate| candidate.payload.get("source_text"))
+            .and_then(Value::as_str)
+            == Some(source_text);
+        if current_matches_source
+            && current
+                .as_ref()
+                .and_then(|candidate| candidate.payload.get("text"))
+                .and_then(Value::as_str)
+                == Some(corrected)
+        {
+            (
+                current.expect("matching translation correction exists"),
+                false,
+            )
+        } else {
+            if machine.is_none() && !current_matches_source {
+                return Err(ApiError::conflict_with_code(
+                    "当前原文还没有可修订的译文，请等待翻译完成",
+                    "translation_not_ready",
+                ));
+            }
+            if revision != request.base_revision {
+                return Err(ApiError::conflict_with_code(
+                    "这段译文已在另一页面修订，草稿仍在本页，请先查看最新版本",
+                    "translation_revision_conflict",
+                ));
+            }
+            let event = EventEnvelope::new(
+                &session,
+                "human_translation",
+                state.store.next_sequence(&session, "human_translation")?,
+                "translation.corrected",
+                0,
+                "human_translation",
+                machine.map(|candidate| candidate.event_id.to_string()),
+                json!({
+                    "paragraph_id": paragraph,
+                    "text": corrected,
+                    "source_text": source_text,
+                    "machine_translation_event_id": machine.map(|candidate| candidate.event_id)
+                }),
+            )
+            .map_err(anyhow::Error::from)?;
+            state.store.insert_event(&event)?;
+            (event, true)
+        }
+    };
+    if changed {
+        let _ = state.events.send(event.clone());
+        if let Err(_error) = state.record_session_event_update(&event) {
+            tracing::warn!(
+                error_kind = "translation_correction_projection_pending",
+                "translation correction saved but projection pending"
+            );
+        }
+    }
+    Ok(Json(json!({
+        "revision": event.sequence,
+        "text": corrected
+    })))
+}
+
 pub async fn correct_transcript(
     State(state): State<AppState>,
     Path((session, paragraph)): Path<(String, String)>,
@@ -866,6 +975,90 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn translation_corrections_append_history_and_reject_stale_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let session = "session_content_test".to_owned();
+        state
+            .emit(
+                &session,
+                "asr",
+                "paragraph.finalized",
+                0,
+                "paragraph_translation_test",
+                None,
+                json!({"paragraph_id":"paragraph_translation_test","text":"source"}),
+            )
+            .unwrap();
+        state
+            .emit(
+                &session,
+                "gpu_translation",
+                "translation.finalized",
+                0,
+                "machine_translation",
+                None,
+                json!({"paragraph_id":"paragraph_translation_test","source_text":"legacy source echo","text":"machine"}),
+            )
+            .unwrap();
+        let path = Path((session.clone(), "paragraph_translation_test".to_owned()));
+        let first = correct_translation(
+            State(state.clone()),
+            path,
+            Json(CorrectTranscript {
+                text: "human revision".into(),
+                base_revision: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.0["revision"], 1);
+        assert_eq!(
+            state
+                .store
+                .latest_translation_correction(&session, "paragraph_translation_test")
+                .unwrap()
+                .unwrap()
+                .payload["text"],
+            "human revision"
+        );
+        assert!(
+            correct_translation(
+                State(state.clone()),
+                Path((session.clone(), "paragraph_translation_test".into())),
+                Json(CorrectTranscript {
+                    text: "stale revision".into(),
+                    base_revision: 0,
+                }),
+            )
+            .await
+            .is_err()
+        );
+        let second = correct_translation(
+            State(state.clone()),
+            Path((session.clone(), "paragraph_translation_test".into())),
+            Json(CorrectTranscript {
+                text: "final revision".into(),
+                base_revision: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.0["revision"], 2);
+        let events = state.store.list_events(&session).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "translation.corrected")
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|event| {
+            event.event_type == "translation.finalized" && event.payload["text"] == "machine"
+        }));
     }
 
     #[tokio::test]

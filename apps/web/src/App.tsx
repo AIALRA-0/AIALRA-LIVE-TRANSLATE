@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type RuntimeHealth } from "./api";
 import { BrowserCapture, listAudioInputs, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
 import { applySessionStateEvent } from "./sessionState";
@@ -574,7 +574,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
             const sessionDropIntent = currentDropIntent(sessionTarget);
             return <li key={session.id} className={dragging?.entityId === session.id ? "dragging" : ""}>
               <div
-                className={`tree-item-row ${activeSessionId === session.id ? "selected" : ""} ${sessionDropIntent ? `drop-target drop-${sessionDropIntent}` : ""}`}
+                className={`tree-item-row session-tree-row ${activeSessionId === session.id ? "selected" : ""} ${sessionDropIntent ? `drop-target drop-${sessionDropIntent}` : ""}`}
                 onDragEnd={endDrag}
                 onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}
               >
@@ -739,10 +739,10 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
   );
 }
 
-function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }: { item: TimelineItem; languageView: LanguageView; sessionId: string; wholeAudioReady: boolean; onSeek: (capturedAtMs: number) => void }) {
+const DocumentItem = memo(function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }: { item: TimelineItem; languageView: LanguageView; sessionId: string; wholeAudioReady: boolean; onSeek: (capturedAtMs: number) => void }) {
   const [playing, setPlaying] = useState(false);
   const [playError, setPlayError] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<"source" | "translation" | null>(null);
   const [draft, setDraft] = useState("");
   const [savingCorrection, setSavingCorrection] = useState(false);
   const [correctionError, setCorrectionError] = useState("");
@@ -756,12 +756,13 @@ function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }
   if (item.kind === "paragraph") {
     return (
       <article id={`evidence-${item.id}`} className="course-paragraph" data-testid="course-paragraph">
-        <header>{item.speakerLabel && <span className="speaker-label">{item.speakerLabel}</span>}<time>{time}</time><button type="button" className="text-link-button" onClick={() => { if (wholeAudioReady && item.audioStartMs) onSeek(item.audioStartMs); else { setPlaying((current) => !current); setPlayError(false); } }}>{playing ? "关闭回放" : "定位回听"}</button><button type="button" className="text-link-button" onClick={() => { setDraft(item.original ?? ""); setCorrectionError(""); setEditing(true); }}>修订原文</button></header>
+        <header>{item.speakerLabel && <span className="speaker-label">{item.speakerLabel}</span>}<time>{time}</time><button type="button" className="text-link-button" onClick={() => { if (wholeAudioReady && item.audioStartMs) onSeek(item.audioStartMs); else { setPlaying((current) => !current); setPlayError(false); } }}>{playing ? "关闭回放" : "定位回听"}</button><button type="button" className="text-link-button" onClick={() => { setDraft(item.original ?? ""); setCorrectionError(""); setEditing("source"); }}>修订原文</button>{languageView !== "source" && item.translation && !item.translationStale && item.translationMode !== "same_language" && <button type="button" className="text-link-button" onClick={() => { setDraft(item.translation ?? ""); setCorrectionError(""); setEditing("translation"); }}>修订译文</button>}</header>
         {playing && <audio controls autoPlay preload="none" src={`/api/v1/sessions/${sessionId}/paragraphs/${item.id}/audio`} onPlay={(event) => { document.querySelectorAll("audio").forEach((audio) => { if (audio !== event.currentTarget) audio.pause(); }); }} onError={() => setPlayError(true)} />}
         {playError && <small role="status">这段音频暂时无法播放，请检查网络；旧版导入内容可能没有原始音频。</small>}
         {(languageView !== "translation" || item.translationMode === "same_language") && <p className="source-text">{item.original}{item.recognizedOriginal && item.recognizedOriginal !== item.original && <small> · 人工修订</small>}</p>}
         {item.recognizedOriginal && item.recognizedOriginal !== item.original && <details><summary>查看修订前的识别记录</summary><p>{item.recognizedOriginal}</p></details>}
         {languageView !== "source" && <p className="translation-text">{item.translationStale ? "原文已人工修订，原译文不再作为当前结果显示" : item.translationMode === "same_language" ? "原文，无需翻译" : item.translation || "等待真实模型翻译"}</p>}
+        {languageView !== "source" && item.recognizedTranslation && item.recognizedTranslation !== item.translation && <details><summary>查看修订前的机器译文</summary><p>{item.recognizedTranslation}</p></details>}
         {item.translationStale && <button type="button" className="text-link-button" disabled={savingCorrection} onClick={() => {
           setSavingCorrection(true); setCorrectionError("");
           void api.correctTranscript(sessionId, item.id, item.original ?? "", item.correctionRevision ?? 0)
@@ -770,14 +771,22 @@ function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }
             .finally(() => setSavingCorrection(false));
         }}>重试修订后的翻译</button>}
         {correctionError && !editing && <p role="alert">{correctionError}</p>}
-        {editing && <form className="transcript-correction" onSubmit={(event) => {
+        {editing === "source" && <form className="transcript-correction" onSubmit={(event) => {
           event.preventDefault();
           setSavingCorrection(true); setCorrectionError("");
           void api.correctTranscript(sessionId, item.id, draft, item.correctionRevision ?? 0)
-            .then((result) => { setEditing(false); if (!result.translation_queued) setCorrectionError("原文已保存，但重译尚未排队，请稍后再试"); })
+            .then((result) => { setEditing(null); if (!result.translation_queued) setCorrectionError("原文已保存，但重译尚未排队，请稍后再试"); })
             .catch((error) => setCorrectionError(error instanceof Error ? error.message : "修订未保存，请重试"))
             .finally(() => setSavingCorrection(false));
-        }}><label>修订原文<textarea value={draft} maxLength={16384} onChange={(event) => setDraft(event.target.value)} /></label><div><button type="submit" disabled={savingCorrection || !draft.trim()}>{savingCorrection ? "正在保存" : "保存修订"}</button><button type="button" disabled={savingCorrection} onClick={() => setEditing(false)}>取消</button></div>{correctionError && <p role="alert">{correctionError}</p>}</form>}
+        }}><label>修订原文<textarea value={draft} maxLength={16384} onChange={(event) => setDraft(event.target.value)} /></label><div><button type="submit" disabled={savingCorrection || !draft.trim()}>{savingCorrection ? "正在保存" : "保存原文"}</button><button type="button" disabled={savingCorrection} onClick={() => setEditing(null)}>取消</button></div>{correctionError && <p role="alert">{correctionError}</p>}</form>}
+        {editing === "translation" && <form className="transcript-correction" onSubmit={(event) => {
+          event.preventDefault();
+          setSavingCorrection(true); setCorrectionError("");
+          void api.correctTranslation(sessionId, item.id, draft, item.translationCorrectionRevision ?? 0)
+            .then(() => setEditing(null))
+            .catch((error) => setCorrectionError(error instanceof Error ? error.message : "译文修订未保存，请重试"))
+            .finally(() => setSavingCorrection(false));
+        }}><label>修订译文<textarea value={draft} maxLength={16384} onChange={(event) => setDraft(event.target.value)} /></label><div><button type="submit" disabled={savingCorrection || !draft.trim()}>{savingCorrection ? "正在保存" : "保存译文"}</button><button type="button" disabled={savingCorrection} onClick={() => setEditing(null)}>取消</button></div>{correctionError && <p role="alert">{correctionError}</p>}</form>}
       </article>
     );
   }
@@ -789,7 +798,7 @@ function DocumentItem({ item, languageView, sessionId, wholeAudioReady, onSeek }
       {item.evidenceIds.length > 0 && <footer>{item.evidenceIds.slice(0, 6).map((id) => <button key={id} className="evidence-link" type="button" title={`回到证据 ${id}`} onClick={() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}>证据 · {id.slice(-6)}</button>)}</footer>}
     </aside>
   );
-}
+});
 
 function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, retrying, onRetry }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null>; focusKey: string; retryAvailable: boolean; retrying: boolean; onRetry: () => void }) {
   const paragraphs = useMemo(() => items.filter((item) => item.kind === "paragraph"), [items]);
@@ -883,7 +892,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [seekRequest, setSeekRequest] = useState<{ capturedAtMs: number; serial: number } | null>(null);
   const [wholeAudioReady, setWholeAudioReady] = useState(false);
   const [documentSearch, setDocumentSearch] = useState("");
-  const seekToCapture = (capturedAtMs: number) => setSeekRequest((previous) => ({ capturedAtMs, serial: (previous?.serial ?? 0) + 1 }));
+  const seekToCapture = useCallback((capturedAtMs: number) => setSeekRequest((previous) => ({ capturedAtMs, serial: (previous?.serial ?? 0) + 1 })), []);
   const [timeline, dispatch] = useReducer(timelineReducer, { events: [], items: [] });
   const [sessionStreamConnected, setSessionStreamConnected] = useState(false);
   const sessionStreamDisconnectTimer = useRef<number | null>(null);
@@ -1579,9 +1588,9 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const section = routeSelection().section;
   const readWeaveNodeType = section === "user-notes" ? "user_notes" : section;
   const readWeaveUrl = readWeave?.targets?.find((target) => target.local_id === `${session.id}:${section === "user-notes" ? "user" : section}` || (!section && target.node_type === "session" && target.local_id === session.id))?.note_url ?? readWeave?.note_url;
-  const visibleItems = mainDocumentItems(timeline.items, section, languageView, documentSearch);
-  const renderedItems = visibleItems.slice(-visibleItemLimit);
-  const documentFocusKey = `${section ?? "course"}:${renderedItems.map((item) => item.id).join("|")}`;
+  const visibleItems = useMemo(() => mainDocumentItems(timeline.items, section, languageView, documentSearch), [timeline.items, section, languageView, documentSearch]);
+  const renderedItems = useMemo(() => visibleItems.slice(-visibleItemLimit), [visibleItems, visibleItemLimit]);
+  const documentFocusKey = useMemo(() => `${section ?? "course"}:${renderedItems.map((item) => item.id).join("|")}`, [section, renderedItems]);
   const latestCourseSummary = summaryStatus.summaryId
     ? timeline.items.find((item) => item.kind === "session-summary" && item.id === summaryStatus.summaryId)
     : null;
@@ -1599,7 +1608,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const hiddenItemCount = visibleItems.length - renderedItems.length;
   // A translation can arrive above the trailing preview. Track visible text,
   // not only item count or the final item's body, without following diagnostics.
-  const documentContent = JSON.stringify(renderedItems.map(({ id, body, translation }) => [id, body, translation]));
+  const documentContent = useMemo(() => JSON.stringify(renderedItems.map(({ id, body, translation }) => [id, body, translation])), [renderedItems]);
 
   useLayoutEffect(() => {
     const element = documentRef.current;

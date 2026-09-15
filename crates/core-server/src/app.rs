@@ -223,6 +223,7 @@ impl AppState {
             event.event_type.as_str(),
             "paragraph.finalized"
                 | "transcript.corrected"
+                | "translation.corrected"
                 | "translation.finalized"
                 | "explanation.card.created"
                 | "session.summary.created"

@@ -66,6 +66,7 @@ function cleanTranslationDisplay(value: unknown): string {
 export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
   const translations = new Map<string, EventEnvelope[]>();
   const corrections = new Map<string, EventEnvelope>();
+  const translationCorrections = new Map<string, EventEnvelope>();
   const segmentAudio = new Map<string, { start: number; end: number }>();
   for (const event of events) {
     if (event.event_type === "translation.finalized") {
@@ -75,6 +76,10 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
     if (event.event_type === "transcript.corrected") {
       const id = text(event.payload.paragraph_id);
       if (id && (!corrections.has(id) || event.sequence > corrections.get(id)!.sequence)) corrections.set(id, event);
+    }
+    if (event.event_type === "translation.corrected") {
+      const id = text(event.payload.paragraph_id);
+      if (id && (!translationCorrections.has(id) || event.sequence > translationCorrections.get(id)!.sequence)) translationCorrections.set(id, event);
     }
     if (event.event_type === "segment.finalized") {
       const start = Number(event.payload.audio_start_ms);
@@ -125,20 +130,29 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       const recognizedOriginal = text(payload.text) || text(history.at(-1)?.payload.source_text);
       const correction = corrections.get(segmentId);
       const original = text(correction?.payload.text) || recognizedOriginal;
-      const translation = [...history].reverse().find((entry) => text(entry.payload.source_text) === original) ?? history.at(-1);
-      const translationStale = Boolean(correction && original !== recognizedOriginal && text(translation?.payload.source_text) !== original);
+      const machineTranslation = [...history].reverse().find((entry) => text(entry.payload.source_text) === original) ?? history.at(-1);
+      const translationCorrection = translationCorrections.get(segmentId);
+      const currentTranslationCorrection = text(translationCorrection?.payload.source_text) === original ? translationCorrection : undefined;
+      const translationStale = Boolean(
+        (correction && original !== recognizedOriginal && text(machineTranslation?.payload.source_text) !== original && !currentTranslationCorrection)
+        || (translationCorrection && !currentTranslationCorrection)
+      );
+      const recognizedTranslation = machineTranslation ? cleanTranslationDisplay(machineTranslation.payload.text) : undefined;
+      const translation = currentTranslationCorrection ? text(currentTranslationCorrection.payload.text) : recognizedTranslation;
       const speaker = object(payload.speaker);
       const speakerLabel = speaker.status === "assigned" && Number.isInteger(speaker.index) && Number(speaker.index) > 0 && Number(speaker.index) <= 64
         ? `说话人 ${speaker.index}` : speaker.status ? "说话人待确认" : undefined;
       items.push({
         id: segmentId, kind: "paragraph", title: "课程段落", body: original,
         original, recognizedOriginal: correction ? recognizedOriginal : undefined,
-        correctionRevision: correction?.sequence ?? 0, translationStale,
-        translation: translationStale ? undefined : translation?.payload.translation_mode === "same_language" ? original
-          : translation ? cleanTranslationDisplay(translation.payload.text) : undefined,
+        correctionRevision: correction?.sequence ?? 0,
+        translationCorrectionRevision: translationCorrection?.sequence ?? 0,
+        translationStale,
+        translation: translationStale ? undefined : machineTranslation?.payload.translation_mode === "same_language" ? original : translation,
+        recognizedTranslation: currentTranslationCorrection && recognizedTranslation !== translation ? recognizedTranslation : undefined,
         speakerLabel,
-        translationMode: translation?.payload.translation_mode === "same_language" ? "same_language" : undefined,
-        sourceProvider: text(payload.provider), translationProvider: translation ? text(translation.payload.provider) : undefined,
+        translationMode: machineTranslation?.payload.translation_mode === "same_language" ? "same_language" : undefined,
+        sourceProvider: text(payload.provider), translationProvider: machineTranslation ? text(machineTranslation.payload.provider) : undefined,
         evidenceIds: [segmentId], occurredAt: event.captured_at_wall,
         audioStartMs: spans.length ? Math.min(...spans.map((span) => span.start)) : undefined,
         audioEndMs: spans.length ? Math.max(...spans.map((span) => span.end)) : undefined,
@@ -147,7 +161,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
     }
     if (event.event_type === "segment.finalized") continue;
     if (event.event_type === "transcript.interim" || event.event_type === "transcript.stable" || event.event_type === "transcript.revised" || event.event_type === "transcript.corrected" || event.event_type.startsWith("course.question.")) continue;
-    if (event.event_type === "translation.finalized") continue;
+    if (event.event_type === "translation.finalized" || event.event_type === "translation.corrected") continue;
 
     if (event.event_type === "explanation.card.created") {
       const result = object(payload.result);
@@ -285,7 +299,17 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       title: "原文预览 · 等待成段", body: original, original, evidenceIds: [],
       occurredAt: previewEvents[0].captured_at_wall });
   }
-  return items;
+  const paragraphIds = new Set(items.filter((item) => item.kind === "paragraph").map((item) => item.id));
+  const latestInsightByParagraph = new Map<string, string>();
+  for (const item of items) {
+    if (item.kind !== "insight") continue;
+    for (const id of item.evidenceIds) {
+      if (paragraphIds.has(id)) latestInsightByParagraph.set(id, item.id);
+    }
+  }
+  return items.filter((item) => item.kind !== "insight"
+    || !item.evidenceIds.some((id) => paragraphIds.has(id))
+    || item.evidenceIds.some((id) => latestInsightByParagraph.get(id) === item.id));
 }
 
 // Processing and retry states belong to the control/status surfaces, never to the
@@ -303,6 +327,7 @@ const COURSE_EVENT_TYPES = new Set([
   "session.summary.created", "session.summary.failed", "session.summary.queued", "asset.page.extracted",
   "model.job.failed", "model.job.retry_scheduled", "transcript.interim",
   "transcript.stable", "transcript.revised", "transcript.corrected",
+  "translation.corrected",
   "course.question.asked", "course.question.answered",
 ]);
 
