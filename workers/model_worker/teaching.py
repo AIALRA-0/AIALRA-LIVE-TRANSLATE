@@ -323,7 +323,10 @@ async def generate_part(
         {"type": "object", "properties": properties, "required": list(properties),
          "additionalProperties": False},
         model=model, num_ctx=8192, max_tokens=budget, thinking=False, presence_penalty=0,
-        timeout_seconds=45, attempts=2,
+        # A 2,800-byte teaching chunk on the 9B model can legitimately exceed the old
+        # 45-second limit during a cold load. This lane is asynchronous and lease-renewed,
+        # so allow the bounded inference to finish instead of duplicating the same work.
+        timeout_seconds=75, attempts=2,
         accept=lambda result: valid_part(bound_inventory(result, request), request),
         repair_instruction=(
             "Return only a coherent direct explanation in prose. Remove speech-act narration, "

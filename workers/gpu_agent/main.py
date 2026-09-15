@@ -559,7 +559,7 @@ async def execute_job(
     ):
         async def part(body: dict[str, Any]) -> dict[str, Any]:
             part_response = await scheduler.run_llm(lambda: model_post(
-                model, f"{MODEL_WORKER_URL}/v1/explain/part", json=body, timeout=120,
+                model, f"{MODEL_WORKER_URL}/v1/explain/part", json=body, timeout=180,
             ))
             if part_response.status_code >= 400:
                 raise response_failure("model_http", "model_http_error", part_response)
