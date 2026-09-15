@@ -37,9 +37,10 @@ def test_self_introduced_person_is_not_a_technical_term() -> None:
 @pytest.mark.asyncio
 async def test_group_caps_model_generated_glossary_to_key_concepts() -> None:
     definition_calls = 0
+    largest_definition_batch = 0
 
     async def call(body: dict[str, Any]) -> dict[str, Any]:
-        nonlocal definition_calls
+        nonlocal definition_calls, largest_definition_batch
         provider = "ollama:synthetic@cuda"
         if body["phase"] == "prose":
             return {
@@ -52,6 +53,9 @@ async def test_group_caps_model_generated_glossary_to_key_concepts() -> None:
             return {"provider": provider, "term": body["original_term"], "definition": "定义"}
         if body["phase"] == "definitions":
             definition_calls += 1
+            largest_definition_batch = max(
+                largest_definition_batch, len(body["original_terms"]),
+            )
             return {
                 "provider": provider,
                 "definitions": [{
@@ -69,7 +73,8 @@ async def test_group_caps_model_generated_glossary_to_key_concepts() -> None:
         }],
         "target_language": "zh-CN",
     }, call)
-    assert definition_calls == 2
+    assert definition_calls == 4
+    assert largest_definition_batch == 2
     assert len(result["terms"]) == 8
 
 

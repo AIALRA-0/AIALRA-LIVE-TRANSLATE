@@ -11,6 +11,7 @@ from workers.model_worker.terminology import matching_technical_terms
 
 PartCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 MAX_GROUP_TERMS = 8
+MAX_DEFINITION_BATCH = 2
 
 
 def contains_term(term: str, source: str) -> bool:
@@ -225,7 +226,7 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         first = unresolved.pop(0)
         batch = [first]
         for candidate in list(unresolved):
-            if len(batch) == 4:
+            if len(batch) == MAX_DEFINITION_BATCH:
                 break
             if candidate["text"] == first["text"] and candidate["context"] == first["context"]:
                 batch.append(candidate)
