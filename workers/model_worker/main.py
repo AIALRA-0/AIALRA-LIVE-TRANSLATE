@@ -1945,6 +1945,38 @@ def _uses_requested_explanation_language(
     return isinstance(summary, str) and any("\u4e00" <= char <= "\u9fff" for char in summary)
 
 
+def _redundant_bilingual_term(value: object) -> bool:
+    """Reject labels such as ``TSMC (TSMC)`` before Core sees the result."""
+
+    if not isinstance(value, str):
+        return False
+    for opening, closing in (("(", ")"), ("（", "）")):
+        if opening not in value or not value.rstrip().endswith(closing):
+            continue
+        left, right = value.rsplit(opening, 1)
+        right = right.rstrip()[:-1]
+        if left.strip() and left.strip().casefold() == right.strip().casefold():
+            return True
+    return False
+
+
+def _term_meets_explanation_contract(item: object, target_language: str) -> bool:
+    """Mirror Core's learner-facing term gate at the model boundary."""
+
+    if not isinstance(item, dict):
+        return False
+    name = item.get("term")
+    definition = item.get("explanation")
+    if not isinstance(name, str) or not name.strip() or not isinstance(definition, str):
+        return False
+    definition = definition.strip()
+    if not definition or _redundant_bilingual_term(name):
+        return False
+    if target_language.lower().startswith("zh"):
+        return len(definition) >= 50 and definition.count("；") >= 2
+    return True
+
+
 def _bind_explanation_sources(
     raw: dict[str, Any], request: ExplanationRequest, *, drop_invalid_terms: bool = False,
 ) -> dict[str, Any] | None:
@@ -1985,6 +2017,10 @@ def _bind_explanation_sources(
             if drop_invalid_terms:
                 continue
             return None
+        if drop_invalid_terms and not _term_meets_explanation_contract(
+            item, request.target_language,
+        ):
+            continue
         evidence = item.get("evidence")
         if not isinstance(evidence, list) or not evidence:
             if drop_invalid_terms:
@@ -2045,6 +2081,16 @@ def _explanation_candidate_ok(
     *,
     drop_invalid_terms: bool = False,
 ) -> bool:
+    terms = raw.get("terms", raw.get("rare_terms", []))
+    if (
+        not drop_invalid_terms
+        and isinstance(terms, list)
+        and any(
+            not _term_meets_explanation_contract(item, request.target_language)
+            for item in terms
+        )
+    ):
+        return False
     bound = _bind_explanation_sources(
         raw, request, drop_invalid_terms=drop_invalid_terms,
     )

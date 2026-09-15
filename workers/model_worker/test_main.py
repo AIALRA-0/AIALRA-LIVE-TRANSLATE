@@ -593,6 +593,33 @@ def test_explanation_can_keep_complete_summary_after_term_evidence_repair_fails(
     assert bound["terms"] == []
 
 
+def test_explanation_retries_then_drops_terms_that_core_would_reject() -> None:
+    request = ExplanationRequest(
+        segments=[EvidenceSegment(id="first", text="TSMC manufactures semiconductors.")],
+        target_language="zh-CN",
+    )
+    raw = {
+        "sections": [{"source_indexes": [0], "explanation": "台积电制造半导体。"}],
+        "terms": [{
+            "term": "TSMC（TSMC）",
+            "explanation": "一家芯片公司。",
+            "evidence": [{
+                "kind": "segment", "index": 0,
+                "quote": "TSMC manufactures semiconductors.",
+            }],
+        }],
+    }
+    assert not model_worker._explanation_candidate_ok(raw, request)
+    assert model_worker._explanation_candidate_ok(
+        raw, request, drop_invalid_terms=True,
+    )
+    bound = model_worker._bind_explanation_sources(
+        raw, request, drop_invalid_terms=True,
+    )
+    assert bound is not None
+    assert bound["terms"] == []
+
+
 @pytest.mark.parametrize("indexes", [[0], [0, 0], [1, 0], [0, 2], [0, True]])
 def test_explanation_rejects_missing_duplicated_or_reordered_source_coverage(
     indexes: list[object],
