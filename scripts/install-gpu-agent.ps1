@@ -9,6 +9,9 @@ param(
     [string]$TranslationProvider = "ollama",
     [string]$HymtModel = "tencent/HY-MT1.5-1.8B",
     [string]$HymtDevice = "cuda",
+    [ValidateSet("transformers", "ollama", "gguf")]
+    [string]$HymtRuntime = "transformers",
+    [string]$HymtOllamaModel = "hy-mt1.5:1.8b-q8",
     [bool]$AllowAsrLlmOverlap = $false,
     [string]$ExplanationModel = "qwen3.5:9b",
     [string]$SummaryModel = "qwen2.5:14b-instruct",
@@ -27,7 +30,11 @@ if (![string]::IsNullOrWhiteSpace($WorkerToken)) {
 if (!(Test-Path -LiteralPath $secretFile -PathType Leaf)) { throw "请先运行 initialize-gpu-agent-secret.ps1" } # Never install a task that cannot authenticate.
 $ollamaTags = Invoke-RestMethod -Uri "$($OllamaUrl.TrimEnd('/'))/api/tags" -TimeoutSec 10 # Fail installation before creating an unusable login task.
 $availableModels = @($ollamaTags.models | ForEach-Object name)
-$requiredModels = @($OllamaModel, $ExplanationModel, $SummaryModel, $VisionModel) | Select-Object -Unique
+$requiredModels = @($OllamaModel, $ExplanationModel, $SummaryModel, $VisionModel)
+if ($TranslationProvider -in @("hy-mt", "hymt", "hy_mt") -and $HymtRuntime -in @("ollama", "gguf")) {
+    $requiredModels += $HymtOllamaModel
+}
+$requiredModels = $requiredModels | Select-Object -Unique
 $missingModels = @($requiredModels | Where-Object { $_ -notin $availableModels })
 if ($missingModels.Count -gt 0) { throw "Ollama 缺少真实模型: $($missingModels -join ', ')" }
 
@@ -45,6 +52,8 @@ $settings = New-ScheduledTaskSettingsSet -RestartCount 6 -RestartInterval (New-T
 [Environment]::SetEnvironmentVariable("AIALRA_TRANSLATION_PROVIDER", $TranslationProvider, "User") # Persist the selected translation provider.
 [Environment]::SetEnvironmentVariable("AIALRA_HYMT_MODEL", $HymtModel, "User") # Persist the dedicated translation checkpoint name.
 [Environment]::SetEnvironmentVariable("AIALRA_HYMT_DEVICE", $HymtDevice, "User") # Require the selected translation execution device at startup.
+[Environment]::SetEnvironmentVariable("AIALRA_HYMT_RUNTIME", $HymtRuntime, "User") # Select the measured runtime without changing the product provider.
+[Environment]::SetEnvironmentVariable("AIALRA_HYMT_OLLAMA_MODEL", $HymtOllamaModel, "User") # Persist the official quantized checkpoint alias.
 $overlapValue = if ($AllowAsrLlmOverlap) { "true" } else { "false" }
 [Environment]::SetEnvironmentVariable("AIALRA_ALLOW_ASR_LLM_OVERLAP", $overlapValue, "User") # GPU overlap remains an explicit opt-in on the shared 16 GB card.
 [Environment]::SetEnvironmentVariable("AIALRA_EXPLANATION_MODEL", $ExplanationModel, "User") # Keep rolling explanations on the measured real-time tier.
@@ -60,6 +69,8 @@ $env:AIALRA_ASR_DEVICE = $AsrDevice
 $env:AIALRA_TRANSLATION_PROVIDER = $TranslationProvider
 $env:AIALRA_HYMT_MODEL = $HymtModel
 $env:AIALRA_HYMT_DEVICE = $HymtDevice
+$env:AIALRA_HYMT_RUNTIME = $HymtRuntime
+$env:AIALRA_HYMT_OLLAMA_MODEL = $HymtOllamaModel
 $env:AIALRA_ALLOW_ASR_LLM_OVERLAP = $overlapValue
 $env:AIALRA_EXPLANATION_MODEL = $ExplanationModel
 $env:AIALRA_SUMMARY_MODEL = $SummaryModel

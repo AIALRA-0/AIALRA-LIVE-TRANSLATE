@@ -287,6 +287,22 @@ async def test_invalid_optional_definition_is_dropped_without_losing_prose() -> 
 
 
 @pytest.mark.asyncio
+async def test_malformed_optional_definition_batch_does_not_discard_prose() -> None:
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        if body["phase"] == "prose":
+            return {"provider": "ollama:synthetic@cuda", "prose": "完整解释",
+                    "original_terms": ["alpha", "beta"]}
+        return {"provider": "ollama:synthetic@cuda", "definitions": []}
+
+    result = await assemble_explanation({
+        "segments": [{"id": "a", "text": "alpha and beta are compared."}],
+        "target_language": "zh-CN",
+    }, call)
+    assert result["paragraph_summary"] == "完整解释"
+    assert result["terms"] == []
+
+
+@pytest.mark.asyncio
 async def test_segment_and_page_receive_one_group_synthesis() -> None:
     phases: list[str] = []
 
@@ -325,16 +341,27 @@ async def test_failed_group_synthesis_never_publishes_piece_drafts() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["foreign_term", "changed_provider"])
-async def test_bad_part_never_returns_a_partial_card(failure: str) -> None:
+async def test_changed_provider_never_returns_a_partial_card() -> None:
     async def call(body: dict[str, Any]) -> dict[str, Any]:
         if body["phase"] == "prose":
             return {"provider": "ollama:synthetic@cuda", "prose": "完整解释",
-                    "original_terms": ["unknown" if failure == "foreign_term" else "latch"]}
-        return {"provider": "ollama:other@cuda" if failure == "changed_provider"
-                else "ollama:synthetic@cuda", "term": "锁存器",
+                    "original_terms": ["latch"]}
+        return {"provider": "ollama:other@cuda", "term": "锁存器",
                 "definition": COMPLETE_DEFINITION}
 
     with pytest.raises(ValueError):
         await assemble_explanation({"segments": [{"id": "a", "text": "A latch."}],
                                     "target_language": "zh-CN"}, call)
+
+
+@pytest.mark.asyncio
+async def test_foreign_optional_term_is_dropped_without_losing_complete_prose() -> None:
+    async def call(_body: dict[str, Any]) -> dict[str, Any]:
+        return {"provider": "ollama:synthetic@cuda", "prose": "完整解释",
+                "original_terms": ["unknown"]}
+
+    result = await assemble_explanation({
+        "segments": [{"id": "a", "text": "A latch."}], "target_language": "zh-CN",
+    }, call)
+    assert result["paragraph_summary"] == "完整解释"
+    assert result["terms"] == []

@@ -11,14 +11,19 @@ if (!$createdMutex) {
 $shellPath = (Get-Process -Id $PID).Path # Child scripts use the same PowerShell runtime.
 $workerScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-worker.ps1") # Quote paths because the workspace may contain spaces.
 $agentScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-gpu-agent.ps1")
-$speakerKeys = @("AIALRA_SPEAKER_MODEL_PATH", "AIALRA_SPEAKER_SEGMENTATION_PATH")
-foreach ($speakerKey in $speakerKeys) {
-    $currentValue = [Environment]::GetEnvironmentVariable($speakerKey, "Process")
-    if ([string]::IsNullOrWhiteSpace($currentValue)) {
-        $savedValue = [Environment]::GetEnvironmentVariable($speakerKey, "User")
-        if (![string]::IsNullOrWhiteSpace($savedValue)) {
-            [Environment]::SetEnvironmentVariable($speakerKey, $savedValue, "Process")
-        }
+$runtimeKeys = @(
+    "AIALRA_OLLAMA_URL", "AIALRA_OLLAMA_MODEL", "AIALRA_ASR_PROVIDER", "AIALRA_ASR_MODEL",
+    "AIALRA_ASR_DEVICE", "AIALRA_TRANSLATION_PROVIDER", "AIALRA_HYMT_MODEL",
+    "AIALRA_HYMT_DEVICE", "AIALRA_HYMT_RUNTIME", "AIALRA_HYMT_OLLAMA_MODEL",
+    "AIALRA_ALLOW_ASR_LLM_OVERLAP", "AIALRA_EXPLANATION_MODEL", "AIALRA_SUMMARY_MODEL",
+    "AIALRA_VISION_MODEL", "AIALRA_SPEAKER_MODEL_PATH", "AIALRA_SPEAKER_SEGMENTATION_PATH"
+)
+foreach ($runtimeKey in $runtimeKeys) {
+    # The installer-owned user setting is the production source of truth. A long-lived
+    # parent process can otherwise keep an obsolete model name after an upgrade.
+    $savedValue = [Environment]::GetEnvironmentVariable($runtimeKey, "User")
+    if (![string]::IsNullOrWhiteSpace($savedValue)) {
+        [Environment]::SetEnvironmentVariable($runtimeKey, $savedValue, "Process")
     }
 }
 $restartDelaySeconds = 1
@@ -26,6 +31,8 @@ $ollamaUrl = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_URL)) { "http:/
 $ollamaModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_MODEL)) { "qwen2.5:7b-instruct" } else { $env:AIALRA_OLLAMA_MODEL }
 $translationProvider = if ([string]::IsNullOrWhiteSpace($env:AIALRA_TRANSLATION_PROVIDER)) { "ollama" } else { $env:AIALRA_TRANSLATION_PROVIDER }
 $hymtModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_HYMT_MODEL)) { "tencent/HY-MT1.5-1.8B" } else { $env:AIALRA_HYMT_MODEL }
+$hymtRuntime = if ([string]::IsNullOrWhiteSpace($env:AIALRA_HYMT_RUNTIME)) { "transformers" } else { $env:AIALRA_HYMT_RUNTIME }
+$hymtOllamaModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_HYMT_OLLAMA_MODEL)) { "hy-mt1.5:1.8b-q8" } else { $env:AIALRA_HYMT_OLLAMA_MODEL }
 $explanationModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_EXPLANATION_MODEL)) { "qwen3.5:9b" } else { $env:AIALRA_EXPLANATION_MODEL }
 $summaryModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MODEL)) { "qwen2.5:14b-instruct" } else { $env:AIALRA_SUMMARY_MODEL }
 $visionModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_VISION_MODEL)) { "qwen3-vl:8b-instruct" } else { $env:AIALRA_VISION_MODEL }
@@ -36,7 +43,11 @@ if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_HTTP_TIMEOUT_SECONDS)) { $e
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MAX_TOKENS)) { $env:AIALRA_SUMMARY_MAX_TOKENS = "420" }
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_CONTEXT_TOKENS)) { $env:AIALRA_SUMMARY_CONTEXT_TOKENS = "3072" }
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_ALLOW_ASR_LLM_OVERLAP)) { $env:AIALRA_ALLOW_ASR_LLM_OVERLAP = "false" }
-$requiredModels = @($ollamaModel, $explanationModel, $summaryModel, $visionModel) | Select-Object -Unique
+$requiredModels = @($ollamaModel, $explanationModel, $summaryModel, $visionModel)
+if ($translationProvider -in @("hy-mt", "hymt", "hy_mt") -and $hymtRuntime -in @("ollama", "gguf")) {
+    $requiredModels += $hymtOllamaModel
+}
+$requiredModels = $requiredModels | Select-Object -Unique
 
 function Test-OllamaReady {
     try {
@@ -64,11 +75,13 @@ function Start-OwnedOllama {
 }
 
 function Initialize-LocalProviders {
-    # A silent ASR probe is correctly filtered before inference, so it cannot
-    # warm model weights. Load realtime providers explicitly before leasing jobs.
+    # Load realtime weights explicitly before leasing jobs. Keep each phase named so
+    # the supervisor can distinguish a model-load failure from an endpoint probe.
+    $script:failureStage = "provider_model_load"
     [void](Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/warmup" -Method Post -TimeoutSec 180)
-    # Load ASR before the agent can lease production audio, then load the GPU LLM,
-    # and run ASR once more after GPU initialization has settled.
+    # The silent request validates the ASR endpoint and provider without creating text.
+    # It does not load weights; /v1/warmup already performed that operation.
+    $script:failureStage = "provider_asr_probe"
     $silentPcm = [Convert]::ToBase64String([byte[]]::new(32000))
     $asrBody = @{
         pcm_s16le_base64 = $silentPcm
@@ -88,11 +101,12 @@ function Initialize-LocalProviders {
     # Shared mode is already warmed at the worker's exact context size. A second
     # unconfigured generate call can reload its runner with a different KV cache.
     if ($translationProvider -eq "ollama" -and $env:AIALRA_SHARED_RESIDENT_MODELS -notin @("1", "true")) {
+        $script:failureStage = "provider_ollama_probe"
         [void](Invoke-RestMethod -Uri "$ollamaUrl/api/generate" -Method Post -ContentType "application/json" -Body $ollamaBody -TimeoutSec 120)
     }
-    [void](Invoke-RestMethod -Uri "http://127.0.0.1:8790/v1/asr/transcribe" -Method Post -ContentType "application/json" -Body $asrBody -TimeoutSec 120)
 
     if ($translationProvider -in @("hy-mt", "hymt", "hy_mt")) {
+        $script:failureStage = "provider_translation_probe"
         $translationBody = @{
             text = "Attention uses context."
             source_language = "en"

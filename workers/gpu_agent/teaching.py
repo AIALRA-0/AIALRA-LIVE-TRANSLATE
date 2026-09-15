@@ -166,12 +166,12 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         prose.append(paragraph.strip())
         for term in terms:
             if not isinstance(term, str) or not contains_term(term, piece):
-                raise ValueError("teaching_term_source_invalid")
+                continue
             if person_reference(term, piece):
                 continue
             matching = [source for source in sources if contains_term(term, source["text"])]
             if not matching:
-                raise ValueError("teaching_term_source_invalid")
+                continue
             key = " ".join(term.split()).casefold()
             record = term_sources.setdefault(key, {
                 "original_term": term, "text": piece, "context": context,
@@ -295,13 +295,13 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                 continue
             generated = result.get("definitions")
             if not isinstance(generated, list) or len(generated) != len(batch):
-                raise ValueError("teaching_definitions_invalid")
+                continue
             for term_source, item in zip(batch, generated, strict=True):
                 if (
                     not isinstance(item, dict)
                     or item.get("original_term") != term_source["original_term"]
                 ):
-                    raise ValueError("teaching_definitions_invalid")
+                    continue
                 append_definition(term_source, item.get("term"), item.get("definition"))
     detailed_prose = "\n\n".join(prose)
     if len(chunks) > 1 and len(detailed_prose.encode()) <= 3500:

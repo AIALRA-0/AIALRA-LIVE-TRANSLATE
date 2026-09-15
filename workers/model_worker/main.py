@@ -166,6 +166,8 @@ ASR_BEST_OF = max(1, min(5, int(os.getenv("AIALRA_ASR_BEST_OF", str(ASR_BEAM_SIZ
 TRANSLATION_PROVIDER = os.getenv("AIALRA_TRANSLATION_PROVIDER", "ollama").strip().casefold()
 HYMT_MODEL = os.getenv("AIALRA_HYMT_MODEL", "tencent/HY-MT1.5-1.8B")
 HYMT_DEVICE = os.getenv("AIALRA_HYMT_DEVICE", "cuda")
+HYMT_RUNTIME = os.getenv("AIALRA_HYMT_RUNTIME", "transformers").strip().casefold()
+HYMT_OLLAMA_MODEL = os.getenv("AIALRA_HYMT_OLLAMA_MODEL", "hy-mt1.5:1.8b-q8")
 LLM_DEVICE = os.getenv("AIALRA_LLM_DEVICE", "cuda")
 
 _asr_model: Any | None = None
@@ -412,6 +414,7 @@ async def course_question(request: CourseQuestionRequest) -> CourseQuestionRespo
     if not shared:
         await _unload_ollama_model(VISION_MODEL)
         await _unload_ollama_model(SUMMARY_MODEL)
+        await _unload_realtime_translation_model(EXPLANATION_MODEL)
         await asyncio.to_thread(_release_asr_model_sync)
     ids = {segment.id for segment in request.segments}
     system = (
@@ -448,7 +451,7 @@ async def course_question(request: CourseQuestionRequest) -> CourseQuestionRespo
         )
     finally:
         if not shared:
-            await _restore_realtime_translation_model(EXPLANATION_MODEL)
+            await _restore_realtime_models(EXPLANATION_MODEL)
     if value is None:
         raise HTTPException(503, "course_question_contract_invalid")
     return CourseQuestionResponse(**value, provider=f"ollama:{EXPLANATION_MODEL}@{LLM_DEVICE}")
@@ -524,7 +527,10 @@ async def health() -> HealthResponse:
 
     asr_available = _configured_asr_importable()
     ollama_available = await _ollama_available()
-    ollama_gpu_resident = await _ollama_gpu_resident(TRANSLATION_MODEL)
+    realtime_ollama_model = _realtime_ollama_translation_model()
+    ollama_gpu_resident = bool(
+        realtime_ollama_model and await _ollama_gpu_resident(realtime_ollama_model)
+    )
     translation_available = _configured_translation_importable()
     busy = any(not task.done() for task in _active_gpu_calls.values())
     return HealthResponse(
@@ -545,7 +551,11 @@ async def health() -> HealthResponse:
             for lane, task in _active_gpu_calls.items()
         ),
         realtime_models_ready=(_qwen_asr_model is not None or _asr_model is not None)
-        and (ollama_gpu_resident if TRANSLATION_PROVIDER == "ollama" else _hymt_model is not None),
+        and (
+            ollama_gpu_resident
+            if realtime_ollama_model is not None
+            else _hymt_model is not None
+        ),
     )
 
 
@@ -558,19 +568,23 @@ async def warmup() -> dict[str, bool]:
             _get_qwen_asr_model()
         else:
             _get_asr_model()
-        if TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"}:
+        if (
+            TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"}
+            and not _hymt_uses_ollama()
+        ):
             _get_hymt_runtime()
     try:
         await asyncio.to_thread(load)
-        if TRANSLATION_PROVIDER == "ollama":
+        realtime_ollama_model = _realtime_ollama_translation_model()
+        if realtime_ollama_model is not None:
             async with httpx.AsyncClient(timeout=90) as client:
                 response = await client.post(f"{OLLAMA_URL}/api/generate", json={
-                    "model": TRANSLATION_MODEL, "prompt": "", "keep_alive": -1,
+                    "model": realtime_ollama_model, "prompt": "", "keep_alive": -1,
                     "stream": False,
                     "options": {"num_ctx": 8192 if _shared_resident_models() else 4096},
                 })
                 response.raise_for_status()
-            if not await _ollama_gpu_resident(TRANSLATION_MODEL):
+            if not await _ollama_gpu_resident(realtime_ollama_model):
                 raise HTTPException(503, "translation_gpu_warmup_unverified")
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         raise HTTPException(503, "realtime_model_warmup_failed") from error
@@ -637,7 +651,10 @@ async def translate(request: TranslationRequest) -> TranslationResponse:
                 status_code=503, detail="configured translation provider is unavailable"
             )
         try:
-            translation_text = await asyncio.to_thread(_translate_hymt_sync, request)
+            if _hymt_uses_ollama():
+                translation_text = await _translate_hymt_ollama(request)
+            else:
+                translation_text = await asyncio.to_thread(_translate_hymt_sync, request)
         except (ImportError, OSError, RuntimeError, ValueError) as error:
             raise HTTPException(
                 status_code=503, detail="dedicated translation provider failed"
@@ -820,6 +837,7 @@ async def teaching_part(request: TeachingPartRequest) -> TeachingPartResponse:
     if not shared:
         await _unload_ollama_model(VISION_MODEL)
         await _unload_ollama_model(SUMMARY_MODEL)
+        await _unload_realtime_translation_model(EXPLANATION_MODEL)
         await asyncio.to_thread(_release_asr_model_sync)
     try:
         result = await generate_part(request, _ollama_json, EXPLANATION_MODEL, LLM_DEVICE)
@@ -827,7 +845,7 @@ async def teaching_part(request: TeachingPartRequest) -> TeachingPartResponse:
         if not shared:
             # An ASR request can run between parts; free Ollama VRAM before
             # releasing the GPU lane instead of stacking two model families.
-            await _restore_realtime_translation_model(EXPLANATION_MODEL)
+            await _restore_realtime_models(EXPLANATION_MODEL)
     if result is None:
         raise HTTPException(503, "teaching_part_contract_invalid")
     return result
@@ -841,6 +859,7 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
     if not _shared_resident_models():
         await _unload_ollama_model(VISION_MODEL)
         await _unload_ollama_model(SUMMARY_MODEL)
+        await _unload_realtime_translation_model(EXPLANATION_MODEL)
     # Explanation is a background lane too. Keeping the dedicated ASR and MT
     # weights resident while loading Ollama exhausts a 16 GiB GPU and stalls
     # even short material explanations. The endpoint already holds the GPU gate.
@@ -992,7 +1011,7 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
             ),
         )
     finally:
-        await _restore_realtime_translation_model(EXPLANATION_MODEL)
+        await _restore_realtime_models(EXPLANATION_MODEL)
     if isinstance(result, dict):
         bound = _bind_explanation_sources(result, request, drop_invalid_terms=True)
         normalized = _normalize_explanation(bound, segment_ids, page_ids) if bound else None
@@ -1010,11 +1029,9 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
     if not _shared_resident_models():
         await _unload_ollama_model(VISION_MODEL)
         await _unload_ollama_model(EXPLANATION_MODEL)
-    if TRANSLATION_PROVIDER == "ollama" and SUMMARY_MODEL != TRANSLATION_MODEL:
-        # Remove the resident realtime model before loading 14B.  Relying on
-        # Ollama's eviction heuristics made the one-shot path sensitive to the
-        # exact lecture history and left too little headroom for CUDA ASR.
-        await _unload_ollama_model(TRANSLATION_MODEL)
+    # Remove the resident realtime model before loading 14B. Relying on
+    # provider eviction made this path sensitive to the exact lecture history.
+    await _unload_realtime_translation_model(SUMMARY_MODEL)
     # Whisper keeps a CUDA model resident during a recording.  Release it before
     # loading the one-shot summary model so the 16 GB card does not spend the
     # entire timeout evicting ASR allocations while Ollama is still cold-starting.
@@ -1085,7 +1102,7 @@ async def summarize(request: SummaryRequest) -> SummaryResponse:
             and _has_nonempty_list(payload, "key_points"),
         )
     finally:
-        await _restore_realtime_translation_model(SUMMARY_MODEL)
+        await _restore_realtime_models(SUMMARY_MODEL)
     if not isinstance(result, dict):
         raise HTTPException(status_code=503, detail="local Ollama summary is unavailable")
     terminology: list[RareTerm] = []
@@ -1167,6 +1184,8 @@ def _configured_asr_importable() -> bool:
 def _hymt_importable() -> bool:
     """Check the dedicated translation runtime without downloading model weights."""
 
+    if _hymt_uses_ollama():
+        return HYMT_DEVICE.casefold() == "cuda"
     try:
         import torch
         import transformers  # noqa: F401
@@ -1189,8 +1208,26 @@ def _asr_provider_name() -> str:
 
 def _translation_provider_name() -> str:
     if TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"}:
+        if _hymt_uses_ollama():
+            return f"hy-mt:{HYMT_OLLAMA_MODEL}@{HYMT_DEVICE}"
         return f"hy-mt:{HYMT_MODEL}@{HYMT_DEVICE}"
     return f"ollama:{TRANSLATION_MODEL}@{LLM_DEVICE}"
+
+
+def _hymt_uses_ollama() -> bool:
+    """The official quantized checkpoint keeps the dedicated MT path inside 16 GB VRAM."""
+
+    return HYMT_RUNTIME in {"ollama", "gguf"}
+
+
+def _realtime_ollama_translation_model() -> str | None:
+    """Return the actual low-latency Ollama model without relabeling dedicated MT as an LLM."""
+
+    if TRANSLATION_PROVIDER == "ollama":
+        return TRANSLATION_MODEL
+    if TRANSLATION_PROVIDER in {"hy-mt", "hymt", "hy_mt"} and _hymt_uses_ollama():
+        return HYMT_OLLAMA_MODEL
+    return None
 
 
 def _get_asr_model() -> Any:
@@ -1429,16 +1466,19 @@ def _translate_hymt_sync(request: TranslationRequest) -> str:
     if device is None:
         device = torch.device("cuda:0" if HYMT_DEVICE.casefold() == "cuda" else "cpu")
     inputs = inputs.to(device)
+    attention_mask = torch.ones_like(inputs, dtype=torch.long, device=device)
     started = time.monotonic()
     with torch.inference_mode():
         generated = model.generate(
-            inputs,
+            input_ids=inputs,
+            attention_mask=attention_mask,
             max_new_tokens=512,
             do_sample=False,
             num_beams=1,
             repetition_penalty=1.05,
             max_time=45.0,
-            pad_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
         )
     if time.monotonic() - started >= 45.0:
         raise RuntimeError("translation_inference_deadline")
@@ -1451,6 +1491,41 @@ def _translate_hymt_sync(request: TranslationRequest) -> str:
         if output.startswith(prefix):
             output = output[len(prefix) :].strip()
     return _clean_translation_output(output)
+
+
+async def _translate_hymt_ollama(request: TranslationRequest) -> str:
+    """Run Tencent's official Q8 GGUF with its native chat template and no JSON wrapper."""
+
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": HYMT_OLLAMA_MODEL,
+                        "stream": False,
+                        "keep_alive": -1,
+                        "messages": [{"role": "user", "content": _hymt_prompt(request)}],
+                        "options": {
+                            "temperature": 0 if attempt == 0 else 0.1,
+                            "seed": attempt,
+                            "num_predict": 512,
+                            "num_ctx": 4096,
+                        },
+                    },
+                )
+                response.raise_for_status()
+                envelope = response.json()
+                if envelope.get("done") is not True or envelope.get("done_reason") != "stop":
+                    continue
+                content = envelope.get("message", {}).get("content")
+                if isinstance(content, str) and content.strip():
+                    if not await _ollama_gpu_resident(HYMT_OLLAMA_MODEL):
+                        raise RuntimeError("translation_cuda_residency_unproven")
+                    return _clean_translation_output(content)
+        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            await asyncio.sleep(0.25)
+    raise RuntimeError("translation_inference_failed")
 
 
 def _translation_text_contract_ok(text: str, source_language: str, target_language: str) -> bool:
@@ -1688,13 +1763,22 @@ async def _unload_ollama_model(model: str) -> None:
         return
 
 
+async def _unload_realtime_translation_model(background_model: str) -> None:
+    """Make room for a background model while preserving the shared provider service."""
+
+    realtime_model = _realtime_ollama_translation_model()
+    if realtime_model is not None and realtime_model != background_model:
+        await _unload_ollama_model(realtime_model)
+
+
 async def _restore_realtime_translation_model(background_model: str) -> None:
     """Restore the low-latency model before a background lane releases its lock."""
 
-    if TRANSLATION_PROVIDER != "ollama":
+    realtime_model = _realtime_ollama_translation_model()
+    if realtime_model is None:
         await _unload_ollama_model(background_model)
         return
-    if background_model == TRANSLATION_MODEL:
+    if background_model == realtime_model:
         return
     await _unload_ollama_model(background_model)
     try:
@@ -1702,19 +1786,42 @@ async def _restore_realtime_translation_model(background_model: str) -> None:
             response = await client.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
-                    "model": TRANSLATION_MODEL,
+                    "model": realtime_model,
                     "prompt": "",
                     "keep_alive": -1,
                     "stream": False,
+                    "options": {"num_ctx": 4096},
                 },
             )
             response.raise_for_status()
-        if not await _ollama_gpu_resident(TRANSLATION_MODEL):
+        if not await _ollama_gpu_resident(realtime_model):
             raise RuntimeError("translation model did not return to the GPU")
     except (httpx.HTTPError, RuntimeError) as error:
         raise HTTPException(
             status_code=503,
             detail="local translation model could not be restored after background inference",
+        ) from error
+
+
+def _load_configured_asr_model_sync() -> None:
+    """Restore the selected ASR model without permitting a CPU fallback."""
+
+    if ASR_PROVIDER in {"qwen3-asr", "qwen_asr", "qwen3_asr"}:
+        _get_qwen_asr_model()
+    else:
+        _get_asr_model()
+
+
+async def _restore_realtime_models(background_model: str) -> None:
+    """Do not release a background lane until recording models are genuinely warm."""
+
+    await _restore_realtime_translation_model(background_model)
+    try:
+        await asyncio.to_thread(_load_configured_asr_model_sync)
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="local ASR model could not be restored after background inference",
         ) from error
 
 
@@ -1785,8 +1892,7 @@ async def _parse_image_with_vlm(data: bytes) -> AssetParseResponse:
         image.verify()
     await _unload_ollama_model(EXPLANATION_MODEL)
     await _unload_ollama_model(SUMMARY_MODEL)
-    if TRANSLATION_PROVIDER == "ollama" and VISION_MODEL != TRANSLATION_MODEL:
-        await _unload_ollama_model(TRANSLATION_MODEL)
+    await _unload_realtime_translation_model(VISION_MODEL)
     await asyncio.to_thread(_release_asr_model_sync)
     schema = {
         "type": "object",
@@ -1867,9 +1973,9 @@ async def _parse_image_with_vlm(data: bytes) -> AssetParseResponse:
     finally:
         # Release VLM weights and restore the resident realtime model even when
         # inference, JSON validation, or the GPU residency proof fails.
-        if TRANSLATION_PROVIDER == "ollama" and VISION_MODEL != TRANSLATION_MODEL:
+        if _realtime_ollama_translation_model() != VISION_MODEL:
             await _unload_ollama_model(VISION_MODEL)
-            await _restore_realtime_translation_model(VISION_MODEL)
+            await _restore_realtime_models(VISION_MODEL)
 
 
 def _parse_model_json(content: str) -> dict[str, Any] | None:

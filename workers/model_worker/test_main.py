@@ -274,6 +274,44 @@ def test_dedicated_translation_path_returns_plain_provider_result(
     assert result.provider == "hy-mt:test/hy-mt@cuda"
 
 
+@pytest.mark.asyncio
+async def test_quantized_hymt_keeps_dedicated_provider_and_native_plain_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_client = httpx.AsyncClient
+    request = model_worker.TranslationRequest(
+        text="Attention uses context.", source_language="en", target_language="zh-CN",
+    )
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        payload = json.loads(http_request.content)
+        assert payload["model"] == "synthetic-hymt-q8"
+        assert payload["messages"] == [{
+            "role": "user", "content": model_worker._hymt_prompt(request),
+        }]
+        assert "format" not in payload
+        return httpx.Response(200, json={
+            "done": True, "done_reason": "stop",
+            "message": {"content": "注意力会使用上下文。"},
+        })
+
+    async def resident(model: str) -> bool:
+        return model == "synthetic-hymt-q8"
+
+    monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "hy-mt")
+    monkeypatch.setattr(model_worker, "HYMT_RUNTIME", "ollama")
+    monkeypatch.setattr(model_worker, "HYMT_OLLAMA_MODEL", "synthetic-hymt-q8")
+    monkeypatch.setattr(model_worker, "HYMT_DEVICE", "cuda")
+    monkeypatch.setattr(model_worker, "_ollama_gpu_resident", resident)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(
+        **kwargs, transport=httpx.MockTransport(respond),
+    ))
+
+    result = await model_worker.translate(request)
+    assert result.text == "注意力会使用上下文。"
+    assert result.provider == "hy-mt:synthetic-hymt-q8@cuda"
+
+
 def test_same_language_translation_is_an_identity_result_without_model_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -757,6 +795,64 @@ def test_background_model_restores_translation_before_releasing(
     ]
 
 
+def test_background_model_restores_quantized_hymt_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(model_worker, "TRANSLATION_PROVIDER", "hy-mt")
+    monkeypatch.setattr(model_worker, "HYMT_RUNTIME", "ollama")
+    monkeypatch.setattr(model_worker, "HYMT_OLLAMA_MODEL", "synthetic-hymt-q8")
+
+    async def unload(model: str) -> None:
+        calls.append(f"unload:{model}")
+
+    class Response:
+        def raise_for_status(self) -> None:
+            calls.append("loaded:synthetic-hymt-q8")
+
+    class Client:
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, _url: str, *, json: dict[str, object]) -> Response:
+            assert json["model"] == "synthetic-hymt-q8"
+            return Response()
+
+    async def resident(model: str) -> bool:
+        calls.append(f"resident:{model}")
+        return True
+
+    monkeypatch.setattr(model_worker, "_unload_ollama_model", unload)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(model_worker, "_ollama_gpu_resident", resident)
+    asyncio.run(_restore_realtime_translation_model("background-model"))
+    assert calls == [
+        "unload:background-model", "loaded:synthetic-hymt-q8",
+        "resident:synthetic-hymt-q8",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_background_lane_restores_translation_and_asr_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def restore_translation(model: str) -> None:
+        calls.append(f"translation:{model}")
+
+    def restore_asr() -> None:
+        calls.append("asr")
+
+    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", restore_translation)
+    monkeypatch.setattr(model_worker, "_load_configured_asr_model_sync", restore_asr)
+    await model_worker._restore_realtime_models("background-model")
+    assert calls == ["translation:background-model", "asr"]
+
+
 def test_summary_contract_accepts_the_core_rolling_summary_limit() -> None:
     request = SummaryRequest(
         segments=[EvidenceSegment(id="segment-1", text="Forwarding reduces stalls.")],
@@ -817,6 +913,44 @@ def test_hymt_keeps_bounded_history_separate_from_the_current_translation() -> N
     assert "Text to translate:" not in prompt
     request.glossary = [model_worker.GlossaryConstraint(source="voltage", preferred="电压")]
     assert "voltage 翻译成 电压" in model_worker._hymt_prompt(request)
+
+
+def test_hymt_generation_preserves_native_padding_and_supplies_attention_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    captured: dict[str, Any] = {}
+
+    class Tokenizer:
+        eos_token_id = 120020
+        pad_token_id = 120002
+
+        def apply_chat_template(self, *_args: Any, **_kwargs: Any) -> Any:
+            return torch.tensor([[120000, 120006, 42, 120026]], dtype=torch.long)
+
+        def decode(self, _tokens: Any, *, skip_special_tokens: bool) -> str:
+            assert skip_special_tokens
+            return "注意力使用上下文。"
+
+    class Model:
+        device = torch.device("cpu")
+
+        def generate(self, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return torch.cat(
+                [kwargs["input_ids"], torch.tensor([[120020]], dtype=torch.long)], dim=1
+            )
+
+    monkeypatch.setattr(model_worker, "_get_hymt_runtime", lambda: (Tokenizer(), Model()))
+    result = model_worker._translate_hymt_sync(model_worker.TranslationRequest(
+        text="Attention uses context.", source_language="en", target_language="zh-CN",
+    ))
+
+    assert result == "注意力使用上下文。"
+    assert captured["pad_token_id"] == 120002
+    assert captured["eos_token_id"] == 120020
+    assert torch.equal(captured["attention_mask"], torch.ones_like(captured["input_ids"]))
 
 
 @pytest.mark.asyncio
@@ -1107,7 +1241,7 @@ async def test_explanation_repairs_term_evidence_before_preserving_valid_summary
     monkeypatch.setattr(model_worker, "_shared_resident_models", lambda: False)
     monkeypatch.setattr(model_worker, "_unload_ollama_model", no_op)
     monkeypatch.setattr(model_worker, "_release_asr_model_sync", lambda: None)
-    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", no_op)
+    monkeypatch.setattr(model_worker, "_restore_realtime_models", no_op)
     monkeypatch.setattr(model_worker, "_ollama_json", infer)
     result = await model_worker.explain(ExplanationRequest(
         segments=[EvidenceSegment(id="first", text="A cache stores reusable data.")],
@@ -1134,7 +1268,7 @@ async def test_group_explanation_prompt_names_every_required_source_index(
 
     monkeypatch.setattr(model_worker, "_unload_ollama_model", no_op)
     monkeypatch.setattr(model_worker, "_release_asr_model_sync", lambda: None)
-    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", no_op)
+    monkeypatch.setattr(model_worker, "_restore_realtime_models", no_op)
     monkeypatch.setattr(model_worker, "_ollama_json", infer)
     result = await model_worker.explain(ExplanationRequest(
         segments=[EvidenceSegment(id=f"synthetic-{index}", text=f"Point {index}.")
@@ -1169,7 +1303,7 @@ async def test_split_teaching_releases_realtime_weights_and_restores_gpu_lane(
     monkeypatch.setattr(model_worker, "_unload_ollama_model", unload)
     monkeypatch.setattr(model_worker, "_release_asr_model_sync", release)
     monkeypatch.setattr(model_worker, "generate_part", generate)
-    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", restore)
+    monkeypatch.setattr(model_worker, "_restore_realtime_models", restore)
     result = await model_worker.teaching_part(TeachingPartRequest(
         phase="prose", text="Synthetic lecture paragraph.", target_language="zh-CN",
     ))
@@ -1202,7 +1336,7 @@ async def test_explanation_releases_realtime_weights_before_loading_background_m
     monkeypatch.setattr(model_worker, "_unload_ollama_model", unload)
     monkeypatch.setattr(model_worker, "_release_asr_model_sync", release)
     monkeypatch.setattr(model_worker, "_ollama_json", infer)
-    monkeypatch.setattr(model_worker, "_restore_realtime_translation_model", restore)
+    monkeypatch.setattr(model_worker, "_restore_realtime_models", restore)
     model_worker._gpu_inflight = None
     await model_worker.explain(ExplanationRequest(
         segments=[EvidenceSegment(id="synthetic-segment", text="Forwarding reduces stalls.")],
