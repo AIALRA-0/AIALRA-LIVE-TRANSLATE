@@ -897,6 +897,11 @@ async def lane_loop(
                         int((time.monotonic() - started) * 1_000),
                         timings,
                     )
+                except JobExecutionError:
+                    # Completion already carries a bounded, privacy-safe reason.
+                    # Preserve it instead of collapsing it into the generic
+                    # gateway label through JobExecutionError's RuntimeError base.
+                    raise
                 except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as error:
                     # The result was produced locally, but the completion write
                     # is a gateway operation and must not be mislabeled as a
