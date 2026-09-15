@@ -61,7 +61,8 @@ Audio ingest, durable storage, acknowledgement, and stop control remain independ
 Prerequisites: Windows, Rust 1.95, Node.js 22, pnpm 10, Python 3.12, uv, NVIDIA CUDA, and Ollama
 
 ```powershell
-ollama pull qwen2.5:7b-instruct # Download source cleanup, translation, and rolling explanation
+ollama pull qwen2.5:7b-instruct # Download paragraph cleanup model
+ollama pull qwen3.5:9b # Download the locally contract-tested rolling explanation model
 ollama pull qwen2.5:14b-instruct # Download the final-course-summary model
 ollama pull qwen3-vl:8b-instruct # Download the local image-understanding model
 Copy-Item .env.example .env # Create a local configuration from reserved example values

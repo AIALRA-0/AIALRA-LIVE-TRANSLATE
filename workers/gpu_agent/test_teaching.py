@@ -133,7 +133,7 @@ async def test_reviewed_source_term_survives_an_empty_model_inventory() -> None:
 def test_source_pieces_preserve_every_character(text: str) -> None:
     parts = source_pieces(text)
     assert "".join(parts) == text
-    assert all(len(part.encode()) <= 1400 for part in parts)
+    assert all(len(part.encode()) <= 2800 for part in parts)
 
 
 @pytest.mark.asyncio
@@ -170,7 +170,7 @@ async def test_card_covers_all_sources_and_defines_repeated_term_only_once() -> 
 
 
 @pytest.mark.asyncio
-async def test_multiple_short_paragraphs_receive_group_synthesis() -> None:
+async def test_multiple_short_paragraphs_share_one_coherent_model_call() -> None:
     phases: list[str] = []
 
     async def call(body: dict[str, Any]) -> dict[str, Any]:
@@ -192,14 +192,14 @@ async def test_multiple_short_paragraphs_receive_group_synthesis() -> None:
         ],
         "target_language": "zh-CN",
     }, call)
-    assert phases == ["prose", "group"]
+    assert phases == ["prose"]
     assert result["paragraph_summary"].startswith("先说明电路测试")
 
 
 def test_group_chunking_retains_all_text_and_source_ownership() -> None:
     records = [{"id": str(i), "text": ("内容，条件，例子。" * 90) + str(i)} for i in range(5)]
     chunks = teaching_chunks(records)
-    assert all(len("\n\n".join(item["text"] for item in chunk).encode()) <= 1400
+    assert all(len("\n\n".join(item["text"] for item in chunk).encode()) <= 2800
                for chunk in chunks)
     for source in records:
         assert "".join(item["text"] for chunk in chunks for item in chunk
@@ -317,8 +317,8 @@ async def test_failed_group_synthesis_never_publishes_piece_drafts() -> None:
     with pytest.raises(ValueError, match="teaching_group_synthesis_invalid"):
         await assemble_explanation({
             "segments": [
-                {"id": "a", "text": "First premise."},
-                {"id": "b", "text": "Second conclusion."},
+                {"id": "a", "text": "First premise. " * 140},
+                {"id": "b", "text": "Second conclusion. " * 120},
             ],
             "target_language": "zh-CN",
         }, call)

@@ -69,7 +69,8 @@ flowchart TD
 先准备本地模型：
 
 ```powershell
-ollama pull qwen2.5:7b-instruct # 下载段落整理、翻译与滚动讲解模型
+ollama pull qwen2.5:7b-instruct # 下载段落整理模型
+ollama pull qwen3.5:9b # 下载经过本机合同测试的滚动讲解模型
 ollama pull qwen2.5:14b-instruct # 下载最终课程总结模型
 ollama pull qwen3-vl:8b-instruct # 下载本地图片理解模型
 ```

@@ -26,7 +26,7 @@ $ollamaUrl = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_URL)) { "http:/
 $ollamaModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_OLLAMA_MODEL)) { "qwen2.5:7b-instruct" } else { $env:AIALRA_OLLAMA_MODEL }
 $translationProvider = if ([string]::IsNullOrWhiteSpace($env:AIALRA_TRANSLATION_PROVIDER)) { "ollama" } else { $env:AIALRA_TRANSLATION_PROVIDER }
 $hymtModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_HYMT_MODEL)) { "tencent/HY-MT1.5-1.8B" } else { $env:AIALRA_HYMT_MODEL }
-$explanationModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_EXPLANATION_MODEL)) { "qwen2.5:7b-instruct" } else { $env:AIALRA_EXPLANATION_MODEL }
+$explanationModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_EXPLANATION_MODEL)) { "qwen3.5:9b" } else { $env:AIALRA_EXPLANATION_MODEL }
 $summaryModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_SUMMARY_MODEL)) { "qwen2.5:14b-instruct" } else { $env:AIALRA_SUMMARY_MODEL }
 $visionModel = if ([string]::IsNullOrWhiteSpace($env:AIALRA_VISION_MODEL)) { "qwen3-vl:8b-instruct" } else { $env:AIALRA_VISION_MODEL }
 # Keep a cold 14B load inside the asynchronous summary lane.  These defaults are

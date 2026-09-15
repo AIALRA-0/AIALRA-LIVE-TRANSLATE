@@ -54,14 +54,15 @@ AIALRA_HYMT_DEVICE=cuda
 切换前在 Windows 项目环境执行 `uv sync --extra dev --extra speech --extra dedicated-models`，再用现有 GPU Agent 启动脚本预热。专用模型的首次加载会明显慢于热运行；启动脚本会先完成 ASR、Ollama 和专用翻译预热，再允许 Agent 领取任务。RTX 4080 16 GB 上不把 HY-MT 7B 放入实时默认组合，避免多个模型争抢显存。
 
 ```powershell
-ollama pull qwen2.5:7b-instruct # Coherent paragraph translation and rolling explanations
+ollama pull qwen2.5:7b-instruct # Paragraph cleanup
+ollama pull qwen3.5:9b # Contract-tested rolling explanations
 ollama pull qwen2.5:14b-instruct # Final course summaries only
 ollama pull qwen3-vl:8b-instruct
 ```
 
-本机守护脚本会验证模型、主动启动 Ollama、完成 ASR 与 7B 预热，再让 GPU Agent 领取生产任务
+本机守护脚本会验证模型、主动启动 Ollama、完成 ASR、专用翻译与讲解模型预热，再让 GPU Agent 领取生产任务
 
-ASR 拥有最高优先级，7B 翻译和滚动讲解只接收服务端整理后的连贯段落，14B 最终总结和视觉模型保持低优先级单并发并按需卸载，避免多个大模型无约束常驻 16 GB 显存。生产 Agent 默认不允许 ASR 与翻译／Ollama 同时占用 GPU；只有在重新测量整套模型显存后，才通过 `AIALRA_ALLOW_ASR_LLM_OVERLAP=true` 显式开启重叠。
+ASR 拥有最高优先级，专用翻译和 9B 滚动讲解只接收服务端整理后的连贯段落，14B 最终总结和视觉模型保持低优先级单并发并按需卸载，避免多个大模型无约束常驻 16 GB 显存。生产 Agent 默认不允许 ASR 与翻译／Ollama 同时占用 GPU；只有在重新测量整套模型显存后，才通过 `AIALRA_ALLOW_ASR_LLM_OVERLAP=true` 显式开启重叠。
 
 这项门禁只覆盖 AIALRA 自己的任务通道。Paneltone 或其他程序如果也使用同一块 GPU，必须由它们接入同一个主机级 GPU 预约机制，或者在 AIALRA 录音期间暂停自己的 GPU 推理；当前仓库没有 Paneltone 的运行进程或代码，不能在这里假装完成跨项目互斥。
 

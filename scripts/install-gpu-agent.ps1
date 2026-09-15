@@ -10,7 +10,7 @@ param(
     [string]$HymtModel = "tencent/HY-MT1.5-1.8B",
     [string]$HymtDevice = "cuda",
     [bool]$AllowAsrLlmOverlap = $false,
-    [string]$ExplanationModel = "qwen2.5:7b-instruct",
+    [string]$ExplanationModel = "qwen3.5:9b",
     [string]$SummaryModel = "qwen2.5:14b-instruct",
     [string]$VisionModel = "qwen3-vl:8b-instruct"
 )

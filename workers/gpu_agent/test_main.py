@@ -93,7 +93,7 @@ def test_explanation_uses_bounded_parts_for_complete_group_coverage() -> None:
             }, GpuScheduler(asr_uses_gpu=False), "worker")
         assert result["evidence_segment_ids"] == ["first", "second"]
         assert result["paragraph_summary"] == "两段内容形成一个连贯的解释。"
-        assert paths == ["/v1/explain/part", "/v1/explain/part"]
+        assert paths == ["/v1/explain/part"]
 
     asyncio.run(scenario())
 

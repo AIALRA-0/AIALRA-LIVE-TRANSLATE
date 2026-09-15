@@ -322,7 +322,7 @@ if (translations.length !== paragraphs.length || paragraphs.length >= segments.l
 if (normalizedSources.length !== translations.length) gateFailures.push("source_normalization");
 if (explanations.length > Math.ceil(paragraphs.length / 4)) gateFailures.push("explanation_burst");
 if (!translationProviders.every((provider) => provider === "ollama:qwen2.5:7b-instruct@cuda")) gateFailures.push("translation_provider");
-if (!explanationProviders.every((provider) => provider === "ollama:qwen2.5:7b-instruct@cuda")) gateFailures.push("explanation_provider");
+if (!explanationProviders.every((provider) => provider === "ollama:qwen3.5:9b@cuda")) gateFailures.push("explanation_provider");
 if (!summaryProviders.every((provider) => provider === "ollama:qwen2.5:14b-instruct@cuda")) gateFailures.push("summary_provider");
 const summaryLatencyMode = summaryP95 == null
   ? "missing"

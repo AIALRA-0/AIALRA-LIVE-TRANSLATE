@@ -12,6 +12,7 @@ from workers.model_worker.terminology import matching_technical_terms
 PartCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 MAX_GROUP_TERMS = 8
 MAX_DEFINITION_BATCH = 2
+MAX_SOURCE_CHUNK_BYTES = 2800
 _BANNED_NARRATION = (
     "当我在讲解", "你会看到我所说", "老师说", "讲者提到",
     "本段话讲了", "本段内容讲了", "让我们来看",
@@ -65,7 +66,7 @@ def person_reference(term: str, source: str) -> bool:
     return any(re.search(pattern, source, re.IGNORECASE) for pattern in patterns)
 
 
-def source_pieces(text: str, capacity: int = 1400) -> list[str]:
+def source_pieces(text: str, capacity: int = MAX_SOURCE_CHUNK_BYTES) -> list[str]:
     """Split by byte capacity without dropping text; prefer an existing boundary."""
     pieces: list[str] = []
     remaining = text
@@ -113,7 +114,7 @@ def teaching_chunks(records: list[dict[str, str]]) -> list[list[dict[str, str]]]
     for source in records:
         for piece in source_pieces(source["text"]):
             size = len(piece.encode()) + (2 if pending else 0)
-            if pending and used + size > 1400:
+            if pending and used + size > MAX_SOURCE_CHUNK_BYTES:
                 chunks.append(pending)
                 pending, used = [], 0
             used += len(piece.encode()) + (2 if pending else 0)
@@ -303,7 +304,7 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                     raise ValueError("teaching_definitions_invalid")
                 append_definition(term_source, item.get("term"), item.get("definition"))
     detailed_prose = "\n\n".join(prose)
-    if (len(segments) > 1 or pages) and len(detailed_prose.encode()) <= 3500:
+    if len(chunks) > 1 and len(detailed_prose.encode()) <= 3500:
         try:
             guide = await generate({"phase": "group", "text": detailed_prose,
                                     "target_language": target})

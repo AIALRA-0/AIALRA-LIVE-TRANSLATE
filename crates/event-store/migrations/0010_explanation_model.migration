@@ -1,0 +1,4 @@
+UPDATE project_ai_policies
+SET local_explanation_model = 'qwen3.5:9b',
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE local_explanation_model IN ('qwen2.5:3b-instruct', 'qwen2.5:7b-instruct');

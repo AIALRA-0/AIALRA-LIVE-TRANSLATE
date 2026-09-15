@@ -23,6 +23,8 @@ const QUALITY_PIPELINE_MIGRATION: &str =
     include_str!("../migrations/0008_quality_pipeline.migration");
 const WORKSPACE_TRASH_MIGRATION: &str =
     include_str!("../migrations/0009_workspace_trash.migration");
+const EXPLANATION_MODEL_MIGRATION: &str =
+    include_str!("../migrations/0010_explanation_model.migration");
 
 // The duplicate-event check reads the immutable identity and lineage fields
 // together so a retransmission can be compared without silently widening its
@@ -167,6 +169,22 @@ impl EventStore {
             )?;
             transaction.commit()?;
         }
+        let explanation_model_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 10)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !explanation_model_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(EXPLANATION_MODEL_MIGRATION)
+                .context("apply explanation model migration")?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (10, ?1)",
+                [Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -280,7 +298,7 @@ impl EventStore {
             params![project.id, now.to_rfc3339()],
         )?;
         connection.execute(
-            "INSERT INTO project_ai_policies(project_id, updated_at) VALUES (?1, ?2)",
+            "INSERT INTO project_ai_policies(project_id, local_explanation_model, updated_at) VALUES (?1, 'qwen3.5:9b', ?2)",
             params![project.id, now.to_rfc3339()],
         )?;
         drop(connection);
@@ -1901,8 +1919,8 @@ impl EventStore {
         )?)
     }
 
-    /// Retry only versioned repair jobs rejected by the reference/evidence gate after that
-    /// exact contract has been repaired. Other historical content failures remain terminal.
+    /// Retry only current-version repair jobs that failed either a repaired content gate or a
+    /// transient provider call. Other historical and permanent failures remain terminal.
     pub fn requeue_failed_explanation_content_for_trigger(
         &self,
         session_id: &str,
@@ -1911,7 +1929,7 @@ impl EventStore {
         let now = Utc::now().to_rfc3339();
         let connection = self.lock()?;
         Ok(connection.execute(
-            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?3, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?3, completed_at = NULL WHERE session_id = ?1 AND job_type = 'explain' AND status = 'failed' AND last_error_kind = 'explanation_content_rejected' AND json_extract(input_json, '$.trigger') = ?2",
+            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?3, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?3, completed_at = NULL WHERE session_id = ?1 AND job_type = 'explain' AND status = 'failed' AND last_error_kind IN ('explanation_content_rejected', 'model_http_error', 'provider_unavailable') AND json_extract(input_json, '$.trigger') = ?2",
             params![session_id, trigger, now],
         )?)
     }
@@ -3891,6 +3909,16 @@ mod tests {
                 "quality_contract_v46",
                 "explanation_quality_rejected",
             ),
+            (
+                "matching-transient",
+                "quality_contract_v46",
+                "model_http_error",
+            ),
+            (
+                "old-transient",
+                "quality_contract_v45",
+                "provider_unavailable",
+            ),
         ] {
             let job = store
                 .enqueue_model_job(&NewModelJob {
@@ -3918,7 +3946,7 @@ mod tests {
                     "quality_contract_v46",
                 )
                 .unwrap(),
-            1
+            2
         );
         assert_eq!(
             store.get_model_job("matching").unwrap().unwrap().status,
@@ -3930,6 +3958,22 @@ mod tests {
         );
         assert_eq!(
             store.get_model_job("wrong-kind").unwrap().unwrap().status,
+            "failed"
+        );
+        assert_eq!(
+            store
+                .get_model_job("matching-transient")
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
+        );
+        assert_eq!(
+            store
+                .get_model_job("old-transient")
+                .unwrap()
+                .unwrap()
+                .status,
             "failed"
         );
     }
@@ -3960,6 +4004,13 @@ mod tests {
         let alice = store.list_projects("alice").unwrap();
         assert_eq!(alice.len(), 1);
         assert_eq!(alice[0].id, "project_alice");
+        assert_eq!(
+            store
+                .get_project_ai_policy("project_alice")
+                .unwrap()
+                .local_explanation_model,
+            "qwen3.5:9b"
+        );
         assert!(store.list_projects("unknown").unwrap().is_empty());
     }
 
