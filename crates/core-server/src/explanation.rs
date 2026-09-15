@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
-const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v46";
+const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v47";
+const COMPATIBLE_QUALITY_TRIGGER: &str = "quality_contract_v46";
 const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
 const MIN_REPAIR_GROUP_PARAGRAPHS: usize = 6;
 
@@ -141,7 +142,7 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
             .filter_map(|id| paragraph_text.get(id))
             .map(|text| text.chars().count())
             .sum();
-        if trigger == QUALITY_REPAIR_TRIGGER
+        if (trigger == QUALITY_REPAIR_TRIGGER || trigger == COMPATIBLE_QUALITY_TRIGGER)
             && ids.len() >= 4
             && !explanation_needs_quality_repair(&result, source_characters, chinese)
         {
@@ -230,6 +231,7 @@ pub(crate) fn explanation_needs_quality_repair(
             let definition = term["explanation"].as_str().unwrap_or_default();
             let name = term["term"].as_str().unwrap_or_default();
             definition.chars().count() < 50
+                || definition.chars().count() > 240
                 || definition.matches('；').count() < 2
                 || redundant_bilingual_name(name)
         })
@@ -500,6 +502,11 @@ mod tests {
             400,
             true,
         ));
+        assert!(super::explanation_needs_quality_repair(
+            &json!({"paragraph_summary": "这段内容先定义故障模型，再说明模型怎样把复杂电路抽象为可控制和可观察的测试对象，并进一步解释该抽象只覆盖测试目标，不等同于真实器件的全部物理行为", "terms": [{"term": "锁存器（Latch）", "explanation": format!("这是定义；{}；这里说明边界", "用于说明技术对象".repeat(40))}]}),
+            400,
+            true,
+        ));
         assert!(!super::explanation_needs_quality_repair(
             &json!({"paragraph_summary": "这段内容先定义故障模型，再说明模型怎样把复杂电路抽象为可控制和可观察的测试对象。抽象后的模型让工程师能围绕明确故障设计测试，但它只覆盖测试目标，不能代表真实器件中的全部物理行为，因此使用时还要保留模型适用范围和实际电路条件。", "terms": [{"explanation": "晶圆代工厂是按客户设计制造芯片的专业制造企业；它负责工艺开发、晶圆生产和质量控制；客户提供电路设计，代工厂用制造流程把设计变为芯片；它与销售自有品牌芯片的厂商不同"}]}),
             400,
@@ -597,6 +604,55 @@ mod tests {
                 .filter(|event| event.event_type == "explanation.card.created")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn v46_card_remains_compatible_when_its_terms_fit_the_tighter_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session-compatible-repair".to_owned(),
+                title: "Synthetic compatible repair".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for index in 0..4 {
+            state.emit_idempotent(
+                &format!("compatible-paragraph-{index}"),
+                "session-compatible-repair",
+                "fixture",
+                "paragraph.finalized",
+                index,
+                &format!("paragraph-{index}"),
+                None,
+                json!({"paragraph_id": format!("paragraph-{index}"), "text": "A complete synthetic technical paragraph used only to verify compatibility."}),
+            ).unwrap();
+        }
+        state.emit_idempotent(
+            "compatible-quality-card",
+            "session-compatible-repair",
+            "fixture",
+            "explanation.card.created",
+            0,
+            "compatible-card",
+            None,
+            json!({"trigger": "quality_contract_v46", "result": {
+                "paragraph_summary": "这段合成材料完整说明测试目标怎样决定故障模型，再说明测试向量怎样激励电路并观察输出，最后保留抽象模型不能覆盖全部物理缺陷这一适用边界，内容仅用于验证兼容版本不会被重复排队",
+                "terms": [{"term": "故障模型（Fault Model）", "explanation": "故障模型是对电路失效方式的抽象表示；它帮助测试流程选择需要激励和观察的目标；工程师按模型生成并评估测试向量；它适用于描述指定故障范围，不等同于器件中的全部物理缺陷"}],
+                "evidence_segment_ids": ["paragraph-0", "paragraph-1", "paragraph-2", "paragraph-3"]
+            }}),
+        ).unwrap();
+
+        assert_eq!(
+            super::enqueue_quality_repairs(&state, "session-compatible-repair").unwrap(),
+            0
         );
     }
 

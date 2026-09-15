@@ -33,7 +33,7 @@ def valid_definition(value: str, language: str) -> bool:
     return bool(
         text
         and (not language.casefold().startswith("zh")
-             or (len(text) >= 50 and text.count("；") >= 2))
+             or (50 <= len(text) <= 240 and text.count("；") >= 2))
     )
 
 

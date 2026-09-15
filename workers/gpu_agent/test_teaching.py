@@ -41,6 +41,7 @@ def test_agent_quality_gate_matches_core_contract() -> None:
     assert not valid_summary("过短", 240, "zh-CN")
     assert valid_definition(COMPLETE_DEFINITION, "zh-CN")
     assert not valid_definition("只有一句很短的定义", "zh-CN")
+    assert not valid_definition("这是定义；" + "用于说明技术对象" * 40 + "；这里保留边界", "zh-CN")
 
 
 def test_self_introduced_person_is_not_a_technical_term() -> None:

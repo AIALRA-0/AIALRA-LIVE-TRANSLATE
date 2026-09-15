@@ -145,7 +145,7 @@ def valid_definition(value: str, language: str) -> bool:
     return (
         requested_language(value, language)
         and (not language.casefold().startswith("zh")
-             or (len(value) >= 50 and value.count("；") >= 2))
+             or (50 <= len(value) <= 240 and value.count("；") >= 2))
     )
 
 
@@ -281,7 +281,7 @@ async def generate_part(
             instruction = definition_instruction
             properties = {
                 "term": {"type": "string", "minLength": 1, "maxLength": 160},
-                "definition": {"type": "string", "minLength": 1, "maxLength": 600},
+                "definition": {"type": "string", "minLength": 1, "maxLength": 240},
             }
             budget = 500
         else:
@@ -295,7 +295,7 @@ async def generate_part(
                 "properties": {
                     "original_term": {"type": "string", "enum": request.original_terms},
                     "term": {"type": "string", "minLength": 1, "maxLength": 160},
-                    "definition": {"type": "string", "minLength": 1, "maxLength": 600},
+                    "definition": {"type": "string", "minLength": 1, "maxLength": 240},
                 },
                 "required": ["original_term", "term", "definition"],
                 "additionalProperties": False,

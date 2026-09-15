@@ -82,6 +82,20 @@ def test_batched_definitions_preserve_source_order_and_full_contract() -> None:
     ]}, request)
 
 
+def test_definition_rejects_glossary_essay_over_240_characters() -> None:
+    request = TeachingPartRequest(
+        phase="definition", text="A latch stores data.", original_term="latch",
+        target_language="zh-CN",
+    )
+    too_long = (
+        "这是一个用于保存数据状态的技术概念；"
+        + "它说明用途、机制和边界" * 30
+        + "；使用时需要结合当前上下文"
+    )
+    assert len(too_long) > 240
+    assert not valid_part({"term": "锁存器（Latch）", "definition": too_long}, request)
+
+
 @pytest.mark.asyncio
 async def test_batched_definition_generation_uses_one_structured_call() -> None:
     calls = 0

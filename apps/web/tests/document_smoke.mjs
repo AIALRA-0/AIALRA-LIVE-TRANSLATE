@@ -9,6 +9,7 @@ const session = { id: "session_synthetic", title: "Synthetic lecture", source_la
 const second = { ...session, id: "session_second", title: "Synthetic second lecture" };
 let archived = false;
 let translationCorrectionSaved = false;
+let sourceCorrectionSaved = false;
 const snapshot = () => ({ folders: [], projects: [project], project_placements: [{ project_id: project.id, folder_id: null, sort_order: 0, archived_at: null, updated_at: now }],
   sessions: [session, second], session_projects: { [session.id]: project.id, [second.id]: project.id },
   session_metadata: [session, second].map((item) => ({ session_id: item.id, pinned: false, sort_order: 0, archived_at: item.id === session.id && archived ? now : null, updated_at: now })),
@@ -52,6 +53,7 @@ try {
   for (const [width, stress] of [[1440, false], [870, false], [390, false], [1440, true]]) {
     archived = false;
     translationCorrectionSaved = false;
+    sourceCorrectionSaved = false;
     const page = await browser.newPage({ viewport: { width, height: 900 }, acceptDownloads: true });
     page.on("dialog", (dialog) => void dialog.accept());
     await page.route("**/api/v1/**", async (route) => {
@@ -79,6 +81,11 @@ try {
         const body = route.request().postDataJSON();
         translationCorrectionSaved = body.text === "人工校对后的合成译文" && body.base_revision === 0;
         return route.fulfill({ json: { text: body.text, revision: 1 } });
+      }
+      if (path.endsWith("/correction") && route.request().method() === "PUT") {
+        const body = route.request().postDataJSON();
+        sourceCorrectionSaved = body.text === "Human-corrected synthetic source." && body.base_revision === 0;
+        return route.fulfill({ json: { text: body.text, revision: 1, translation_queued: true } });
       }
       if (path.includes("/workspace/trash/") && route.request().method() === "POST") { archived = true; return route.fulfill({ json: { accepted: true } }); }
       if (route.request().method() !== "GET") return route.fulfill({ json: { accepted: true } });
@@ -119,6 +126,10 @@ try {
     await page.getByLabel("修订译文").fill("人工校对后的合成译文");
     await page.getByRole("button", { name: "保存译文" }).click();
     if (!translationCorrectionSaved) throw new Error("translation correction was not saved append-only");
+    await page.getByRole("button", { name: "修订原文" }).first().click();
+    await page.getByLabel("修订原文").fill("Human-corrected synthetic source.");
+    await page.getByRole("button", { name: "保存原文" }).click();
+    if (!sourceCorrectionSaved) throw new Error("source correction was not saved append-only");
     await page.getByRole("searchbox", { name: "搜索课程原文和译文" }).fill("覆盖率");
     await page.getByText("找到 1 条匹配内容").waitFor();
     await page.getByRole("searchbox", { name: "搜索课程原文和译文" }).fill("");
