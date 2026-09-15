@@ -894,6 +894,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [recordingStatus, setRecordingStatus] = useState<RecordingProjectStatus | null>(null);
   const [recordingStatusReady, setRecordingStatusReady] = useState(false);
   const recordingStatusRequest = useRef(0);
+  const recordingStatusRefreshInFlight = useRef<Promise<RecordingProjectStatus | null> | null>(null);
+  const recordingStatusRefreshPending = useRef(false);
   const topicEnsureStarted = useRef(false);
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [notice, setNotice] = useState("");
@@ -968,51 +970,64 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     return readWeaveRefreshInFlight.current;
   }, [project.id]);
 
-  const refreshRecordingStatus = useCallback(async (): Promise<RecordingProjectStatus | null> => {
-    const requestId = ++recordingStatusRequest.current;
-    try {
-      const next = await api.recordingStatus(project.id, recorderDeviceId());
-      if (requestId !== recordingStatusRequest.current) return next;
-      setRecordingStatus(next);
-      setRecordingStatusReady(true);
-      setStatusClock(new Date(next.server_time).getTime());
-      if (stopIntent.current) {
-        // Status polling/SSE must not undo an explicit stop, even after expiry.
-        if (next.lease?.holder === "other") {
-          capture.current?.dispose();
-          setCaptureNotice("本机已停止收音，其他设备目前持有项目录音权限；待确认音频仍保留，不会抢占或重新收音。");
-        }
-        return next;
-      }
-      if (next.lease?.holder === "other") {
-        capture.current?.revoke();
-        capture.current = null;
-        setLease(null);
-        saveLocalLease(null);
-        setCaptureActive(false);
-        setCapturePhase("blocked");
-        setCaptureNotice("这个项目当前由其他设备录音；租约释放或到期后可以重新尝试。");
-      } else if (!next.lease) {
-        const currentStatus = next.sessions?.find((item) => item.session_id === initial.id);
-        if (currentStatus?.recoverable) {
-          setCapturePhase("recoverable");
-          setCaptureNotice("");
-        } else if (currentStatus?.reason === "processing") {
-          setCapturePhase("processing");
-          setCaptureNotice("");
-        } else {
-          setCapturePhase((current) => {
-            if (!["blocked", "recoverable", "processing"].includes(current)) return current;
-            setCaptureNotice("");
-            return "idle";
-          });
-        }
-      }
-      return next;
-    } catch {
-      if (requestId === recordingStatusRequest.current) setRecordingStatusReady(true);
-      return null;
+  const refreshRecordingStatus = useCallback((): Promise<RecordingProjectStatus | null> => {
+    if (recordingStatusRefreshInFlight.current) {
+      recordingStatusRefreshPending.current = true;
+      return recordingStatusRefreshInFlight.current;
     }
+    const requestId = recordingStatusRequest.current;
+    const run = (async () => {
+      let latest: RecordingProjectStatus | null = null;
+      do {
+        recordingStatusRefreshPending.current = false;
+        try {
+          const next = await api.recordingStatus(project.id, recorderDeviceId());
+          latest = next;
+          if (requestId !== recordingStatusRequest.current) return latest;
+          setRecordingStatus(next);
+          setRecordingStatusReady(true);
+          setStatusClock(new Date(next.server_time).getTime());
+          if (stopIntent.current) {
+            // Status polling/SSE must not undo an explicit stop, even after expiry.
+            if (next.lease?.holder === "other") {
+              capture.current?.dispose();
+              setCaptureNotice("本机已停止收音，其他设备目前持有项目录音权限；待确认音频仍保留，不会抢占或重新收音。");
+            }
+            continue;
+          }
+          if (next.lease?.holder === "other") {
+            capture.current?.revoke();
+            capture.current = null;
+            setLease(null);
+            saveLocalLease(null);
+            setCaptureActive(false);
+            setCapturePhase("blocked");
+            setCaptureNotice("这个项目当前由其他设备录音；租约释放或到期后可以重新尝试。");
+          } else if (!next.lease) {
+            const currentStatus = next.sessions?.find((item) => item.session_id === initial.id);
+            if (currentStatus?.recoverable) {
+              setCapturePhase("recoverable");
+              setCaptureNotice("");
+            } else if (currentStatus?.reason === "processing") {
+              setCapturePhase("processing");
+              setCaptureNotice("");
+            } else {
+              setCapturePhase((current) => {
+                if (!["blocked", "recoverable", "processing"].includes(current)) return current;
+                setCaptureNotice("");
+                return "idle";
+              });
+            }
+          }
+        } catch {
+          if (requestId === recordingStatusRequest.current) setRecordingStatusReady(true);
+          return latest;
+        }
+      } while (recordingStatusRefreshPending.current);
+      return latest;
+    })();
+    recordingStatusRefreshInFlight.current = run.finally(() => { recordingStatusRefreshInFlight.current = null; });
+    return recordingStatusRefreshInFlight.current;
   }, [project.id, initial.id]);
 
   const refreshAudioInputs = useCallback(async (requestPermission = false): Promise<MediaDeviceInfo[]> => {
@@ -1110,18 +1125,23 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
 
   useEffect(() => {
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let readWeaveTimer: ReturnType<typeof setTimeout> | undefined;
     const unsubscribe = subscribeProject(project.id, (update) => {
     if (update.session_id === initial.id && ["recording.lease.acquired", "recording.lease.renewed"].includes(update.update_type)) {
       setLastActivityAt((current) => new Date(update.created_at).getTime() >= new Date(current).getTime() ? update.created_at : current);
     }
     // SSE replays history. An event invalidates the snapshot; it is never proof
     // that a historical holder still owns the current lease.
-    if (update.update_type.startsWith("recording.lease.") && !refreshTimer) {
+    if (update.update_type.startsWith("recording.lease.")) {
+      clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => { refreshTimer = undefined; void refreshRecordingStatus(); }, 150);
     }
-    if (update.update_type.startsWith("readweave.")) void refreshReadWeave();
+    if (update.update_type.startsWith("readweave.")) {
+      clearTimeout(readWeaveTimer);
+      readWeaveTimer = setTimeout(() => { readWeaveTimer = undefined; void refreshReadWeave(); }, 150);
+    }
     }, () => undefined);
-    return () => { unsubscribe(); clearTimeout(refreshTimer); };
+    return () => { unsubscribe(); clearTimeout(refreshTimer); clearTimeout(readWeaveTimer); };
   }, [project.id, initial.id, refreshRecordingStatus, refreshReadWeave]);
 
   useEffect(() => {
