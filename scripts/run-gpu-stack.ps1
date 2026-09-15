@@ -1,5 +1,13 @@
 $ErrorActionPreference = "Stop" # A provider failure restarts the complete local stack instead of claiming jobs indefinitely.
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path # Resolve one exact checkout.
+$createdMutex = $false
+$stackMutex = [Threading.Mutex]::new(
+    $true, "Local\AIALRA_LIVE_TRANSLATE_GPU_STACK", [ref]$createdMutex
+) # One project supervisor owns the local model ports and GPU agent at a time.
+if (!$createdMutex) {
+    $stackMutex.Dispose()
+    exit 0 # A duplicate startup shortcut is a no-op, not a competing restart loop.
+}
 $shellPath = (Get-Process -Id $PID).Path # Child scripts use the same PowerShell runtime.
 $workerScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-worker.ps1") # Quote paths because the workspace may contain spaces.
 $agentScript = '"{0}"' -f (Join-Path $PSScriptRoot "run-gpu-agent.ps1")
@@ -148,8 +156,10 @@ while ($true) {
     $worker = $null
     $agent = $null
     $ownedOllama = $null
+    $failureStage = "ollama_start"
     try {
         $ownedOllama = Start-OwnedOllama
+        $failureStage = "model_worker_start"
         $worker = Start-Process -FilePath $shellPath -ArgumentList @("-NoProfile", "-File", $workerScript) -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
         $deadline = (Get-Date).AddSeconds(120)
         $ready = $false
@@ -164,12 +174,15 @@ while ($true) {
         } while ((Get-Date) -lt $deadline)
         if (!$ready) { throw "本机模型 Worker 未在 120 秒内就绪" }
         Set-ModelWorkerPriority $worker
+        $failureStage = "provider_warmup"
         Initialize-LocalProviders
 
+        $failureStage = "gpu_agent_start"
         $agent = Start-Process -FilePath $shellPath -ArgumentList @("-NoProfile", "-File", $agentScript) -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
         $restartDelaySeconds = 1
         $ollamaFailures = 0
         $workerHealthFailures = 0
+        $failureStage = "runtime_watch"
         while (!$worker.HasExited -and !$agent.HasExited) {
             Start-Sleep -Seconds 2
             $worker.Refresh()
@@ -196,7 +209,7 @@ while ($true) {
         if ($worker.HasExited) { throw "本机模型 Worker 意外退出" }
         throw "本机 GPU Agent 意外退出"
     } catch {
-        Write-Warning "本项目 GPU 启动或运行检查失败，将按退避策略恢复；未记录原始响应"
+        Write-Warning "本项目 GPU 检查失败 stage=$failureStage；将按退避策略恢复，未记录原始响应"
     } finally {
         Stop-OwnedProcessTree $agent "run-gpu-agent.ps1" "workers.gpu_agent.main"
         Stop-OwnedProcessTree $worker "run-worker.ps1" "workers.model_worker.main:app"

@@ -39,6 +39,7 @@ def test_agent_quality_gate_matches_core_contract() -> None:
     assert valid_summary("完整说明", 100, "zh-CN")
     assert not valid_summary("当我在讲解一个主题", 100, "zh-CN")
     assert not valid_summary("过短", 240, "zh-CN")
+    assert not valid_summary("过长" * 601, 240, "zh-CN")
     assert valid_definition(COMPLETE_DEFINITION, "zh-CN")
     assert not valid_definition("只有一句很短的定义", "zh-CN")
     assert not valid_definition("这是定义；" + "用于说明技术对象" * 40 + "；这里保留边界", "zh-CN")
@@ -306,22 +307,21 @@ async def test_segment_and_page_receive_one_group_synthesis() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_group_synthesis_keeps_verified_piece_explanation() -> None:
+async def test_failed_group_synthesis_never_publishes_piece_drafts() -> None:
     async def call(body: dict[str, Any]) -> dict[str, Any]:
         if body["phase"] == "group":
             raise RuntimeError("model_http_error")
         return {"provider": "ollama:synthetic@cuda", "prose": "完整逐段说明",
                 "original_terms": []}
 
-    result = await assemble_explanation({
-        "segments": [
-            {"id": "a", "text": "First premise."},
-            {"id": "b", "text": "Second conclusion."},
-        ],
-        "target_language": "zh-CN",
-    }, call)
-    assert result["paragraph_summary"] == "完整逐段说明"
-    assert result["evidence_segment_ids"] == ["a", "b"]
+    with pytest.raises(ValueError, match="teaching_group_synthesis_invalid"):
+        await assemble_explanation({
+            "segments": [
+                {"id": "a", "text": "First premise."},
+                {"id": "b", "text": "Second conclusion."},
+            ],
+            "target_language": "zh-CN",
+        }, call)
 
 
 @pytest.mark.asyncio

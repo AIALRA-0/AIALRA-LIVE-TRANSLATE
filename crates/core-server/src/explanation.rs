@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
-const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v47";
-const COMPATIBLE_QUALITY_TRIGGER: &str = "quality_contract_v46";
+const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v48";
+const COMPATIBLE_QUALITY_TRIGGERS: [&str; 2] = ["quality_contract_v46", "quality_contract_v47"];
 const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
 const MIN_REPAIR_GROUP_PARAGRAPHS: usize = 6;
 
@@ -142,7 +142,8 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
             .filter_map(|id| paragraph_text.get(id))
             .map(|text| text.chars().count())
             .sum();
-        if (trigger == QUALITY_REPAIR_TRIGGER || trigger == COMPATIBLE_QUALITY_TRIGGER)
+        if (trigger == QUALITY_REPAIR_TRIGGER
+            || COMPATIBLE_QUALITY_TRIGGERS.contains(&trigger.as_str()))
             && ids.len() >= 4
             && !explanation_needs_quality_repair(&result, source_characters, chinese)
         {
@@ -216,6 +217,7 @@ pub(crate) fn explanation_needs_quality_repair(
         || transcript_narration
             .iter()
             .any(|phrase| summary.contains(phrase))
+        || summary.chars().count() > 1200
         || (source_characters >= 240 && summary.chars().count() < 80)
     {
         return true;
@@ -494,6 +496,11 @@ mod tests {
         ));
         assert!(super::explanation_needs_quality_repair(
             &json!({"paragraph_summary": "内容太短", "terms": []}),
+            400,
+            true,
+        ));
+        assert!(super::explanation_needs_quality_repair(
+            &json!({"paragraph_summary": "过长".repeat(601), "terms": []}),
             400,
             true,
         ));

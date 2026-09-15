@@ -237,7 +237,8 @@ async def generate_part(
             "their dependency order and make every pronoun's subject clear. Include the "
             "mechanism, important example and boundary when the source provides them. Use two "
             "to four connected paragraphs. For a short source, use roughly 120 to 350 Chinese "
-            "characters; for a long source, use no more than 800. Do not repeat sentences, "
+            "characters; for a long source, use 350 to 900 and never exceed 1,200. "
+            "Do not repeat sentences, "
             "copy the source line by line, or describe that somebody is speaking."
         )
         properties: dict[str, Any] = {"prose": {
@@ -248,7 +249,7 @@ async def generate_part(
             properties["original_terms"] = {"type": "array", "uniqueItems": True,
                                             "items": {"type": "string", "minLength": 1,
                                                       "maxLength": 160}}
-        budget = 1400 if request.phase != "prose" else 1000
+        budget = (900 if request.phase == "group" else 1400) if request.phase != "prose" else 1000
     else:
         common = (
             "Write a factual technical glossary for a beginner in target_language. "
@@ -326,7 +327,8 @@ async def generate_part(
         accept=lambda result: valid_part(bound_inventory(result, request), request),
         repair_instruction=(
             "Return only a coherent direct explanation in prose. Remove speech-act narration, "
-            "filler acknowledgements and line-by-line retelling; retain all consequential facts, "
+            "filler acknowledgements and line-by-line retelling; use no more than 1,200 "
+            "characters; retain all consequential facts, "
             "conditions and distinctions. Preserve both sides and the direction of every "
             "comparison; mark ambiguity instead of inventing a relationship."
             if request.phase in {"group", "course"} else

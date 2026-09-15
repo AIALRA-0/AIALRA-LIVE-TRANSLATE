@@ -717,8 +717,11 @@ pub async fn ensure_session_topics(
     let retried = if has_active_lease {
         0
     } else {
-        state.store.requeue_failed_explanations(&session_id)?
-            + crate::explanation::requeue_versioned_content_repairs(&state, &session_id)?
+        // Page loading calls this endpoint automatically. Reopening a course must not
+        // resurrect every historical provider/contract failure and monopolize the GPU.
+        // Current-version quality repairs are safe to retry; obsolete cards receive a
+        // new append-only repair job below and remain available as immutable history.
+        crate::explanation::requeue_versioned_content_repairs(&state, &session_id)?
     };
     let repaired = if has_active_lease {
         0
@@ -1125,7 +1128,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(retry["retried"], 1);
+        assert_eq!(retry["retried"], 0);
         assert_eq!(
             state
                 .store
@@ -1133,7 +1136,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "queued"
+            "failed"
         );
     }
 

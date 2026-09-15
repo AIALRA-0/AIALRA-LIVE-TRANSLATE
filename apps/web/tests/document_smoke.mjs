@@ -96,6 +96,16 @@ try {
     await page.getByRole("heading", { name: session.title }).waitFor();
     await page.getByRole("region", { name: "整节课程录音回放" }).waitFor();
     await page.getByTestId("course-paragraph").first().waitFor();
+    if (width === 870) {
+      const statusSamples = [];
+      for (let sample = 0; sample < 8; sample += 1) {
+        statusSamples.push(await page.locator(".header-status").innerText());
+        await page.waitForTimeout(500);
+      }
+      if (new Set(statusSamples).size !== 1) {
+        throw new Error(`connection status flickered: ${statusSamples.join(" -> ")}`);
+      }
+    }
     if (width <= 820) await page.getByRole("button", { name: "打开课程树" }).click();
     if (stress) {
       const elapsed = Date.now() - started;
@@ -118,9 +128,10 @@ try {
     const playbackSlider = page.getByRole("slider", { name: "回放位置" });
     if (await playbackSlider.inputValue() !== "0") throw new Error("playback slider did not start at zero");
     await page.getByRole("button", { name: "前进 15 秒" }).click();
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(1500); // Cover the delayed metadata/timeupdate race from a cold segment.
     if (Number(await playbackSlider.inputValue()) < 14.5) throw new Error("forward skip was reset by stale media time");
     await page.getByRole("button", { name: "后退 15 秒" }).click();
+    await page.waitForTimeout(500);
     if (Number(await playbackSlider.inputValue()) > 0.5) throw new Error("backward skip did not return to the start");
     await page.getByRole("button", { name: "修订译文" }).first().click();
     await page.getByLabel("修订译文").fill("人工校对后的合成译文");

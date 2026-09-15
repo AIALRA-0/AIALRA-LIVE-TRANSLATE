@@ -24,6 +24,7 @@ def valid_summary(value: str, source_characters: int, language: str) -> bool:
     return bool(
         text
         and not any(phrase in text for phrase in _BANNED_NARRATION)
+        and len(text) <= 1200
         and (source_characters < 240 or len(text) >= 80)
     )
 
@@ -309,11 +310,10 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         except RuntimeError:
             guide = None
         if guide is None:
-            return {
-                "paragraph_summary": detailed_prose, "terms": definitions,
-                "evidence_segment_ids": [item["id"] for item in segments],
-                "asset_page_ids": [item["id"] for item in pages], "provider": provider,
-            }
+            # Piece drafts are an internal completeness scaffold, not reader-facing prose.
+            # Publishing them side-by-side recreates a transcript-like wall of text and
+            # makes a failed synthesis look successful.
+            raise ValueError("teaching_group_synthesis_invalid")
         heading = guide.get("prose")
         if not isinstance(heading, str) or not heading.strip():
             raise ValueError("teaching_group_synthesis_invalid")
