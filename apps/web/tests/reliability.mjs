@@ -81,11 +81,15 @@ try {
   assert.equal(await page.evaluate(() => window.__captureProbe.calls),0);
   assert.equal(await page.getByText("其他设备正在录制本项目",{exact:true}).count(),0);
   checks.push("opening requests no microphone and historical lease replay causes no conflict");
+  const captureAdvanced = page.locator("details.capture-advanced");
+  assert.equal(await captureAdvanced.evaluate((element) => element.open), false);
+  await captureAdvanced.locator(":scope > summary").click();
   assert.equal(await page.getByRole("combobox",{name:/^降噪/}).inputValue(),"off");
   assert.ok(await page.evaluate(() => {
     const panel=document.querySelector(".paragraph-insight-panel");
-    const gpu=[...document.querySelectorAll(".session-sidebar .side-card")].find(el=>el.querySelector("h3")?.textContent==="本机 GPU");
-    return panel && gpu && Boolean(panel.compareDocumentPosition(gpu)&Node.DOCUMENT_POSITION_FOLLOWING);
+    const systems=document.querySelector(".session-system-details");
+    return panel && systems && !systems.open
+      && Boolean(panel.compareDocumentPosition(systems)&Node.DOCUMENT_POSITION_FOLLOWING);
   }));
   assert.equal(await page.getByText("当前内容组的总结正在生成。",{exact:true}).count(),0);
   checks.push("content group precedes GPU; accumulation is not falsely presented as generation; raw input default");
@@ -309,10 +313,10 @@ try {
   const otherSnapshot = await request("/api/v1/workspace","GET",undefined,{...headers,"X-authentik-uid":"other-test-owner"});
   assert.equal(otherSnapshot.sessions.some((s)=>s.id===interrupted.id),false);
   await page.goto(`${base}/app/projects/${project.id}/sessions/${interrupted.id}`);
-  await page.locator(".header-status").getByText("录音已中断，可恢复",{exact:true}).waitFor();
+  await page.locator(".header-status").getByText("可以续录",{exact:true}).waitFor();
   await page.getByRole("button",{name:"确认并继续本次课程",exact:true}).waitFor();
   await page.screenshot({path:path.join(evidence,"interrupted-recording.png"),fullPage:true});
-  checks.push("expired lease projects as interrupted without rewriting history or exposing another owner; header and resume agree");
+  checks.push("expired lease remains resumable without rewriting history or exposing another owner; header and resume agree");
   for (const section of ["overview","transcript","explanations","assets","user-notes"]) {
     await page.goto(`${course}/notes/${section}`); await page.locator(".course-document").waitFor();
   }
@@ -333,7 +337,11 @@ try {
     ["topic.window.checked", {paragraph_ids:["fixture-first","fixture-second"]}],
     ["model.job.stage", {job_id:"fixture-diagnostic",stage:"inferring",internal_only:"must-not-render-diagnostic"}],
   ].map(([event_type,payload],index)=>({schema_version:"1.0.0",event_id:`fixture-${index}`,session_id:session.id,source_id:"browser-fixture",sequence:index+1,event_type,captured_at_monotonic_ns:index+1,captured_at_wall:"2026-09-09T12:00:00Z",ingested_at:"2026-09-09T12:00:00Z",correlation_id:"fixture-correlation",causation_id:null,payload,content_hash:`sha256:${"0".repeat(64)}`}));
-  await page.route(`**/sessions/${session.id}/stream`,route=>route.fulfill({status:200,contentType:"text/event-stream",body:syntheticEvents.map(event=>`event: message\ndata: ${JSON.stringify(event)}\n\n`).join("")}));
+  await page.route(`**/sessions/${session.id}/stream*`,route=>route.fulfill({
+    status:200,
+    contentType:"text/event-stream",
+    body:syntheticEvents.map(event=>`event: message\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+  }));
   await page.addInitScript(() => {
     const NativeEventSource = window.EventSource;
     window.__courseStreams = [];
