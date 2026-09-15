@@ -13,6 +13,7 @@ PartCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 MAX_GROUP_TERMS = 8
 MAX_DEFINITION_BATCH = 2
 MAX_SOURCE_CHUNK_BYTES = 2800
+MAX_SYNTHESIS_INPUT_BYTES = 6200
 _BANNED_NARRATION = (
     "当我在讲解", "你会看到我所说", "老师说", "讲者提到",
     "本段话讲了", "本段内容讲了", "让我们来看",
@@ -304,7 +305,12 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                     continue
                 append_definition(term_source, item.get("term"), item.get("definition"))
     detailed_prose = "\n\n".join(prose)
-    if len(chunks) > 1 and len(detailed_prose.encode()) <= 3500:
+    # The model endpoint accepts up to 6,500 source/context bytes.  The old
+    # 3,500-byte guard skipped synthesis for two ordinary complete drafts,
+    # then rejected their concatenation at the final 1,200-character gate.
+    # Keep a small allowance for request structure while using the capacity
+    # that the endpoint actually validates.
+    if len(chunks) > 1 and len(detailed_prose.encode()) <= MAX_SYNTHESIS_INPUT_BYTES:
         try:
             guide = await generate({"phase": "group", "text": detailed_prose,
                                     "target_language": target})

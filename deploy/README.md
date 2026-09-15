@@ -16,8 +16,9 @@ flowchart TD
   Core --> Notes[ReadWeave 私有 ETAPI]
   Agent[Windows RTX GPU Agent] -->|私有出站领取| Gateway[私有 Worker Gateway]
   Gateway --> Queue
-  Agent --> ASR[faster-whisper small CUDA float16]
-  Agent --> LLM[Ollama 7B 段落翻译与滚动讲解]
+  Agent --> ASR[Qwen3-ASR 1.7B CUDA]
+  Agent --> MT[HY-MT1.5 1.8B Q8 CUDA]
+  Agent --> LLM[Ollama Qwen3.5 9B 滚动讲解]
   Agent --> Summary[Ollama 14B 最终总结]
   Agent --> VLM[Qwen3-VL 8B 课件理解]
 ```
@@ -38,9 +39,7 @@ flowchart TD
 
 ## 3 Windows GPU Agent
 
-默认配置仍是 `faster-whisper small + CUDA float16`，7B 模型处理连贯段落翻译和滚动讲解，14B 模型处理停止后的最终总结，Qwen3-VL 8B 在实时队列排空后处理图片。
-
-体验专用模型时，可将实时组合切换为 Qwen3-ASR 1.7B 与 HY-MT1.5 1.8B。两者直接在 Windows GPU Worker 中运行，不通过 Ollama；解释、总结和图片处理仍使用下方的 Ollama 模型：
+生产实时组合为 Qwen3-ASR 1.7B 与 HY-MT1.5 1.8B Q8。ASR 直接在 Windows GPU Worker 中运行；HY-MT 的 Q8 GGUF 通过本机 Ollama 运行，用较小的显存和稳定热延迟替代会在 Windows 共享显存中发生分页的全精度权重。讲解、总结和图片处理继续使用下方的 Ollama 模型：
 
 ```text
 AIALRA_ASR_PROVIDER=qwen3-asr
@@ -49,6 +48,9 @@ AIALRA_ASR_DEVICE=cuda
 AIALRA_TRANSLATION_PROVIDER=hy-mt
 AIALRA_HYMT_MODEL=tencent/HY-MT1.5-1.8B
 AIALRA_HYMT_DEVICE=cuda
+AIALRA_HYMT_RUNTIME=ollama
+AIALRA_HYMT_OLLAMA_MODEL=hy-mt1.5:1.8b-q8
+AIALRA_EXPLANATION_MODEL=qwen3.5:9b
 ```
 
 切换前在 Windows 项目环境执行 `uv sync --extra dev --extra speech --extra dedicated-models`，再用现有 GPU Agent 启动脚本预热。专用模型的首次加载会明显慢于热运行；启动脚本会先完成 ASR、Ollama 和专用翻译预热，再允许 Agent 领取任务。RTX 4080 16 GB 上不把 HY-MT 7B 放入实时默认组合，避免多个模型争抢显存。

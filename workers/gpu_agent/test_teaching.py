@@ -323,6 +323,45 @@ async def test_segment_and_page_receive_one_group_synthesis() -> None:
 
 
 @pytest.mark.asyncio
+async def test_two_complete_drafts_above_old_byte_limit_are_still_synthesized() -> None:
+    phases: list[str] = []
+    synthesis_bytes = 0
+
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        nonlocal synthesis_bytes
+        phases.append(body["phase"])
+        if body["phase"] == "group":
+            synthesis_bytes = len(body["text"].encode())
+            return {
+                "provider": "ollama:synthetic@cuda",
+                "prose": (
+                    "先解释问题与必要条件，再连接两部分机制和例子；"
+                    "最后保留结论成立所依赖的边界。" * 3
+                ),
+            }
+        return {
+            "provider": "ollama:synthetic@cuda",
+            "prose": (
+                "这一部分完整保留来源中的对象、机制、例子、数量关系、"
+                "限制条件和不确定性。" * 17
+            ),
+            "original_terms": [],
+        }
+
+    result = await assemble_explanation({
+        "segments": [
+            {"id": "a", "text": "First premise and its boundary. " * 60},
+            {"id": "b", "text": "Second mechanism and its conclusion. " * 60},
+        ],
+        "target_language": "zh-CN",
+    }, call)
+
+    assert phases == ["prose", "prose", "group"]
+    assert 3500 < synthesis_bytes <= 6200
+    assert result["paragraph_summary"].startswith("先解释问题")
+
+
+@pytest.mark.asyncio
 async def test_failed_group_synthesis_never_publishes_piece_drafts() -> None:
     async def call(body: dict[str, Any]) -> dict[str, Any]:
         if body["phase"] == "group":
