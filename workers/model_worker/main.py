@@ -984,6 +984,9 @@ async def explain(request: ExplanationRequest) -> ExplanationResponse:
             accept=accept_explanation,
             repair_instruction=(
                 "Every segment index must occur exactly once in sections, in order. "
+                "For source groups of 240 or more characters, the joined section explanations "
+                "must contain at least 80 Chinese characters. Explain the actual mechanism and "
+                "reasoning; never say that the speaker, lecturer, or passage discusses something. "
                 "For each term, copy a short quote verbatim from the source at its stated index, "
                 "including original case. Do not paraphrase evidence or guess the index."
             ),
@@ -1977,6 +1980,23 @@ def _term_meets_explanation_contract(item: object, target_language: str) -> bool
     return True
 
 
+def _summary_meets_explanation_contract(
+    summary: object, request: ExplanationRequest,
+) -> bool:
+    """Keep the worker and Core from disagreeing after expensive inference."""
+
+    if not isinstance(summary, str) or not summary.strip():
+        return False
+    summary = summary.strip()
+    if any(phrase in summary for phrase in (
+        "当我在讲解", "你会看到我所说", "老师说", "讲者提到",
+        "本段话讲了", "本段内容讲了", "让我们来看",
+    )):
+        return False
+    source_characters = sum(len(segment.text) for segment in request.segments)
+    return source_characters < 240 or len(summary) >= 80
+
+
 def _bind_explanation_sources(
     raw: dict[str, Any], request: ExplanationRequest, *, drop_invalid_terms: bool = False,
 ) -> dict[str, Any] | None:
@@ -2096,6 +2116,9 @@ def _explanation_candidate_ok(
     )
     return (
         bound is not None and _has_explanation_shape(bound)
+        and _summary_meets_explanation_contract(
+            bound.get("paragraph_summary") if bound else None, request,
+        )
         and _uses_requested_explanation_language(bound, request.target_language)
     )
 

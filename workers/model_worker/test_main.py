@@ -620,6 +620,39 @@ def test_explanation_retries_then_drops_terms_that_core_would_reject() -> None:
     assert bound["terms"] == []
 
 
+def test_explanation_candidate_matches_core_summary_quality_gate() -> None:
+    request = ExplanationRequest(
+        segments=[EvidenceSegment(
+            id="first",
+            text="A fault model maps physical defects into testable logical behavior. " * 5,
+        )],
+        target_language="zh-CN",
+    )
+    assert not model_worker._explanation_candidate_ok({
+        "sections": [{"source_indexes": [0], "explanation": "内容太短。"}],
+        "terms": [],
+    }, request)
+    assert not model_worker._explanation_candidate_ok({
+        "sections": [{
+            "source_indexes": [0],
+            "explanation": "本段内容讲了故障模型，并给出了相应解释。" * 5,
+        }],
+        "terms": [],
+    }, request)
+    assert model_worker._explanation_candidate_ok({
+        "sections": [{
+            "source_indexes": [0],
+            "explanation": (
+                "故障模型把物理缺陷映射为可以观察和控制的逻辑行为；"
+                "工程师据此生成测试向量并判断输出是否偏离预期；"
+                "这种抽象便于系统测试，但不能替代对真实器件物理失效的分析；"
+                "使用时还要明确模型覆盖范围、测试条件和未被抽象描述的异常。"
+            ),
+        }],
+        "terms": [],
+    }, request)
+
+
 @pytest.mark.parametrize("indexes", [[0], [0, 0], [1, 0], [0, 2], [0, True]])
 def test_explanation_rejects_missing_duplicated_or_reordered_source_coverage(
     indexes: list[object],
