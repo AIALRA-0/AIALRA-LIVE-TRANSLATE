@@ -232,19 +232,38 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                 batch.append(candidate)
                 unresolved.remove(candidate)
         if len(batch) == 1:
-            result = await generate({
-                "phase": "definition", "text": first["text"],
-                "context": first["context"],
-                "original_term": first["original_term"], "target_language": target,
-            })
+            try:
+                result = await generate({
+                    "phase": "definition", "text": first["text"],
+                    "context": first["context"],
+                    "original_term": first["original_term"], "target_language": target,
+                })
+            except RuntimeError:
+                continue
             append_definition(first, result.get("term"), result.get("definition"))
         else:
-            result = await generate({
-                "phase": "definitions", "text": first["text"],
-                "context": first["context"],
-                "original_terms": [item["original_term"] for item in batch],
-                "target_language": target,
-            })
+            try:
+                result = await generate({
+                    "phase": "definitions", "text": first["text"],
+                    "context": first["context"],
+                    "original_terms": [item["original_term"] for item in batch],
+                    "target_language": target,
+                })
+            except RuntimeError:
+                for term_source in batch:
+                    try:
+                        fallback = await generate({
+                            "phase": "definition", "text": term_source["text"],
+                            "context": term_source["context"],
+                            "original_term": term_source["original_term"],
+                            "target_language": target,
+                        })
+                    except RuntimeError:
+                        continue
+                    append_definition(
+                        term_source, fallback.get("term"), fallback.get("definition"),
+                    )
+                continue
             generated = result.get("definitions")
             if not isinstance(generated, list) or len(generated) != len(batch):
                 raise ValueError("teaching_definitions_invalid")
@@ -257,8 +276,17 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                 append_definition(term_source, item.get("term"), item.get("definition"))
     detailed_prose = "\n\n".join(prose)
     if len(segments) > 1 and len(detailed_prose.encode()) <= 3500:
-        guide = await generate({"phase": "group", "text": detailed_prose,
-                                "target_language": target})
+        try:
+            guide = await generate({"phase": "group", "text": detailed_prose,
+                                    "target_language": target})
+        except RuntimeError:
+            guide = None
+        if guide is None:
+            return {
+                "paragraph_summary": detailed_prose, "terms": definitions,
+                "evidence_segment_ids": [item["id"] for item in segments],
+                "asset_page_ids": [item["id"] for item in pages], "provider": provider,
+            }
         heading = guide.get("prose")
         if not isinstance(heading, str) or not heading.strip():
             raise ValueError("teaching_group_synthesis_invalid")

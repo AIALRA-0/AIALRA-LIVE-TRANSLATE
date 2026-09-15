@@ -225,6 +225,50 @@ async def test_equivalent_reviewed_names_merge_references_not_meanings() -> None
 
 
 @pytest.mark.asyncio
+async def test_failed_definition_batch_falls_back_without_losing_the_card() -> None:
+    phases: list[str] = []
+
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        phases.append(body["phase"])
+        provider = "ollama:synthetic@cuda"
+        if body["phase"] == "prose":
+            return {"provider": provider, "prose": "完整解释",
+                    "original_terms": ["alpha", "beta"]}
+        if body["phase"] == "definitions":
+            raise RuntimeError("model_http_error")
+        if body["original_term"] == "beta":
+            raise RuntimeError("model_http_error")
+        return {"provider": provider, "term": "Alpha", "definition": "可核对定义"}
+
+    result = await assemble_explanation({
+        "segments": [{"id": "a", "text": "alpha and beta are compared."}],
+        "target_language": "zh-CN",
+    }, call)
+    assert phases == ["prose", "definitions", "definition", "definition"]
+    assert result["paragraph_summary"] == "完整解释"
+    assert [term["term"] for term in result["terms"]] == ["Alpha"]
+
+
+@pytest.mark.asyncio
+async def test_failed_group_synthesis_keeps_verified_piece_explanation() -> None:
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        if body["phase"] == "group":
+            raise RuntimeError("model_http_error")
+        return {"provider": "ollama:synthetic@cuda", "prose": "完整逐段说明",
+                "original_terms": []}
+
+    result = await assemble_explanation({
+        "segments": [
+            {"id": "a", "text": "First premise."},
+            {"id": "b", "text": "Second conclusion."},
+        ],
+        "target_language": "zh-CN",
+    }, call)
+    assert result["paragraph_summary"] == "完整逐段说明"
+    assert result["evidence_segment_ids"] == ["a", "b"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["foreign_term", "missing_definition", "changed_provider"])
 async def test_bad_part_never_returns_a_partial_card(failure: str) -> None:
     async def call(body: dict[str, Any]) -> dict[str, Any]:
