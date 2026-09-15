@@ -1085,12 +1085,18 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     void api.documentSnapshot(initial.id).then(({ events, cursor }) => {
       if (!active) return;
       dispatch({ type: "reset", events });
+      if (!topicEnsureStarted.current && events.some((event) => event.event_type === "paragraph.finalized")) {
+        topicEnsureStarted.current = true;
+        void api.ensureTopics(project.id, initial.id).then((result) => {
+          if (active && result.repaired > 0) setNotice(`正在重新整理 ${result.repaired} 个旧版内容组；录音和历史结果保持不变`);
+        }).catch(() => undefined);
+      }
       unsubscribe = subscribeEvents(initial.id, onEvent, reportSessionConnection, cursor ?? undefined);
     }).catch(() => {
       if (active) unsubscribe = subscribeEvents(initial.id, onEvent, reportSessionConnection);
     });
     return () => { active = false; unsubscribe(); };
-  }, [initial.id, reportSessionConnection]);
+  }, [initial.id, project.id, reportSessionConnection]);
 
   useEffect(() => () => {
     if (sessionStreamDisconnectTimer.current !== null) window.clearTimeout(sessionStreamDisconnectTimer.current);
