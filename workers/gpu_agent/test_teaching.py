@@ -7,6 +7,7 @@ import pytest
 from workers.gpu_agent.teaching import (
     assemble_explanation,
     contains_term,
+    redundant_bilingual_name,
     source_pieces,
     teaching_chunks,
 )
@@ -20,9 +21,17 @@ def test_term_citations_use_words_not_unrelated_substrings() -> None:
     assert not contains_term("RAM", "Use ram")  # Worker returns the source spelling
 
 
+def test_redundant_bilingual_name_is_not_a_technical_term() -> None:
+    assert redundant_bilingual_name("Alice (Alice)")
+    assert redundant_bilingual_name(" Alice（alice） ")
+    assert not redundant_bilingual_name("台积电（TSMC）")
+
+
 @pytest.mark.asyncio
 async def test_term_reference_does_not_include_a_substring_only_paragraph() -> None:
     async def call(body: dict[str, Any]) -> dict[str, Any]:
+        if body["phase"] == "group":
+            return {"provider": "ollama:synthetic@cuda", "prose": "连贯的组合说明"}
         if body["phase"] == "prose":
             return {"provider": "ollama:synthetic@cuda", "prose": "合成说明",
                     "original_terms": ["net"]}
@@ -65,6 +74,8 @@ async def test_card_covers_all_sources_and_defines_repeated_term_only_once() -> 
         calls.append(body)
         assert "id" not in body and "session_id" not in body
         provider = "ollama:synthetic@cuda"
+        if body["phase"] == "group":
+            return {"provider": provider, "prose": body["text"]}
         if body["phase"] == "prose":
             return {"provider": provider, "prose": body["text"], "original_terms": ["latch"]}
         return {"provider": provider, "term": "锁存器", "definition": "受使能控制的存储元件"}
@@ -74,8 +85,10 @@ async def test_card_covers_all_sources_and_defines_repeated_term_only_once() -> 
                      {"id": "b", "text": "The latch is level sensitive."}],
         "asset_pages": [{"id": "page", "text": "A latch diagram."}], "target_language": "zh-CN",
     }, call)
-    assert len(calls) == 3
-    assert [body["phase"] for body in calls] == ["prose", "prose", "definition"]
+    assert len(calls) == 4
+    assert [body["phase"] for body in calls] == [
+        "prose", "prose", "definition", "group",
+    ]
     assert calls[0]["text"] == "A latch stores a bit.\n\nThe latch is level sensitive."
     assert calls[0]["context"] == ["A latch diagram."]
     assert result["evidence_segment_ids"] == ["a", "b"]
@@ -83,6 +96,33 @@ async def test_card_covers_all_sources_and_defines_repeated_term_only_once() -> 
     assert result["terms"][0]["evidence_segment_ids"] == ["a", "b"]
     assert result["terms"][0]["asset_page_ids"] == ["page"]
     assert len(result["paragraph_summary"].split("\n\n")) == 3
+
+
+@pytest.mark.asyncio
+async def test_multiple_short_paragraphs_receive_group_synthesis() -> None:
+    phases: list[str] = []
+
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        phases.append(body["phase"])
+        return {
+            "provider": "ollama:synthetic@cuda",
+            "prose": (
+                "先说明电路测试要解决的问题，再解释故障模型如何缩小验证范围；"
+                "随后说明测试向量怎样激励电路并观察响应；"
+                "最后保留模型无法覆盖全部物理缺陷这一适用边界"
+            ),
+            "original_terms": [],
+        }
+
+    result = await assemble_explanation({
+        "segments": [
+            {"id": "a", "text": "Fault models define the target."},
+            {"id": "b", "text": "Test vectors expose the modeled response."},
+        ],
+        "target_language": "zh-CN",
+    }, call)
+    assert phases == ["prose", "group"]
+    assert result["paragraph_summary"].startswith("先说明电路测试")
 
 
 def test_group_chunking_retains_all_text_and_source_ownership() -> None:
@@ -98,6 +138,8 @@ def test_group_chunking_retains_all_text_and_source_ownership() -> None:
 @pytest.mark.asyncio
 async def test_group_inventory_cites_only_sources_containing_the_term() -> None:
     async def call(body: dict[str, Any]) -> dict[str, Any]:
+        if body["phase"] == "group":
+            return {"provider": "ollama:synthetic@cuda", "prose": "完整组合说明"}
         if body["phase"] == "prose":
             return {"provider": "ollama:synthetic@cuda", "prose": "连贯解释",
                     "original_terms": ["latch"]}
@@ -115,6 +157,8 @@ async def test_group_inventory_cites_only_sources_containing_the_term() -> None:
 @pytest.mark.asyncio
 async def test_equivalent_reviewed_names_merge_references_not_meanings() -> None:
     async def call(body: dict[str, Any]) -> dict[str, Any]:
+        if body["phase"] == "group":
+            return {"provider": "ollama:synthetic@cuda", "prose": body["text"]}
         assert body["phase"] == "prose"
         return {"provider": "ollama:synthetic@cuda", "prose": "完整解释",
                 "original_terms": ["frequency", "clock frequency"]}

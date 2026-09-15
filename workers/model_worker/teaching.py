@@ -165,12 +165,15 @@ async def generate_part(
         )
     if request.phase != "definition":
         instruction = (
-            "Explain this complete source paragraph to a beginner in coherent prose, keeping "
+            "Explain this complete source passage to a beginner in coherent prose. The source "
+            "may contain one or more adjacent paragraphs from the same teaching unit. Keep "
             "all of its information rather than merely naming its topic. Preserve its examples "
             "and caveats. Do not add unsourced mechanisms or numerical values. Inventory the "
             "distinct professional concepts and abbreviations that actually occur in source, "
             "including secondary terms, but not ordinary verbs or whole sentences. Copy each "
-            "original term exactly as it occurs in source. Naming hints disambiguate a few "
+            "original term exactly as it occurs in source. Exclude names of people, speakers, "
+            "institutions, locations and course titles; a proper name is not a technical term. "
+            "Naming hints disambiguate a few "
             "names, but do not limit which concepts you inventory. "
             "Do not invent a quotation or complete a broken statement as an established fact. "
             "Explain uncertainty about quantities or comparisons in ordinary reader-facing "

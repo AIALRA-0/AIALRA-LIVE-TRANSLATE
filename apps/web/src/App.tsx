@@ -833,7 +833,7 @@ function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, r
       {insight ? <details className="paragraph-insight-source"><summary>本组覆盖 {groupParagraphs.length} 个段落 · 查看原文</summary><p>{groupParagraphs.map((item) => item.original).join(" ")}</p></details> : <p>当前段落尚未形成已完成的内容组；不会借用其他话题的讲解。</p>}
       <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "相似内容会保持在一起，确认话题转折后再统一整理；停止录音时会整理尚未完成的内容，不逐句总结"}</p></section>
       <section className="paragraph-terms-section"><strong>知识补充</strong><p className="form-help">以下为帮助理解的背景解释，不是老师原话；有资料链接的词条已经过来源核对</p>{terms.length ? terms.map((term, index) => <details key={`${term.label}:${index}`}><summary>{term.label.replace("知识补充 · ", "")}</summary><p>{term.text}</p>{term.backgroundReference && <a href={term.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}</details>) : <p>当前内容组还没有检测到需要解释的专业名词或缩写</p>}</section>
-      {retryAvailable && <button type="button" className="secondary-button" disabled={retrying} onClick={onRetry}>{retrying ? "正在重新排队" : "重试失败的讲解"}</button>}
+      {!insight && retryAvailable && <button type="button" className="secondary-button" disabled={retrying} onClick={onRetry}>{retrying ? "正在重新排队" : "重新整理当前内容"}</button>}
     </section>
   );
 }

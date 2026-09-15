@@ -21,6 +21,12 @@ def contains_term(term: str, source: str) -> bool:
     return re.search(left + re.escape(term) + right, source) is not None
 
 
+def redundant_bilingual_name(value: str) -> bool:
+    """Reject labels such as ``Alice (Alice)`` before publication."""
+    matched = re.fullmatch(r"\s*([^()（）]+?)\s*[（(]\s*([^()（）]+?)\s*[）)]\s*", value)
+    return bool(matched and matched.group(1).casefold() == matched.group(2).casefold())
+
+
 def source_pieces(text: str, capacity: int = 1400) -> list[str]:
     """Split by byte capacity without dropping text; prefer an existing boundary."""
     pieces: list[str] = []
@@ -176,6 +182,8 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
             raise ValueError("teaching_term_missing")
         if not isinstance(definition, str) or not definition.strip():
             raise ValueError("teaching_definition_missing")
+        if redundant_bilingual_name(term):
+            continue
         entry = {
             "term": term.strip(), "explanation": definition.strip(),
             "evidence_segment_ids": term_source["segment_ids"],
@@ -197,7 +205,7 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
             for field in ("evidence_segment_ids", "asset_page_ids"):
                 existing[field] = list(dict.fromkeys([*existing[field], *entry[field]]))
     detailed_prose = "\n\n".join(prose)
-    if sum(kind == "segment" for kind, _ in chunks) > 1 and len(detailed_prose.encode()) <= 3500:
+    if len(segments) > 1 and len(detailed_prose.encode()) <= 3500:
         guide = await generate({"phase": "group", "text": detailed_prose,
                                 "target_language": target})
         heading = guide.get("prose")

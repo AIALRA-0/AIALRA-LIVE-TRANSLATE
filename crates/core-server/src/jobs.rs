@@ -765,6 +765,25 @@ fn apply_explanation_result(
     result: &Value,
     elapsed_ms: u64,
 ) -> Result<(), ApiError> {
+    let source_characters = job
+        .input
+        .get("segments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .map(|text| text.chars().count())
+        .sum();
+    let chinese = job
+        .input
+        .get("target_language")
+        .and_then(Value::as_str)
+        .is_some_and(|language| language.to_ascii_lowercase().starts_with("zh"));
+    if crate::explanation::explanation_needs_quality_repair(result, source_characters, chinese) {
+        return Err(ApiError::bad_request(
+            "explanation does not satisfy the learner-facing quality contract",
+        ));
+    }
     let explanation: ExplanationResponse = serde_json::from_value(result.clone())?;
     require_provider(&explanation.provider, "ollama:", &["@cuda"])?;
     let allowed_segments = job

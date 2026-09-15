@@ -4,11 +4,12 @@ use crate::app::AppState;
 use aialra_event_store::{ModelJobRecord, NewModelJob};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
-const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v44";
+const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v45";
 const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
+const MIN_REPAIR_GROUP_PARAGRAPHS: usize = 6;
 
 pub fn enqueue_explanation(
     state: &AppState,
@@ -85,6 +86,17 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
             ))
         })
         .collect::<BTreeMap<_, _>>();
+    let paragraph_order = events
+        .iter()
+        .filter(|event| event.event_type == "paragraph.finalized")
+        .filter_map(|event| {
+            event
+                .payload
+                .get("paragraph_id")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
     let mut latest = BTreeMap::<String, (Vec<String>, Value)>::new();
     for event in events
         .iter()
@@ -107,7 +119,8 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
         .to_ascii_lowercase()
         .starts_with("zh");
     let mut queued = 0;
-    for (key, (ids, result)) in latest {
+    let mut planned = HashSet::new();
+    for (_key, (ids, result)) in latest {
         if queued == MAX_QUALITY_REPAIRS_PER_ENSURE {
             break;
         }
@@ -116,10 +129,16 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
             .filter_map(|id| paragraph_text.get(id))
             .map(|text| text.chars().count())
             .sum();
-        if !explanation_needs_quality_repair(&result, source_characters, chinese) {
+        if ids.len() >= 4 && !explanation_needs_quality_repair(&result, source_characters, chinese)
+        {
             continue;
         }
-        let idempotency_key = format!("explain:{session_id}:{QUALITY_REPAIR_TRIGGER}:{key}");
+        let repair_ids = expanded_repair_evidence(&ids, &paragraph_order);
+        let repair_key = repair_ids.join(":");
+        if !planned.insert(repair_key.clone()) {
+            continue;
+        }
+        let idempotency_key = format!("explain:{session_id}:{QUALITY_REPAIR_TRIGGER}:{repair_key}");
         if state
             .store
             .get_model_job_by_key(&idempotency_key)?
@@ -127,13 +146,39 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
         {
             continue;
         }
-        enqueue_explanation_for_paragraphs(state, session_id, QUALITY_REPAIR_TRIGGER, &ids)?;
+        enqueue_explanation_for_paragraphs(state, session_id, QUALITY_REPAIR_TRIGGER, &repair_ids)?;
         queued += 1;
     }
     Ok(queued)
 }
 
-fn explanation_needs_quality_repair(
+/// A tiny final group is usually the tail of the preceding explanation rather
+/// than a useful teaching unit. Rebuild it with contiguous neighbouring
+/// paragraphs while preserving every original paragraph and its order.
+fn expanded_repair_evidence(ids: &[String], paragraph_order: &[String]) -> Vec<String> {
+    if ids.len() >= 4 || paragraph_order.len() <= ids.len() {
+        return ids.to_vec();
+    }
+    let positions = ids
+        .iter()
+        .filter_map(|id| paragraph_order.iter().position(|candidate| candidate == id))
+        .collect::<Vec<_>>();
+    if positions.len() != ids.len() || positions.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return ids.to_vec();
+    }
+    let first = positions[0];
+    let last = positions[positions.len() - 1] + 1;
+    let target = MIN_REPAIR_GROUP_PARAGRAPHS.min(paragraph_order.len());
+    let mut start = first.saturating_sub(target.saturating_sub(ids.len()));
+    let mut end = last;
+    if end - start < target {
+        end = (start + target).min(paragraph_order.len());
+        start = end.saturating_sub(target);
+    }
+    paragraph_order[start..end].to_vec()
+}
+
+pub(crate) fn explanation_needs_quality_repair(
     result: &Value,
     source_characters: usize,
     chinese: bool,
@@ -167,8 +212,28 @@ fn explanation_needs_quality_repair(
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|term| term["explanation"].as_str())
-        .any(|definition| definition.chars().count() < 50 || definition.matches('；').count() < 2)
+        .any(|term| {
+            let definition = term["explanation"].as_str().unwrap_or_default();
+            let name = term["term"].as_str().unwrap_or_default();
+            definition.chars().count() < 50
+                || definition.matches('；').count() < 2
+                || redundant_bilingual_name(name)
+        })
+}
+
+fn redundant_bilingual_name(value: &str) -> bool {
+    let Some(open) = value.find(['(', '（']) else {
+        return false;
+    };
+    let Some(close) = value.rfind([')', '）']) else {
+        return false;
+    };
+    if close <= open {
+        return false;
+    }
+    let outer = value[..open].trim();
+    let inner = value[open + 1..close].trim();
+    !outer.is_empty() && outer.eq_ignore_ascii_case(inner)
 }
 
 fn enqueue_with_evidence(
@@ -402,6 +467,11 @@ mod tests {
             true,
         ));
         assert!(super::explanation_needs_quality_repair(
+            &json!({"paragraph_summary": "这部分完整解释了一个技术主题的目的、工作过程、适用条件和限制，并保留关键因果关系，足以让第一次接触该主题的读者继续学习", "terms": [{"term": "Alice (Alice)", "explanation": "这是一个在合成材料中出现的人名；它被错误识别成技术概念；它没有可核对的专业定义；因此不应进入知识补充"}]}),
+            400,
+            true,
+        ));
+        assert!(super::explanation_needs_quality_repair(
             &json!({"paragraph_summary": "内容太短", "terms": []}),
             400,
             true,
@@ -416,6 +486,26 @@ mod tests {
             400,
             true,
         ));
+    }
+
+    #[test]
+    fn tiny_legacy_tail_is_repaired_with_contiguous_context() {
+        let order = (0..12).map(|index| format!("p{index}")).collect::<Vec<_>>();
+        assert_eq!(
+            super::expanded_repair_evidence(&["p10".into(), "p11".into()], &order),
+            vec!["p6", "p7", "p8", "p9", "p10", "p11"]
+        );
+        assert_eq!(
+            super::expanded_repair_evidence(&["p0".into(), "p1".into()], &order),
+            vec!["p0", "p1", "p2", "p3", "p4", "p5"]
+        );
+        assert_eq!(
+            super::expanded_repair_evidence(
+                &["p2".into(), "p3".into(), "p4".into(), "p5".into()],
+                &order,
+            ),
+            vec!["p2", "p3", "p4", "p5"]
+        );
     }
 
     #[test]
