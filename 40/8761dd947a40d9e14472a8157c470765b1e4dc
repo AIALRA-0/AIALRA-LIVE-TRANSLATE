@@ -1,0 +1,277 @@
+tools/e2e_smoke.mjs
+  s_4d8bb530e409af::t_52cc2b9f1a0604 10-11,80-88,186-193,215,223,237-239,241-262,283-284
+apps/web/src/api.ts
+  s_4d8bb530e409af::t_0316b4b325d983 213,216
+  s_4d8bb530e409af::t_6131731dacbc89 102,104
+docs/KNOWN_ISSUES.md
+  s_4d8bb530e409af::t_75a5785ae7de17 3-10
+PROJECT_STATE.md
+  s_4d8bb530e409af::t_75a5785ae7de17 3-10
+deploy/compose.yaml
+  s_4d8bb530e409af::t_18dc34dbdcc3aa 31-32
+apps/web/src/CourseQuestions.tsx
+  s_4d8bb530e409af::t_1365d24aec0260 31-33,35-42,44
+  s_4d8bb530e409af::t_ba4ad71d005201 7-15,75
+  s_4d8bb530e409af::t_119077fbe7b2d9 85
+  s_4d8bb530e409af::t_1b19c2c24cd15c 30
+  s_4d8bb530e409af::t_3ad7c1c7583c9c 1,16,20-21,27-29,34,43,45,48,51-54,56,66,77-84,89-93,95-96
+crates/core-server/src/topics.rs
+  s_4d8bb530e409af::t_38b12e8f577abd 330-334,339-370
+  s_4d8bb530e409af::t_572fb0f4d977a9 287-299,306-322,327-329
+  s_4d8bb530e409af::t_e7cb4c923397f5 13,17,49,69,74,78,119-134
+  s_4d8bb530e409af::t_9893c541a2f338 323-326
+  s_4d8bb530e409af::t_9f323d666ce0e2 16,103
+  s_4d8bb530e409af::t_0442a53ee655de 102
+  s_4d8bb530e409af::t_5467fc0aa25ac2 14-15,135
+  s_4d8bb530e409af::t_97a24cc8693e77 300-303,305
+  s_4d8bb530e409af::t_9a437b8dc6d4e4 304
+  s_4d8bb530e409af::t_8ec22d3a6949ea 335-338
+  s_4d8bb530e409af::t_067070dbad3250 136-137
+crates/core-server/src/api.rs
+  s_4d8bb530e409af::t_7b54b5e06246a6 407-408,437,439-467,469-478,493-497
+  s_4d8bb530e409af::t_542ccefc4412c2 4,479-489
+  s_4d8bb530e409af::t_08f56bd38eb36c 468
+  s_4d8bb530e409af::t_c3742e1de31e5d 345
+  s_4d8bb530e409af::t_c0b5c0b6b7c22f 498-499
+docs/COURSE_LEARNING_ARCHITECTURE.md
+  s_4d8bb530e409af::t_082d376455dd18 1-19
+workers/gpu_agent/test_teaching.py
+  s_4d8bb530e409af::t_512582e4bd0917 80-85
+  s_4d8bb530e409af::t_2fc4b15795a6cd 10,16,18,52-55,61-68,99-104,110-116
+  s_4d8bb530e409af::t_0ba210e581c00d 86-91
+  s_4d8bb530e409af::t_c54d2710be7743 105-107
+  s_4d8bb530e409af::t_d96b9d61aedf44 46
+  s_4d8bb530e409af::t_78aa77ce745b39 70-79
+  s_4d8bb530e409af::t_1cb7df72c6d179 56,108-109
+  s_4d8bb530e409af::t_33ecb57cf52a9b 92-96
+  s_4d8bb530e409af::t_e5061f2f42d726 268-288
+  s_4d8bb530e409af::t_86fe6cab9b9e9a 431,433
+  s_4d8bb530e409af::t_c16b27f86a8e78 57-60,69,97-98
+  s_4d8bb530e409af::t_7cc34ad8833556 432
+  s_f4bc084e1b5e1b::t_91a8956f245ade 117-118
+crates/core-server/src/worker.rs
+  s_4d8bb530e409af::t_7ca436553674fe 34-35
+crates/core-server/src/explanation.rs
+  s_4d8bb530e409af::t_e0afc00d0a5715 175-176,178-180,360,557-562,662-668
+  s_4d8bb530e409af::t_97bc4b33a65fc4 373
+  s_4d8bb530e409af::t_c37c88db6c9fbb 268-271,274-306,316-321
+  s_4d8bb530e409af::t_21cb1c025a5182 673,676
+  s_4d8bb530e409af::t_959a59198ef9d1 246,267,272-273,307-315,322-327,703-704
+  s_4d8bb530e409af::t_c3742e1de31e5d 177,583,674-675,979-986,993,997-1002,1005
+  s_4d8bb530e409af::t_b60a630dc928d1 30-40,46-47,51,83,476-481,504-526,532-535,538,544-556,563-582,584-614,669,962-977,987,994-996,1006
+  s_4d8bb530e409af::t_511c1d59ca3681 10-15,754,789,801-808
+  s_4d8bb530e409af::t_e28f213165483b 978
+  s_4d8bb530e409af::t_d5a8438190109f 372
+  s_4d8bb530e409af::t_266fbebc8b494d 29,670,705-707,988-992,1003-1004
+workers/gpu_agent/teaching.py
+  s_4d8bb530e409af::t_6eb225c9d3bbc5 23-37,39-42,44-56,58-61,63-70,72-77,80,117-123,125-135,140-170
+  s_4d8bb530e409af::t_3e9e59d8ce8e30 38,57,62,71,78-79,124
+  s_4d8bb530e409af::t_fd54b2c3a0f112 82-83
+  s_4d8bb530e409af::t_5a8ae1df1a4af9 7,43
+  s_4d8bb530e409af::t_0ba210e581c00d 84-90
+  s_4d8bb530e409af::t_6d6e806cec3f09 91-94,97-111
+  s_4d8bb530e409af::t_ab2fb48e0a0074 81,114-116
+  s_4d8bb530e409af::t_512582e4bd0917 95-96
+  s_4d8bb530e409af::t_d96b9d61aedf44 10,178
+  s_4d8bb530e409af::t_c54d2710be7743 136-139
+  s_7e23799dc317a2::t_dd50e7e22e7713 112-113,290,292,482-484,488
+workers/model_worker/teaching.py
+  s_4d8bb530e409af::t_706aa6d6cabdf5 240-243
+  s_4d8bb530e409af::t_bf019f6745aced 232-239,244
+  s_4d8bb530e409af::t_66b81ca49bdc3f 263-271
+  s_4d8bb530e409af::t_be0902821727f7 272-275
+  s_4d8bb530e409af::t_d96b9d61aedf44 11,75-91,95-96
+  s_4d8bb530e409af::t_cc1f52f5d57ced 221,231
+crates/core-server/src/workspace.rs
+  s_4d8bb530e409af::t_6af9a5341a3dc1 744
+  s_4d8bb530e409af::t_09eb3008c75ce1 726-728,769-771
+  s_4d8bb530e409af::t_c37c88db6c9fbb 739,758-762
+  s_4d8bb530e409af::t_cb4d9dd107d28a 775-782,1162-1165,1178
+  s_4d8bb530e409af::t_18dc34dbdcc3aa 738,772-774
+  s_4d8bb530e409af::t_de060f036c4a37 1166-1177
+  s_4d8bb530e409af::t_69113ba5c12a06 741-743,745-757,767
+crates/core-server/src/course_content.rs
+  s_4d8bb530e409af::t_c37c88db6c9fbb 289-304,306-308,310-322,381-402,466-469,473-474,1229-1236,1242-1280,1283-1292
+  s_4d8bb530e409af::t_806a6cc59d1754 888
+  s_4d8bb530e409af::t_78fff7a7467a80 1225-1228,1237-1241,1281-1282,1293-1295
+  s_4d8bb530e409af::t_559459c00134b1 1182-1183,1193-1194
+  s_4d8bb530e409af::t_a5b5f0747b607b 266-269,285-286,288,305,309,430-432,440,445-449,452-453,470-472,484-485
+  s_4d8bb530e409af::t_e5b588577d86fc 441-444
+  s_4d8bb530e409af::t_be9199aaa89c99 1224
+apps/web/src/CourseQuestions.test.tsx
+  s_4d8bb530e409af::t_6876b0adfe3c45 1-53
+  s_4d8bb530e409af::t_ba4ad71d005201 54-68
+apps/web/src/App.tsx
+  s_4d8bb530e409af::t_0d735c5db29145 113,950-951,1494,1496-1498,1501-1502,1506,1510-1512,1514-1520,1522-1523,1525
+  s_4d8bb530e409af::t_441b12e727c0bf 814,855,924-925,1760-1763,1766,1786
+  s_4d8bb530e409af::t_d636134475bf71 1701,1707
+  s_4d8bb530e409af::t_d49e30742026ff 1706
+  s_4d8bb530e409af::t_0f4fc4eb76ef42 808-811
+  s_4d8bb530e409af::t_aa304bc799b21d 1495
+  s_4d8bb530e409af::t_522907be20db5a 1614,1778
+  s_4d8bb530e409af::t_404aa8a08973fd 740
+  s_4d8bb530e409af::t_d9aea3cf89e5d4 807,812-813,846-847,854
+  s_4d8bb530e409af::t_e4c1418332946e 1615,1776
+  s_4d8bb530e409af::t_ad499b076c78c5 1695,1699,1703-1705,1708
+  s_7e23799dc317a2::t_60e6e3873752d5 12,218,590-591,593,1758-1759,1767,1769,1793
+crates/core-server/src/jobs.rs
+  s_4d8bb530e409af::t_abe9c59d2c47d8 2154-2156,2200,2224-2225
+  s_4d8bb530e409af::t_18dc34dbdcc3aa 1889-1890
+  s_4d8bb530e409af::t_c37c88db6c9fbb 325-327,814-819,822-824,1909-1911,2157-2199,2201-2208,2211,2214-2218,2220-2223
+  s_4d8bb530e409af::t_bcf230d34ad331 801-813,820-821,825-826
+  s_4d8bb530e409af::t_dbb3c859f94002 1891-1893
+  s_4d8bb530e409af::t_09eb3008c75ce1 2209,2212-2213
+  s_4d8bb530e409af::t_6af9a5341a3dc1 180-185,322-324,328,520,800,1011,1817,1825-1832,1875,1894-1908,1912-1914
+  s_4d8bb530e409af::t_420129a7651db6 2809
+  s_4d8bb530e409af::t_53a674cc0706e6 3095
+  s_4d8bb530e409af::t_b93dcfec72f6ce 1876-1888,2210,2219
+  s_5acd167c2115aa::t_92bdd6e4868198 1915,2153
+apps/web/src/CloudTextPolicy.test.tsx
+  s_4d8bb530e409af::t_12f5e4a9728088 1-19,21-31,34-55,66-67
+  s_4d8bb530e409af::t_f71513b4176316 20,32-33,56-65
+workers/gpu_agent/course_summary.py
+  s_4d8bb530e409af::t_5eaed1343a19ee 7,41
+workers/gpu_agent/test_course_summary.py
+  s_4d8bb530e409af::t_5eaed1343a19ee 82-115
+deploy/README.md
+  s_4d8bb530e409af::t_16aa2b79786827 3-4
+apps/web/src/SessionPlayer.test.tsx
+  s_4d8bb530e409af::t_11a4fb4dd0de90 79-89
+workers/model_worker/test_main.py
+  s_4d8bb530e409af::t_ce93ac61072b04 75-101
+docs/CHANGELOG.md
+  s_4d8bb530e409af::t_d70a76d68c51ee 7
+  s_4d8bb530e409af::t_75a5785ae7de17 3-6,8-10
+docs/VALIDATION_REPORT.md
+  s_4d8bb530e409af::t_3d56238be7089b 13-14
+  s_4d8bb530e409af::t_cbb9392bb54965 11
+  s_4d8bb530e409af::t_fa6659786f581b 12,15
+  s_4d8bb530e409af::t_db6cdcb995840b 9-10
+  s_4d8bb530e409af::t_75a5785ae7de17 3-8,16
+docs/MODEL_ROUTING.md
+  s_4d8bb530e409af::t_d94d0a70e7bf64 3-10
+workers/gpu_agent/main.py
+  s_4d8bb530e409af::t_5a8ae1df1a4af9 622,624,629-631
+  s_4d8bb530e409af::t_3efc70855e298f 23,307-314,532-533,592-593,621,623,625-628,730
+workers/gpu_agent/test_main.py
+  s_4d8bb530e409af::t_e0afc00d0a5715 339-347
+scripts/run-gpu-agent.ps1
+  s_4d8bb530e409af::t_23d543de5e9624 5-10
+apps/web/src/styles.css
+  s_4d8bb530e409af::t_41b0d04442b69f 287-298
+  s_4d8bb530e409af::t_08f56bd38eb36c 634-660,667-712
+  s_4d8bb530e409af::t_4d71f70762bf5b 661-663
+  s_4d8bb530e409af::t_0f46e21d80c659 664-666
+apps/web/tests/browser_dual_device.mjs
+  s_4d8bb530e409af::t_1358c20427b29e 3
+  s_4d8bb530e409af::t_e87fbc99ddbd55 221-225
+  s_4d8bb530e409af::t_a0ed3c8cd16c8a 161
+  s_4d8bb530e409af::t_4400bcc3d5a6b3 4,12,20-33
+workers/model_worker/main.py
+  s_4d8bb530e409af::t_57072c739fde9a 426,430
+  s_4d8bb530e409af::t_ba4ad71d005201 427-429
+  s_4d8bb530e409af::t_b34c75cd525211 401,431-432,438-440
+apps/web/src/CloudTextPolicy.tsx
+  s_4d8bb530e409af::t_7a2fca84f20bc9 39,61
+  s_4d8bb530e409af::t_f71513b4176316 3,10,13,17,31,40,51,58,68-69,71,75-76
+  s_4d8bb530e409af::t_730f7d33d7adc3 1-2,4-9,11-12,14-16,18-30,32-38,41-50,52-57,59-60,62-67,70,72-74,77,79-80
+  s_4d8bb530e409af::t_73421316b9ad75 78
+apps/web/src/SessionPlayer.tsx
+  s_4d8bb530e409af::t_e5061f2f42d726 103-106
+apps/web/src/api.test.ts
+  s_4d8bb530e409af::t_85d1e5ba9d34bb 7
+  s_4d8bb530e409af::t_2c627412b364a1 1-6,8-15
+workers/gpu_agent/kuafushe.py
+  s_4d8bb530e409af::t_b34c75cd525211 267-268
+  s_4d8bb530e409af::t_b97cb3f08c4517 58,65
+  s_4d8bb530e409af::t_1cace9a1cfdd80 59-64,194-197,199-200,212-213,217-218,228-233
+  s_4d8bb530e409af::t_92d9a023fa3e65 11,13
+  s_4d8bb530e409af::t_445cac9f97f35e 75,102,175-181
+  s_4d8bb530e409af::t_e3b437c05f6bc6 27,108,141,143,147-149,152-153,156-157
+  s_4d8bb530e409af::t_b1dee2afb40a27 1-10,12,14-16,18,20-26,28-33,50,68-74,77-79,88-89,99-101,104-107,140,142,144-146,158,161-163,182-191,237-246,255-261,269-270,280-283,292,307-309
+  s_4d8bb530e409af::t_d6ba7beae47867 159-160,310-312,315-328,332-334
+  s_4d8bb530e409af::t_41193fa94626b3 17,19,192-193,198,201-211,214-216,219-227,234-236
+  s_4d8bb530e409af::t_c37c88db6c9fbb 34-49,51-57,66-67,80-87,90-98,109-139,150-151,154-155,164-174,247-254,271-279,284-291,293-306,313-314,329-331,335-338
+  s_4d8bb530e409af::t_ba4ad71d005201 262-266
+  s_4d8bb530e409af::t_256cde72496960 76,103
+workers/gpu_agent/test_kuafushe.py
+  s_4d8bb530e409af::t_90be9d68093213 5-6,20,320-323,329-331,351,369-377,386-387,392,396
+  s_4d8bb530e409af::t_f3065fde59ecbd 11,291-299,317-319
+  s_4d8bb530e409af::t_445cac9f97f35e 257,266
+  s_4d8bb530e409af::t_19e62986f96b19 283
+  s_4d8bb530e409af::t_1cace9a1cfdd80 162-173,177-183
+  s_4d8bb530e409af::t_225fe2893cfd7c 208-217,221-225,228-230
+  s_4d8bb530e409af::t_c37c88db6c9fbb 14-18,24-27,44-50,61-64,71-95,100-106,122-133,137-143,201-202,205-207,218-220,226-227,258-265,267-269,324-327,337-348,352-368,378-385,388-391,393-395
+  s_4d8bb530e409af::t_e0afc00d0a5715 1-3,7-10,21-23,28-36,39-43,51-59,66,69,96-99,107-119,134-136,144-145
+  s_4d8bb530e409af::t_8d6373e1607b25 231-248,288-290
+  s_4d8bb530e409af::t_94bcdffc892d99 272,300-316
+  s_4d8bb530e409af::t_92d9a023fa3e65 60,65,67-68
+  s_4d8bb530e409af::t_2522a944515ab4 4,146-148,189-200,203-204
+  s_4d8bb530e409af::t_a38563ed3102a1 70,120-121
+  s_4d8bb530e409af::t_6a6412b2ed42d9 37-38
+  s_4d8bb530e409af::t_65f8477e96b659 149-161,174-176,184-188
+  s_4d8bb530e409af::t_b100200d96124a 328
+  s_4d8bb530e409af::t_40f385bb7f5b43 13,19,249-256,270,279-282
+  s_4d8bb530e409af::t_b97cb3f08c4517 271,273-277,284,286
+  s_4d8bb530e409af::t_f6c5b7e6dadd02 332-336,349-350
+  s_4d8bb530e409af::t_0c1db8e13efdd6 285
+  s_4d8bb530e409af::t_256cde72496960 278,287
+  s_4d8bb530e409af::t_35b5436ad5766f 12
+apps/web/src/timeline.test.ts
+  s_4d8bb530e409af::t_014f3558d505a3 102-119,123-140
+  s_4d8bb530e409af::t_e4c1418332946e 120,230
+  s_4d8bb530e409af::t_b1ff5920f26058 84,121-122
+workers/model_worker/test_teaching.py
+  s_4d8bb530e409af::t_f48eb7d622e9cc 184-185
+  s_4d8bb530e409af::t_01cfdafeec84ba 186
+  s_4d8bb530e409af::t_d96b9d61aedf44 14,25-27
+  s_4d8bb530e409af::t_8c9d2a6fd6f52e 152-155,158
+apps/web/src/timeline.ts
+  s_4d8bb530e409af::t_e4c1418332946e 210
+  s_4d8bb530e409af::t_36fb5d0a79df8a 19-37,39-42,45-47,209,228,237
+  s_4d8bb530e409af::t_0f4fc4eb76ef42 38,43-44
+apps/web/tests/ui_contract_smoke.mjs
+  s_4d8bb530e409af::t_a1c017d80b0e68 1-54,56-63,75-86,93-97
+  s_4d8bb530e409af::t_62fc8dbafaba75 55,87-92
+  s_4d8bb530e409af::t_9462d9d30bdd41 64-74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "408761dd947a40d9e14472a8157c470765b1e4dc",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_5acd167c2115aa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03a21-3e91-7be2-8cf4-5616c2bcfc48",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_7e23799dc317a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ad52-c35f-7882-a496-5c0fabb841af",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_f4bc084e1b5e1b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05e85-d752-7582-abf7-4d4f5901369e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
