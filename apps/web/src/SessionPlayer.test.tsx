@@ -76,3 +76,14 @@ it("shows buffering without replacing the playback controls", async () => {
   expect(screen.getByRole("status")).toHaveTextContent("正在加载当前录音");
   expect(screen.getByRole("slider", { name: "回放位置" })).toBeInTheDocument();
 });
+
+it("seeks to the recording endpoint inside the final segment", async () => {
+  render(<SessionPlayer sessionId="session-test" sessionState="completed" seekRequest={null} onReady={vi.fn()} />);
+  await act(async () => undefined);
+
+  const audio = screen.getByLabelText("课程录音") as HTMLAudioElement;
+  fireEvent.change(screen.getByRole("slider", { name: "回放位置" }), { target: { value: "180" } });
+
+  expect(screen.getByRole("slider", { name: "回放位置" })).toHaveValue("180");
+  expect(audio.src).toContain("start_ms=135000");
+});

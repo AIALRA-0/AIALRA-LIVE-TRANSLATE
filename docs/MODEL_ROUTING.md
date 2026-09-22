@@ -1,5 +1,13 @@
 # 模型分层与授权边界
 
+## 2026-09-22 当前候选路由（以下旧章节仅作历史记录）
+
+课程讲解、整课总结和问答在服务端允许且项目显式授权 `text` 后，由 Windows GPU Agent 直接调用夸父社 DS；主、备密钥分别来自进程环境 `AIALRA_KUAFUSHE_DS_PRIMARY_KEY`、`AIALRA_KUAFUSHE_DS_BACKUP_KEY`，不写入 Git。默认两条均为 `https://api.kuafushe.cc/v1/responses` 的 `deepseek-v4.1-flash`，凭据或输出合同失效时改试另一条。两条共享提供方，只构成单凭据级互备，不能承诺提供方整体宕机时仍可用。运行请求不经过 ReadWeave。
+
+Core 的生产 Compose 默认 `AIALRA_LOCAL_ONLY=true`、`AIALRA_CLOUD_TEXT_ALLOWED=false`，且项目默认无云端授权；两级条件未同时满足时继续本地讲解，音频与图片不因文本授权外发。ASR、HY-MT 翻译、话题判定、材料解析和原生远程 GPU Broker 链路不切换。音频接收、持久确认及停止始终优先于模型任务。材料只解析入库，讲解时按需选取有限相关页；话题检查窗口按稳定段落长度自适应，语义边界仍需真实课程复核。最新证据与未关闭问题见 `VALIDATION_REPORT.md`、`KNOWN_ISSUES.md`。
+
+以下 2026-09-12 原方案中的固定模型、固定八段、独立凭据要求与云端关闭结论均已被本节替代，不得当作当前配置。
+
 状态日期：2026-09-12
 
 ## 1 当前决定

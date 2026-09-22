@@ -79,3 +79,37 @@ async def test_summary_preserves_reviewed_background_reference_with_one_synthesi
         }],
     }, synthesis)
     assert result["terminology"][0]["background_reference"] == reference
+
+
+@pytest.mark.asyncio
+async def test_summary_accepts_cloud_provider_for_all_synthesis_parts() -> None:
+    async def synthesis(body: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "prose": f"{body['phase']}: synthetic explanation",
+            "original_terms": [],
+            "provider": "kuafushe:deepseek-v4.1-flash@cloud",
+        }
+
+    result = await compile_course({
+        "segments": [{"id": "p1", "text": "Synthetic lesson paragraph"}],
+        "target_language": "zh-CN",
+    }, synthesis)
+    assert result["provider"] == "kuafushe:deepseek-v4.1-flash@cloud"
+    assert result["evidence_segment_ids"] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_summary_rejects_provider_switch_midcourse() -> None:
+    calls = 0
+
+    async def synthesis(body: dict[str, Any]) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        provider = "kuafushe:deepseek-v4.1-flash@cloud" if calls == 1 else "ollama:test@cuda"
+        return {"prose": "Synthetic explanation", "provider": provider}
+
+    with pytest.raises(ValueError, match="course_synthesis_invalid"):
+        await compile_course({
+            "segments": [{"id": "p1", "text": "Synthetic lesson paragraph"}],
+            "target_language": "zh-CN",
+        }, synthesis)

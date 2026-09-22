@@ -1,6 +1,5 @@
 //! Small, owner-scoped document operations. Notes are append-only; audio stays private.
 use crate::app::{ApiError, AppState};
-use aialra_core_domain::SessionState;
 use aialra_event_protocol::EventEnvelope;
 use aialra_event_store::AudioChunkRecord;
 use aialra_event_store::NewModelJob;
@@ -264,6 +263,10 @@ fn enqueue_correction_translation(
 #[derive(Deserialize)]
 pub struct AskCourseQuestion {
     pub question: String,
+    #[serde(default)]
+    pub parent_job_id: Option<String>,
+    #[serde(default)]
+    pub card_id: Option<String>,
 }
 
 pub async fn ask_course_question(
@@ -279,13 +282,44 @@ pub async fn ask_course_question(
         .store
         .get_session(&session)?
         .ok_or_else(|| ApiError::not_found("课程不存在"))?;
-    if !matches!(course.state, SessionState::Completed | SessionState::Failed) {
-        return Err(ApiError::conflict_with_code(
-            "请先结束课程并等待已录内容处理完成，再提问",
-            "course_question_wait_for_completion",
-        ));
-    }
+    // Questions use stable saved paragraphs only and run on a low-priority
+    // worker lane; they do not wait for recording or translation to stop.
     let (events, _) = state.store.course_document_snapshot(&session)?;
+    let parent = if let Some(parent_job_id) = request.parent_job_id.as_deref() {
+        let answer = events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "course.question.answered"
+                    && event.payload["job_id"] == parent_job_id
+            })
+            .ok_or_else(|| ApiError::bad_request("父回答不属于这节课程或尚未完成"))?;
+        let asked = events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "course.question.asked"
+                    && event.payload["job_id"] == parent_job_id
+            })
+            .ok_or_else(|| ApiError::bad_request("父问题不可用"))?;
+        Some((asked, answer))
+    } else {
+        None
+    };
+    let card = if let Some(card_id) = request.card_id.as_deref() {
+        Some(
+            events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.event_type == "explanation.card.created"
+                        && event.payload["card_id"] == card_id
+                })
+                .ok_or_else(|| ApiError::bad_request("讲解卡片不属于这节课程"))?,
+        )
+    } else {
+        None
+    };
     let has_paragraphs = events
         .iter()
         .any(|event| event.event_type == "paragraph.finalized");
@@ -344,6 +378,28 @@ pub async fn ask_course_question(
     }
     terms.sort();
     terms.dedup();
+    let parent_evidence = parent
+        .as_ref()
+        .map(|(_, answer)| {
+            answer.payload["evidence_segment_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let card_evidence = card
+        .as_ref()
+        .map(|event| {
+            event.payload["result"]["evidence_segment_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
     let translations = events
         .iter()
         .filter(|event| event.event_type == "translation.finalized")
@@ -371,7 +427,9 @@ pub async fn ask_course_question(
                 .iter()
                 .filter(|term| lower.contains(term.as_str()))
                 .count();
-            (index, score, id, text)
+            let anchored = usize::from(card_evidence.contains(id.as_str())) * 10
+                + usize::from(parent_evidence.contains(id.as_str())) * 5;
+            (index, score + anchored, id, text)
         })
         .collect::<Vec<_>>();
     candidates
@@ -379,8 +437,20 @@ pub async fn ask_course_question(
     candidates.truncate(12);
     candidates.sort_by_key(|(index, _, _, _)| *index);
     let evidence = candidates.into_iter().map(|(_, _, id, text)| json!({"id": id, "text": text.chars().take(600).collect::<String>()})).collect::<Vec<_>>();
+    let mut context = Vec::<Value>::new();
+    if let Some(card) = card
+        && let Some(summary) = card.payload["result"]["paragraph_summary"].as_str()
+    {
+        context.push(json!({"kind": "teaching_card", "text": summary.chars().take(1800).collect::<String>()}));
+    }
+    if let Some((asked, answer)) = parent {
+        context.push(json!({"kind": "parent_question", "text": asked.payload["question"].as_str().unwrap_or_default().chars().take(1000).collect::<String>()}));
+        context.push(json!({"kind": "parent_answer", "text": answer.payload["answer"].as_str().unwrap_or_default().chars().take(1800).collect::<String>()}));
+    }
     let fingerprint = aialra_event_protocol::hash_payload(&json!({
         "session_id": session, "question": question, "segments": evidence,
+        "parent_job_id": request.parent_job_id, "card_id": request.card_id,
+        "context": context,
     }))
     .map_err(anyhow::Error::from)?;
     let key = format!("course_qa:{fingerprint}");
@@ -393,9 +463,15 @@ pub async fn ask_course_question(
     }
     let id = format!("job_{}", Uuid::now_v7().simple());
     let job = state.enqueue_job(NewModelJob {
-        id: id.clone(), session_id: session.clone(), job_type: "course_qa".into(), priority: 15,
-        input: json!({"question": question, "segments": evidence, "target_language": course.target_language}),
-        input_object_hash: None, idempotency_key: key,
+        id: id.clone(),
+        session_id: session.clone(),
+        job_type: "course_qa".into(),
+        priority: 15,
+        input: json!({"question": question, "segments": evidence,
+            "target_language": course.target_language, "context": context,
+            "parent_job_id": request.parent_job_id, "card_id": request.card_id}),
+        input_object_hash: None,
+        idempotency_key: key,
     })?;
     state.emit_idempotent(
         &format!("{}:asked", job.id),
@@ -405,7 +481,8 @@ pub async fn ask_course_question(
         0,
         &job.id,
         None,
-        json!({"job_id": job.id, "question": question}),
+        json!({"job_id": job.id, "question": question,
+            "parent_job_id": request.parent_job_id, "card_id": request.card_id}),
     )?;
     if previously_failed {
         state.emit(
@@ -808,6 +885,7 @@ fn pcm_wav(pcm: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aialra_core_domain::SessionState;
     use aialra_event_store::{NewModelJob, NewSession};
     use chrono::Utc;
 
@@ -1101,6 +1179,8 @@ mod tests {
             Path(session.into()),
             Json(AskCourseQuestion {
                 question: "What was corrected?".into(),
+                parent_job_id: None,
+                card_id: None,
             }),
         )
         .await
@@ -1110,6 +1190,8 @@ mod tests {
             Path(session.into()),
             Json(AskCourseQuestion {
                 question: "What was corrected?".into(),
+                parent_job_id: None,
+                card_id: None,
             }),
         )
         .await
@@ -1137,6 +1219,78 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn live_followup_binds_parent_and_card_to_the_same_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let session = "session_content_test";
+        state
+            .store
+            .transition_session(session, SessionState::Ready)
+            .unwrap();
+        state
+            .store
+            .transition_session(session, SessionState::Recording)
+            .unwrap();
+        state.emit(session, "asr", "paragraph.finalized", 0, "p1", None,
+            json!({"paragraph_id":"p1","text":"A synthetic fault model predicts observed outputs."})).unwrap();
+        state.emit(session, "teaching", "explanation.card.created", 0, "card", None,
+            json!({"card_id":"card_1","result":{"paragraph_summary":"The model predicts output behavior.",
+                "evidence_segment_ids":["p1"]}})).unwrap();
+        state
+            .emit(
+                session,
+                "qa",
+                "course.question.asked",
+                0,
+                "parent",
+                None,
+                json!({"job_id":"prior_job","question":"What does the model predict?"}),
+            )
+            .unwrap();
+        state
+            .emit(
+                session,
+                "qa",
+                "course.question.answered",
+                0,
+                "parent",
+                None,
+                json!({"job_id":"prior_job","answer":"It predicts outputs.",
+                "evidence_segment_ids":["p1"]}),
+            )
+            .unwrap();
+        let result = ask_course_question(
+            State(state.clone()),
+            Path(session.into()),
+            Json(AskCourseQuestion {
+                question: "Why is that useful?".into(),
+                parent_job_id: Some("prior_job".into()),
+                card_id: Some("card_1".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let job = state
+            .store
+            .get_model_job(result.0["job_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.input["context"].as_array().unwrap().len(), 3);
+        assert_eq!(job.input["segments"][0]["id"], "p1");
+        let invalid = ask_course_question(
+            State(state),
+            Path(session.into()),
+            Json(AskCourseQuestion {
+                question: "Why?".into(),
+                parent_job_id: Some("other_course_job".into()),
+                card_id: None,
+            }),
+        )
+        .await;
+        assert!(invalid.is_err());
     }
 
     #[tokio::test]

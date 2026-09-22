@@ -81,7 +81,7 @@ describe("timeline mapping", () => {
         .map((url) => ({ term: "校验", explanation: "背景定义", background_reference: url })),
     } })]);
     expect(item.evidenceIds).toEqual(["p1"]);
-    expect(item.sections?.slice(1).map((section) => section.backgroundReference))
+    expect(item.sections?.slice(0, 4).map((section) => section.backgroundReference))
       .toEqual([reference, undefined, undefined, undefined]);
   });
   it("keeps segment and page evidence on explanation cards", () => {
@@ -97,6 +97,45 @@ describe("timeline mapping", () => {
       }),
     ]);
     expect(items[0]?.evidenceIds).toEqual(["seg-1", "page-2"]);
+  });
+
+  it("maps structured teaching sections to the shared current-content model", () => {
+    const [item] = buildCourseDocument([event("explanation.card.created", {
+      card_id: "card-structured",
+      result: {
+        paragraph_summary: "兼容旧客户端的正文",
+        teaching_sections: {
+          version: 1,
+          chapter_bridge: "承接前一组结论",
+          main_content: "- 先检查输入\n- 再比较输出",
+          content_explanation: "输入变化会影响输出。",
+          misconceptions: ["把两个阶段当成一步", "忽略了输入条件"],
+          professional_terms: [{ term: "稳定证据", explanation: "已完成定稿的课程段落。" }],
+        },
+        terms: [{ term: "旧字段", explanation: "不应覆盖新的术语列表" }],
+        evidence_segment_ids: ["p1"],
+      },
+    })]);
+
+    expect(item.sections?.map((section) => section.label)).toEqual(["承上启下", "主要内容", "专业术语 · 稳定证据", "内容讲解", "易错点"]);
+    expect(item.sections?.[3]?.text).toBe("输入变化会影响输出。");
+    expect(item.sections?.[4]).toMatchObject({ text: "把两个阶段当成一步\n\n忽略了输入条件", tone: "warning" });
+  });
+
+  it("maps optional structured teaching sections onto course summary items", () => {
+    const [item] = buildCourseDocument([event("session.summary.created", {
+      summary_id: "summary-structured",
+      result: {
+        overview: "课程概览", key_points: [], terminology: [],
+        teaching_sections: { content_explanation: "课程结论与证据相符。", misconceptions: ["忽略限制条件"] },
+      },
+    })]);
+
+    expect(item.kind).toBe("session-summary");
+    expect(item.sections).toEqual([
+      { label: "内容讲解", text: "课程结论与证据相符。" },
+      { label: "易错点", text: "忽略限制条件", tone: "warning" },
+    ]);
   });
 
   it("pairs translations without allowing their echoed source to rewrite recognition", () => {
@@ -188,7 +227,7 @@ describe("timeline mapping", () => {
     })]);
     expect(item.kind).toBe("insight");
     expect(item.sections).toHaveLength(2);
-    expect(item.sections?.map((section) => section.label)).toEqual(["当前内容组总结", "知识补充 · token"]);
+    expect(item.sections?.map((section) => section.label)).toEqual(["专业术语 · token", "当前内容组总结"]);
   });
 
   it("hides superseded teaching cards while retaining their events", () => {

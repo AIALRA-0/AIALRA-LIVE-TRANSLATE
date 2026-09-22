@@ -7,6 +7,8 @@ const WS_BASE = process.env.AIALRA_WS_BASE || API.replace(/^http/, "ws").replace
 const FIXTURE = process.argv[2] || "data/test-fixtures/pipeline-lecture.pcm";
 const TEST_SUBJECT = process.env.AIALRA_TEST_SUBJECT || "";
 const PROXY_MARKER = process.env.AIALRA_TEST_PROXY_MARKER === "true";
+const TEST_CLOUD_TEXT = process.env.AIALRA_TEST_CLOUD_TEXT === "true";
+const REPLAY_REALTIME = process.env.AIALRA_REPLAY_REALTIME === "true";
 const nativeFetch = globalThis.fetch;
 globalThis.fetch = (input, init = {}) => {
   const url = String(input);
@@ -75,7 +77,15 @@ async function sendPcm(sessionId, leaseToken, pcm) {
     const acknowledgements = new Set();
     const acknowledgementCommitIds = new Set();
     const timer = setTimeout(() => reject(new Error("audio ACK timeout")), 60_000);
-    socket.onopen = () => chunks.forEach(({ frame }) => socket.send(frame));
+    socket.onopen = () => {
+      void (async () => {
+        for (const { frame } of chunks) {
+          if (socket.readyState !== WebSocket.OPEN) break;
+          socket.send(frame);
+          if (REPLAY_REALTIME) await new Promise((resume) => setTimeout(resume, 1_000));
+        }
+      })();
+    };
     socket.onerror = () => reject(new Error("audio WebSocket failed"));
     socket.onmessage = (message) => {
       const response = JSON.parse(String(message.data));
@@ -173,6 +183,14 @@ const session = await checked(fetch(`${API}/projects/${project.id}/sessions`, {
   method: "POST", headers: { "content-type": "application/json" },
   body: JSON.stringify({ title: "端到端合成课程验证", consent_confirmed: true, device_id: deviceId }),
 }));
+if (TEST_CLOUD_TEXT) {
+  const policy = await checked(fetch(`${API}/projects/${project.id}/ai-policy`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cloud_enabled: true, allowed_modalities: ["text"] }),
+  }));
+  if (!policy.cloud_enabled || !policy.route_available) throw new Error("cloud text policy did not become active");
+}
 const lease = await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }),
 }));
@@ -194,25 +212,18 @@ let events = await waitForEvents(
     items.some((item) => item.event_type === "translation.finalized"),
 );
 
-// A text page proves that newly supplied material becomes eligible for the next explanation.
+// A text page enters the lightweight material library without triggering an explanation.
 const material = new FormData();
 material.append(
   "file",
   new Blob(["Pipeline forwarding reduces some read-after-write stalls."], { type: "text/plain" }),
   "pipeline-notes.txt",
 );
-material.append("queue_explanation", "true");
 const uploadedMaterial = await checked(fetch(`${API}/sessions/${session.id}/assets`, { method: "POST", body: material }));
-if (typeof uploadedMaterial.explain_job_id !== "string" || uploadedMaterial.explain_job_id.length === 0) {
-  throw new Error("confirmed material upload did not create the waiting explanation job");
-}
+if (uploadedMaterial.explain_job_id) throw new Error("material upload unexpectedly queued an explanation");
 await waitForEvents(
   session.id,
   (items) => items.some((item) => item.event_type === "asset.page.extracted"),
-);
-await waitForEvents(
-  session.id,
-  (items) => items.some((item) => item.event_type === "explanation.card.created"),
 );
 await stopLeaseRenewal();
 await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
@@ -223,8 +234,32 @@ events = await waitForEvents(
   (items) =>
     items.some((item) => item.event_type === "session.completed") &&
     items.some((item) => item.event_type === "translation.finalized") &&
-    items.some((item) => item.event_type === "explanation.card.created"),
+    items.some((item) => item.event_type === "explanation.card.created") &&
+    items.some((item) => item.event_type === "session.summary.created"),
+  600_000,
 );
+const card = events.find((item) => item.event_type === "explanation.card.created");
+const teaching = card?.payload?.result;
+if (!teaching?.teaching_sections || teaching.teaching_sections.version !== 1) {
+  throw new Error("course explanation lacks the structured teaching contract");
+}
+if (TEST_CLOUD_TEXT && !String(teaching.provider).startsWith("kuafushe:")) {
+  throw new Error("authorized teaching did not use the direct cloud provider");
+}
+const question = await checked(fetch(`${API}/sessions/${session.id}/questions`, {
+  method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ question: "这段课程的核心概念是什么？", card_id: card.payload.card_id }),
+}));
+events = await waitForEvents(session.id,
+  (items) => items.some((item) => item.event_type === "course.question.answered" && item.payload.job_id === question.job_id),
+  300_000);
+const followUp = await checked(fetch(`${API}/sessions/${session.id}/questions`, {
+  method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ question: "它适用于什么条件？", card_id: card.payload.card_id, parent_job_id: question.job_id }),
+}));
+events = await waitForEvents(session.id,
+  (items) => items.some((item) => item.event_type === "course.question.answered" && item.payload.job_id === followUp.job_id),
+  300_000);
 if (events.some((item) => item.event_type === "model.job.failed")) {
   throw new Error("session contains a final model.job.failed event");
 }
@@ -245,6 +280,8 @@ process.stdout.write(
       stable_translations: count("translation.finalized"),
       extracted_pages: count("asset.page.extracted"),
       explanation_cards: count("explanation.card.created"),
+      course_summaries: count("session.summary.created"),
+      answered_questions: count("course.question.answered"),
       second_device_status: contention.status,
       readweave_configured: readWeave.status.configured,
       readweave_readable_entries: readWeave.preview.latest_entries.length,

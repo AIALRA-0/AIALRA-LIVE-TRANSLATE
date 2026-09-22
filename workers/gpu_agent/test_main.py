@@ -336,6 +336,15 @@ def test_provider_gate_allows_cpu_asr_but_requires_cuda_llm() -> None:
     assert provider_proves_local_execution("translate", "identity:en@cpu")
     assert not provider_proves_local_execution("translate", "ollama:qwen2.5:3b-instruct@cpu")
     assert provider_proves_local_execution("summarize", "ollama:qwen2.5:14b-instruct@cuda")
+    assert provider_proves_local_execution(
+        "explain", "kuafushe:deepseek-v4.1-flash@cloud", cloud_authorized=True,
+    )
+    assert not provider_proves_local_execution(
+        "explain", "kuafushe:deepseek-v4.1-flash@cloud",
+    )
+    assert not provider_proves_local_execution(
+        "asr", "kuafushe:deepseek-v4.1-flash@cloud", cloud_authorized=True,
+    )
     assert not provider_proves_local_execution("asr", "deterministic@cpu")
 
 

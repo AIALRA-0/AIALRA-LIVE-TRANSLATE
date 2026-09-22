@@ -2,6 +2,12 @@ $ErrorActionPreference = "Stop" # Agent exits when its private token or local mo
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path # Keep every runtime lookup inside this checkout.
 $configuredGateway = [Environment]::GetEnvironmentVariable("AIALRA_GPU_GATEWAY_URL", "User") # Read installer configuration even before the next Windows login.
 if (![string]::IsNullOrWhiteSpace($configuredGateway)) { $env:AIALRA_GPU_GATEWAY_URL = $configuredGateway } # Pass the private endpoint only to this process tree.
+foreach ($keyName in @('AIALRA_KUAFUSHE_DS_PRIMARY_KEY', 'AIALRA_KUAFUSHE_DS_BACKUP_KEY')) {
+    $configuredKey = [Environment]::GetEnvironmentVariable($keyName, 'User')
+    if (![string]::IsNullOrWhiteSpace($configuredKey)) {
+        [Environment]::SetEnvironmentVariable($keyName, $configuredKey, 'Process')
+    }
+}
 $secretFile = Join-Path $projectRoot "data\secrets\worker-token.dpapi" # The encrypted token is ignored and bound to this Windows user.
 if (!(Test-Path -LiteralPath $secretFile -PathType Leaf) -and [string]::IsNullOrWhiteSpace($env:AIALRA_WORKER_TOKEN)) { throw "缺少本机 Worker 令牌" } # Never start an unauthenticated agent.
 if ([string]::IsNullOrWhiteSpace($env:AIALRA_WORKER_TOKEN)) {

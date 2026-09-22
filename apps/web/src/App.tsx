@@ -9,6 +9,7 @@ import { UserNotes } from "./UserNotes";
 import { CourseQuestions } from "./CourseQuestions";
 import { SessionPlayer } from "./SessionPlayer";
 import { CourseOutline } from "./CourseOutline";
+import { CloudTextPolicy } from "./CloudTextPolicy";
 import { focusedParagraphId, insightForParagraph, mainDocumentItems } from "./documentLayout";
 import { courseMarkdown, downloadCourseMarkdown } from "./courseExport";
 import type { NoiseSuppressionMode } from "./noiseSuppression";
@@ -109,7 +110,7 @@ function stateTone(state: string): "green" | "yellow" | "red" | "gray" {
 const SYSTEM_NOTE_LABELS: Record<string, string> = {
   overview: "课程概览",
   transcript: "逐段转写与翻译",
-  explanations: "补充讲解与术语",
+  explanations: "课程讲解与术语",
   assets: "课件与证据",
   "user-notes": "我的笔记",
 };
@@ -214,6 +215,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   onOpenSettings: () => void;
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const activeSection = routeSelection().section;
   const [expandedHistoryProjects, setExpandedHistoryProjects] = useState<Set<string>>(() => new Set());
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());
@@ -585,9 +587,10 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
                 <button className="tree-context-hint" aria-label={`管理课程 ${session.title}`} onClick={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })} onContextMenu={(event) => showContextMenu(event, { entityType: "session", entityId: session.id, projectId: project.id })}>⋯</button>
               </div>
               {activeSessionId === session.id && (
-                <ul className="system-notes tree-note-category" aria-label="课程笔记分类">
+                <ul className="system-notes tree-note-category" aria-label="本节课程内容">
+                  <li className="system-notes-caption">本节内容</li>
                   {Object.entries(SYSTEM_NOTE_LABELS).map(([section, title]) => (
-                    <li key={section}><button title={section === "user-notes" ? "只由你编辑，AIALRA 不会覆盖正文" : "AIALRA 自动整理并同步到 ReadWeave"} onClick={() => navigate(project.id, session.id, section)}>{title}</button></li>
+                    <li key={section}><button className={activeSection === section ? "active-section" : ""} aria-current={activeSection === section ? "page" : undefined} title={section === "user-notes" ? "只由你编辑，AIALRA 不会覆盖正文" : "AIALRA 自动整理并同步到 ReadWeave"} onClick={() => navigate(project.id, session.id, section)}>{title}</button></li>
                   ))}
                 </ul>
               )}
@@ -734,6 +737,7 @@ function ProjectOverview({ project, sessions, onCreated }: { project: Project; s
           <button className="primary-button" disabled={busy || !consent} aria-describedby="create-session-help">{busy ? "正在创建课程会话" : "创建独立课程并进入录音台"}</button>
           <p id="create-session-help" className="form-help">重复进入已有课程请使用左侧历史或上方“继续本次收音”；新建按钮只用于另开一节独立课程。</p>
         </form>
+        <CloudTextPolicy key={project.id} projectId={project.id} />
       </div>
     </main>
   );
@@ -800,7 +804,14 @@ const DocumentItem = memo(function DocumentItem({ item, languageView, sessionId,
   );
 });
 
-function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, retrying, onRetry }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null>; focusKey: string; retryAvailable: boolean; retrying: boolean; onRetry: () => void }) {
+function TeachingSectionsView({ sections }: { sections: NonNullable<TimelineItem["sections"]> }) {
+  if (!sections.length) return null;
+  return <div className="teaching-sections-view">{sections.map((section, index) => section.label.startsWith("专业术语")
+    ? <details key={`${section.label}:${index}`} className="teaching-term"><summary>{section.label}</summary><p>{section.text}</p>{section.backgroundReference && <a href={section.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}</details>
+    : <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p></section>)}</div>;
+}
+
+function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, retrying, onRetry, onAsk }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null>; focusKey: string; retryAvailable: boolean; retrying: boolean; onRetry: () => void; onAsk: (cardId: string) => void }) {
   const paragraphs = useMemo(() => items.filter((item) => item.kind === "paragraph"), [items]);
   const insights = items.filter((item) => item.kind === "insight");
   const [currentParagraphId, setCurrentParagraphId] = useState<string | null>(paragraphs.at(-1)?.id ?? null);
@@ -832,16 +843,16 @@ function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, r
   const groupParagraphs = insight
     ? paragraphs.filter((item) => insight.evidenceIds.includes(item.id))
     : paragraph ? [paragraph] : [];
-  const summary = insight?.sections?.find((section) => section.label === "当前内容组总结");
-  const terms = insight?.sections?.filter((section) => section.label.startsWith("知识补充")) ?? [];
+  const teachingSections = insight?.sections ?? [];
+  const summary = teachingSections.find((section) => section.label === "内容讲解" || section.label === "当前内容组总结");
   return (
     <section className="paragraph-insight-panel" data-testid="paragraph-insight-panel">
       <div className="card-heading"><h3>当前内容组</h3><StatusBadge tone={insight ? "green" : "gray"}>{insight ? "已生成" : "积累内容"}</StatusBadge></div>
       {insight?.groupReason === "capacity_continuation" && <p className="form-help">同主题续接：这一组达到单次整理容量，后续内容会继续保留，不代表老师已经换话题</p>}
       {paragraph && <small className="insight-anchor">对应左侧 {new Date(paragraph.occurredAt).toLocaleTimeString("zh-CN", { hour12: false })} 的段落</small>}
       {insight ? <details className="paragraph-insight-source"><summary>本组覆盖 {groupParagraphs.length} 个段落 · 查看原文</summary><p>{groupParagraphs.map((item) => item.original).join(" ")}</p></details> : <p>当前段落尚未形成已完成的内容组；不会借用其他话题的讲解。</p>}
-      <section className="paragraph-summary-section"><strong>内容组总结</strong><p>{summary?.text ?? "相似内容会保持在一起，确认话题转折后再统一整理；停止录音时会整理尚未完成的内容，不逐句总结"}</p></section>
-      <section className="paragraph-terms-section"><strong>知识补充</strong><p className="form-help">以下为帮助理解的背景解释，不是老师原话；有资料链接的词条已经过来源核对</p>{terms.length ? terms.map((term, index) => <details key={`${term.label}:${index}`}><summary>{term.label.replace("知识补充 · ", "")}</summary><p>{term.text}</p>{term.backgroundReference && <a href={term.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}</details>) : <p>当前内容组还没有检测到需要解释的专业名词或缩写</p>}</section>
+      {insight ? <TeachingSectionsView sections={teachingSections} /> : <section className="paragraph-summary-section"><strong>内容组讲解</strong><p>{summary?.text ?? "相似内容会保持在一起，确认话题转折后再统一整理；停止录音时会整理尚未完成的内容，不逐句总结"}</p></section>}
+      {insight && <button type="button" className="ask-current-group-button" onClick={() => onAsk(insight.id)}>围绕当前内容组提问</button>}
       {!insight && retryAvailable && <button type="button" className="secondary-button" disabled={retrying} onClick={onRetry}>{retrying ? "正在重新排队" : "重新整理当前内容"}</button>}
     </section>
   );
@@ -910,7 +921,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [notice, setNotice] = useState("");
   const [retryingExplanation, setRetryingExplanation] = useState(false);
   const [summaryRetryForEventId, setSummaryRetryForEventId] = useState<string | null>(null);
-  const [learningView, setLearningView] = useState<"group" | "course" | "questions">("group");
+  const [learningView, setLearningView] = useState<"group" | "outline" | "course" | "questions">("group");
+  const [questionContext, setQuestionContext] = useState<{ cardId: string; serial: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [lease, setLease] = useState<RecordingLease | null>(null);
   const [captureActive, setCaptureActive] = useState(false);
@@ -935,7 +947,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [readWeaveConfirmUrl, setReadWeaveConfirmUrl] = useState<string | null>(null);
   const [readWeaveReconciling, setReadWeaveReconciling] = useState(false);
   const [visibleItemLimit, setVisibleItemLimit] = useState(TIMELINE_PAGE_SIZE);
-  const [pendingUpload, setPendingUpload] = useState<File | null>(null);
+  const [pendingUploads, setPendingUploads] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
   const [uploadDropActive, setUploadDropActive] = useState(false);
   const [wakeLockNotice, setWakeLockNotice] = useState("");
   const capture = useRef<BrowserCapture | null>(null);
@@ -1478,34 +1491,38 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     finally { setBusy(false); }
   }
 
-  function chooseUpload(file: File): void {
-    if (file.size <= 0) {
-      setNotice("这个文件为空，请选择有内容的材料");
+  function chooseUploads(files: File[]): void {
+    if (uploading) return;
+    if (!files.length) return;
+    if (files.some((file) => file.size <= 0)) {
+      setNotice("所选文件中有空文件，请移除后重新选择");
       return;
     }
-    if (file.size > 50 * 1024 * 1024) {
-      setNotice("材料不能超过 50 MiB，请压缩后再上传");
+    if (files.some((file) => file.size > 50 * 1024 * 1024)) {
+      setNotice("单份材料不能超过 50 MiB，请压缩后再上传");
       return;
     }
     setNotice("");
-    setPendingUpload(file);
+    setPendingUploads(files);
   }
 
   async function confirmUpload(): Promise<void> {
-    const file = pendingUpload;
-    if (!file) return;
-    setBusy(true);
-    setNotice(`正在保存已确认材料 ${file.name}`);
+    if (!pendingUploads.length || uploading) return;
+    setUploading(true);
+    let saved = 0;
     try {
-      const result = await api.uploadAsset(session.id, file, true);
-      setNotice(result.explain_job_id
-        ? "已确认上传；材料解析任务和等待讲解任务已排队，材料解析完成并出现稳定段落后会自动执行讲解。"
-        : "已确认上传，材料解析任务已排队");
-      setPendingUpload(null);
+      for (const file of pendingUploads) {
+        setNotice(`正在保存材料 ${saved + 1}／${pendingUploads.length}`);
+        await api.uploadAsset(session.id, file);
+        saved += 1;
+      }
+      setNotice(`已保存 ${saved} 份材料；解析完成后，讲解按需引用相关内容，不会因为上传而立即生成讲解`);
+      setPendingUploads([]);
     } catch (caught) {
-      setNotice(caught instanceof Error ? caught.message : "材料上传失败");
+      setPendingUploads(pendingUploads.slice(saved));
+      setNotice(`${saved} 份材料已保存；其余上传失败：${caught instanceof Error ? caught.message : "请重试"}`);
     } finally {
-      setBusy(false);
+      setUploading(false);
       if (fileInput.current) fileInput.current.value = "";
     }
   }
@@ -1594,6 +1611,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const latestCourseSummary = summaryStatus.summaryId
     ? timeline.items.find((item) => item.kind === "session-summary" && item.id === summaryStatus.summaryId)
     : null;
+  const courseTeachingGroups = timeline.items.filter((item) => item.kind === "insight"
+    && item.sections?.some((section) => !section.label.startsWith("专业术语")));
   const summaryResult = timeline.events.find((event) => event.event_type === "session.summary.created"
     && event.payload.summary_id === summaryStatus.summaryId)?.payload.result;
   const courseOverview = summaryResult && typeof summaryResult === "object" && !Array.isArray(summaryResult)
@@ -1673,20 +1692,20 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           </div>
           <section
             className={"material-composer" + (uploadDropActive ? " drop-active" : "")}
-            aria-label="讲解与材料"
+            aria-label="课程资料库"
             onDragEnter={(event) => { event.preventDefault(); setUploadDropActive(true); }}
             onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
             onDragLeave={(event) => { if (event.currentTarget === event.target || !event.currentTarget.contains(event.relatedTarget as Node)) setUploadDropActive(false); }}
-            onDrop={(event) => { event.preventDefault(); setUploadDropActive(false); const file = event.dataTransfer.files[0]; if (file) chooseUpload(file); }}
+            onDrop={(event) => { event.preventDefault(); setUploadDropActive(false); chooseUploads(Array.from(event.dataTransfer.files)); }}
           >
-            <div className="material-composer-heading"><div><h3>讲解与材料</h3><p>拖入或选择文件，确认后加入下一次讲解</p></div></div>
+            <div className="material-composer-heading"><div><h3>课程资料库</h3><p>添加材料供讲解按需引用，上传后无需等待生成讲解</p></div></div>
             {translationIssue && <p className="translation-degraded-notice" role="status">原文和音频已保存；部分译文正在重试，录音控制与已完成内容不受影响。</p>}
-            <input ref={fileInput} className="visually-hidden" type="file" accept=".pptx,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) chooseUpload(file); }} />
-            <div className="material-composer-actions"><button className="secondary-button" disabled={busy} onClick={() => fileInput.current?.click()}>选择材料</button></div>
-            {pendingUpload && <div className="material-confirm" role="dialog" aria-modal="false" aria-label="确认上传材料">
-              <div><strong>确认上传材料</strong><span>{pendingUpload.name}</span><small>{pendingUpload.type || "未知类型"} · {(pendingUpload.size / 1024 / 1024).toFixed(2)} MiB · 目标课程：{session.title}</small></div>
-              <p>确认后将保存材料，并自动加入下一次讲解；不会覆盖已有字幕、译文或人工笔记。</p>
-              <div className="material-confirm-actions"><button className="secondary-button" type="button" disabled={busy} onClick={() => { setPendingUpload(null); if (fileInput.current) fileInput.current.value = ""; }}>取消</button><button className="primary-button" type="button" disabled={busy} onClick={() => void confirmUpload()}>{busy ? "正在确认…" : "确认上传并排队"}</button></div>
+            <input ref={fileInput} className="visually-hidden" type="file" multiple accept=".pptx,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" onChange={(event) => chooseUploads(Array.from(event.target.files ?? []))} />
+            <div className="material-composer-actions"><button className="secondary-button" disabled={uploading} onClick={() => fileInput.current?.click()}>选择材料</button></div>
+            {pendingUploads.length > 0 && <div className="material-confirm" role="dialog" aria-modal="false" aria-label="确认上传材料">
+              <div><strong>确认上传 {pendingUploads.length} 份材料</strong><span>{pendingUploads.slice(0, 3).map((file) => file.name).join("、")}{pendingUploads.length > 3 ? `等 ${pendingUploads.length} 份` : ""}</span><small>总计 {(pendingUploads.reduce((size, file) => size + file.size, 0) / 1024 / 1024).toFixed(2)} MiB · 目标课程：{session.title}</small></div>
+              <p>确认后先保存并解析材料；后续讲解只会按需引用相关内容，不会覆盖已有字幕、译文或人工笔记。</p>
+              <div className="material-confirm-actions"><button className="secondary-button" type="button" disabled={uploading} onClick={() => { setPendingUploads([]); if (fileInput.current) fileInput.current.value = ""; }}>取消</button><button className="primary-button" type="button" disabled={uploading} onClick={() => void confirmUpload()}>{uploading ? "正在保存…" : "确认加入资料库"}</button></div>
             </div>}
           </section>
         </section>
@@ -1736,23 +1755,27 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="primary-button" disabled>等待后台处理完成</button>
             )}
           </section>
-          <aside className="learning-sidebar" aria-label="课程讲解">
-          <div className="learning-tabs" role="group" aria-label="讲解内容">
-            <button type="button" aria-pressed={learningView === "group"} onClick={() => setLearningView("group")}>当前内容组</button>
-            <button type="button" aria-pressed={learningView === "course"} onClick={() => setLearningView("course")}>课程总结</button>
-            <button type="button" aria-pressed={learningView === "questions"} onClick={() => setLearningView("questions")}>课程问答</button>
+          <aside className="learning-sidebar" aria-label="课程学习内容">
+          <div className="learning-tabs" role="group" aria-label="课程学习视图">
+            <button type="button" aria-pressed={learningView === "group"} onClick={() => { setQuestionContext(null); setLearningView("group"); }}>当前内容</button>
+            <button type="button" aria-pressed={learningView === "outline"} onClick={() => { setQuestionContext(null); setLearningView("outline"); }}>课程结构</button>
+            <button type="button" aria-pressed={learningView === "course"} onClick={() => { setQuestionContext(null); setLearningView("course"); }}>课程总结</button>
+            <button type="button" aria-pressed={learningView === "questions"} onClick={() => { setQuestionContext(null); setLearningView("questions"); }}>课程问答</button>
           </div>
           {learningView === "group" && <div className="learning-content">
-            {section === "overview" && <section className="side-card sidebar-outline"><CourseOutline items={timeline.items} onSeek={seekToCapture} /></section>}
-            {section !== "assets" && section !== "user-notes" && <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} focusKey={documentFocusKey} retryAvailable={explanationRetryAvailable} retrying={retryingExplanation} onRetry={() => void retryExplanations()} />}
+            {section !== "assets" && section !== "user-notes" && <ParagraphInsightPanel items={timeline.items} documentRef={documentRef} focusKey={documentFocusKey} retryAvailable={explanationRetryAvailable} retrying={retryingExplanation} onRetry={() => void retryExplanations()} onAsk={(cardId) => { setQuestionContext((current) => ({ cardId, serial: (current?.serial ?? 0) + 1 })); setLearningView("questions"); }} />}
+            {(section === "assets" || section === "user-notes") && <section className="learning-empty-state"><h3>当前内容</h3><p>本页以{section === "assets" ? "课件与证据" : "个人笔记"}为主；切换到课程结构、课程总结或课程问答可查看本节学习结果。</p></section>}
           </div>}
+          {learningView === "outline" && <div className="learning-content"><section className="side-card sidebar-outline"><CourseOutline items={timeline.items} onSeek={seekToCapture} /></section></div>}
           {learningView === "course" && <section className="side-card course-summary-panel learning-content" aria-label="课程总结">
             <div className="card-heading"><h3>课程总结</h3><StatusBadge tone={summaryPending || summaryRetryRequested ? "yellow" : summaryStatus.phase === "failed" ? "red" : latestCourseSummary ? "green" : "gray"}>{summaryStatus.phase === "failed" && !summaryRetryRequested ? "生成失败" : summaryPending || summaryRetryRequested ? "生成中" : latestCourseSummary ? "已生成" : "尚未生成"}</StatusBadge></div>
             {latestCourseSummary ? <div className="course-summary-body">
               <section><h4>这节课讲了什么</h4>{(courseOverview || latestCourseSummary.body).split(/\n\s*\n/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</section>
               {coursePoints.length > 0 && <section><h4>按内容顺序回顾</h4><ol>{coursePoints.map((point, index) => <li key={index}>{point}</li>)}</ol></section>}
               {courseTerms.length > 0 && <section><h4>专业名词与背景</h4><dl>{courseTerms.map((term, index) => <div key={`${term.term}:${index}`}><dt>{term.term}</dt><dd>{term.one_line}{term.background_reference && <a href={term.background_reference} target="_blank" rel="noopener noreferrer">查看来源 ↗</a>}</dd></div>)}</dl></section>}
+               {latestCourseSummary.sections?.some((item) => !item.label.startsWith("专业术语")) && <section><h4>课程讲解结构</h4><TeachingSectionsView sections={latestCourseSummary.sections} /></section>}
             </div> : <p>{summaryStatus.phase === "failed" && !summaryRetryRequested ? "本次课程的音频、原文和译文已保存，课程总结生成失败，可重新排队" : summaryPending || summaryRetryRequested ? "课程总结已排队，完成后会出现在这里" : "课程停止并完成处理后会生成课程总结"}</p>}
+             {courseTeachingGroups.length > 0 && <section className="course-summary-teaching"><h4>内容组讲解</h4><p>与当前内容视图使用相同的结构化讲解；展开任一内容组可查看承接关系、主要内容和易错点。</p>{courseTeachingGroups.map((group, index) => <details key={group.id}><summary>内容组 {index + 1} · {group.evidenceIds.length} 条依据</summary><TeachingSectionsView sections={group.sections ?? []} /></details>)}</section>}
             {summaryRetryable && <button type="button" className="secondary-button" disabled={busy} onClick={() => {
               setSummaryRetryForEventId(summaryStatus.eventId);
               void api.summarize(project.id, session.id)
@@ -1760,14 +1783,14 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
                 .catch((caught) => { setSummaryRetryForEventId(null); setNotice(caught instanceof Error ? caught.message : "课程总结重新排队失败，请稍后重试"); });
             }}>重新生成课程总结</button>}
           </section>}
-          {learningView === "questions" && <div className="learning-content"><CourseQuestions sessionId={session.id} sessionState={session.state} events={timeline.events} onEvidence={(id) => {
+          {learningView === "questions" && <div className="learning-content"><CourseQuestions key={questionContext?.serial ?? "general"} sessionId={session.id} sessionState={session.state} events={timeline.events} hasStableEvidence={timeline.items.some((item) => item.kind === "paragraph")} initialCardId={questionContext?.cardId} onEvidence={(id) => {
             navigate(project.id, session.id, "transcript");
             window.setTimeout(() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
           }} /></div>}
           </aside>
           {notice && <div className="notice-box session-notice" role="status">{notice}</div>}
         </div>
-        <details className="session-system-details"><summary>运行状态 <StatusBadge tone={runtime?.worker?.online ? "green" : "yellow"}>{runtime?.worker?.online ? "GPU 在线" : "GPU 待连接"}</StatusBadge><StatusBadge tone={!readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : "green"}>ReadWeave {!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "有冲突" : "已连接"}</StatusBadge></summary>
+        <details className="session-system-details"><summary>运行诊断与同步 <StatusBadge tone={runtime?.worker?.online ? "green" : "yellow"}>{runtime?.worker?.online ? "本机模型在线" : "本机模型待连接"}</StatusBadge><StatusBadge tone={!readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : "green"}>ReadWeave {!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "有冲突" : "已连接"}</StatusBadge><span className="diagnostics-hint">设备、队列与同步明细</span></summary>
           <div className="system-details-content"><GpuPanel runtime={runtime} />
           <section className="side-card system-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>

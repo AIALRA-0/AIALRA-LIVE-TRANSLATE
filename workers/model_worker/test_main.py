@@ -72,6 +72,33 @@ def test_course_question_rejects_unknown_citation_before_return(
     assert raised.value.detail == "course_question_contract_invalid"
 
 
+def test_course_followup_uses_parent_context_but_cites_only_course_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_ollama(
+        system: str, user: str, _schema: dict[str, Any], **kwargs: Any,
+    ) -> dict[str, Any] | None:
+        captured.update({"system": system, "user": user})
+        candidate = {"answer": "Synthetic answer", "sufficient_evidence": True,
+                     "evidence_segment_ids": ["p1"]}
+        return candidate if kwargs["accept"](candidate) else None
+
+    monkeypatch.setattr(model_worker, "_shared_resident_models", lambda: True)
+    monkeypatch.setattr(model_worker, "_ollama_json", fake_ollama)
+    request = CourseQuestionRequest(
+        question="Why does that matter?",
+        segments=[QuestionEvidence(id="p1", text="Synthetic causal evidence")],
+        target_language="zh-CN",
+        context=[{"kind": "parent_answer", "text": "Prior synthetic answer"}],
+    )
+    result = asyncio.run(model_worker.course_question(request))
+    assert result.evidence_segment_ids == ["p1"]
+    assert "Prior synthetic answer" in captured["user"]
+    assert "authoritative evidence" in captured["system"]
+
+
 def test_ollama_gpu_residency_requires_configured_model_and_near_full_vram() -> None:
     configured = {"name": model_worker.OLLAMA_MODEL, "size": 2_000, "size_vram": 1_900}
     assert _ollama_model_uses_gpu({"models": [configured]})

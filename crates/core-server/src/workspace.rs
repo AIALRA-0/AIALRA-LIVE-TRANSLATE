@@ -723,9 +723,9 @@ pub async fn get_ai_policy(
     Path(project_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     owned_project(&state, &user.0, &project_id)?;
-    Ok(Json(serde_json::to_value(
-        state.store.get_project_ai_policy(&project_id)?,
-    )?))
+    let mut policy = serde_json::to_value(state.store.get_project_ai_policy(&project_id)?)?;
+    policy["route_available"] = json!(cloud_text_route_enabled());
+    Ok(Json(policy))
 }
 
 pub async fn update_ai_policy(
@@ -735,21 +735,51 @@ pub async fn update_ai_policy(
     Json(request): Json<AiPolicyRequest>,
 ) -> Result<Json<Value>, ApiError> {
     owned_project(&state, &user.0, &project_id)?;
-    if request.cloud_enabled || !request.allowed_modalities.is_empty() {
-        return Err(ApiError::bad_request(
-            "cloud access requires a separate per-item authorization",
-        ));
+    if request.cloud_enabled && !cloud_text_route_enabled() {
+        return Err(ApiError::bad_request("server cloud text route is disabled"));
     }
-    let policy = state
-        .store
-        .update_project_ai_policy(&project_id, false, &[])?;
+    // Course teaching may send text to the configured provider only after an
+    // explicit project-level choice. Audio and images remain local-only.
+    let allowed_modalities = if request.cloud_enabled {
+        if request.allowed_modalities.len() != 1 || request.allowed_modalities[0] != "text" {
+            return Err(ApiError::bad_request(
+                "only explicitly authorized cloud text is supported",
+            ));
+        }
+        vec!["text".to_owned()]
+    } else {
+        if !request.allowed_modalities.is_empty() {
+            return Err(ApiError::bad_request(
+                "cloud modalities require cloud access to be enabled",
+            ));
+        }
+        Vec::new()
+    };
+    let policy = state.store.update_project_ai_policy(
+        &project_id,
+        request.cloud_enabled,
+        &allowed_modalities,
+    )?;
     state.record_project_update(
         &project_id,
         None,
         "project.ai_policy.updated",
-        json!({"cloud_enabled": false, "allowed_modalities": []}),
+        json!({"cloud_enabled": request.cloud_enabled, "allowed_modalities": allowed_modalities}),
     )?;
-    Ok(Json(serde_json::to_value(policy)?))
+    let mut response = serde_json::to_value(policy)?;
+    response["route_available"] = json!(cloud_text_route_enabled());
+    Ok(Json(response))
+}
+
+pub(crate) fn cloud_text_route_enabled() -> bool {
+    cloud_text_route_enabled_for(
+        std::env::var("LOCAL_ONLY").ok().as_deref(),
+        std::env::var("CLOUD_TEXT_ALLOWED").ok().as_deref(),
+    )
+}
+
+fn cloud_text_route_enabled_for(local_only: Option<&str>, allowed: Option<&str>) -> bool {
+    local_only == Some("false") && allowed == Some("true")
 }
 
 pub async fn stream_workspace(
@@ -1129,6 +1159,23 @@ fn trash_selection(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloud_text_requires_both_explicit_server_flags() {
+        assert!(!super::cloud_text_route_enabled_for(None, None));
+        assert!(!super::cloud_text_route_enabled_for(Some("false"), None));
+        assert!(!super::cloud_text_route_enabled_for(
+            Some("true"),
+            Some("true")
+        ));
+        assert!(!super::cloud_text_route_enabled_for(
+            Some("false"),
+            Some("false")
+        ));
+        assert!(super::cloud_text_route_enabled_for(
+            Some("false"),
+            Some("true")
+        ));
+    }
     use super::*;
     use aialra_core_domain::SessionState;
     use aialra_event_store::{NewProject, NewSession};

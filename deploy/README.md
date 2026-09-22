@@ -1,5 +1,7 @@
 # 私有 GPU 混合部署
 
+> 2026-09-22 候选补充：下文模型清单记录原有本地运行路径；讲解、整课总结与问答现在可在双重授权后改由 Windows GPU Agent 直连夸父社 DS。GPU Broker 原生远程领取、ASR、翻译、课件解析与音频 ACK 不切换。生产 Compose 仍默认 `AIALRA_LOCAL_ONLY=true`、`AIALRA_CLOUD_TEXT_ALLOWED=false`；运维显式开启全局文本出口后，还须由用户在具体项目允许 `text`。Agent 的 Windows User 环境分别配置 `AIALRA_KUAFUSHE_DS_PRIMARY_KEY` 和 `AIALRA_KUAFUSHE_DS_BACKUP_KEY`，启动脚本仅在进程内传递，不写入仓库、服务器环境文件或日志。两条凭据当前共享夸父社端点，不属于跨提供方容灾。真实录音项目必须先记录许可，再按项目授权云端文本；未授权时继续本地模型路径。
+
 这套部署把浏览器音频经 HTTPS/WSS 发送到受 Authentik 保护的服务器，Rust Core 先持久化并 ACK，再由 Windows RTX GPU Agent 主动领取模型任务
 
 VPS 不运行 ASR 或小型假替代模型，本机 Agent 离线时服务器只安全保存和排队

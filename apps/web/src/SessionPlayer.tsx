@@ -100,7 +100,10 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
     if (!index || !audio.current) return;
     const duration = index.duration_ms / 1000;
     const next = Math.max(0, Math.min(duration, requested));
-    const nextSegment = Math.floor(next / SEGMENT_SECONDS) * SEGMENT_SECONDS;
+    // The exact recording endpoint belongs to the final playable segment, not
+    // to a new empty segment whose start is equal to the duration.
+    const segmentPosition = next >= duration ? Math.max(0, duration - 0.001) : next;
+    const nextSegment = Math.floor(segmentPosition / SEGMENT_SECONDS) * SEGMENT_SECONDS;
     const offset = next - nextSegment;
     positionRef.current = next;
     setPosition(next);

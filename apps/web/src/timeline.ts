@@ -16,6 +16,35 @@ function evidence(value: unknown): string[] {
   return strings(value).filter(Boolean);
 }
 
+function teachingSections(value: unknown, fallbackContent: string, fallbackTerms: unknown): NonNullable<TimelineItem["sections"]> {
+  const structured = object(value);
+  const sections: NonNullable<TimelineItem["sections"]> = [];
+  const bridge = text(structured.chapter_bridge).trim();
+  const content = text(structured.content_explanation).trim() || fallbackContent.trim();
+  const mainContent = text(structured.main_content).trim();
+  const misconceptions = Array.isArray(structured.misconceptions)
+    ? structured.misconceptions.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).join("\n\n")
+    : text(structured.misconceptions).trim();
+  if (bridge) sections.push({ label: "承上启下", text: bridge });
+  if (mainContent) sections.push({ label: "主要内容", text: mainContent });
+
+  const terms = Array.isArray(structured.professional_terms) ? structured.professional_terms : fallbackTerms;
+  const termItems = Array.isArray(terms) ? terms : [];
+  for (const entry of termItems) {
+    const value = object(entry);
+    const term = text(value.term).trim();
+    const explanation = text(value.explanation).trim() || text(value.one_line).trim();
+    if (term || explanation) sections.push({
+      label: term ? `专业术语 · ${term}` : "专业术语",
+      text: explanation,
+      backgroundReference: backgroundReference(value.background_reference),
+    });
+  }
+  if (content) sections.push({ label: structured.content_explanation ? "内容讲解" : "当前内容组总结", text: content });
+  if (misconceptions) sections.push({ label: "易错点", text: misconceptions, tone: "warning" });
+  return sections;
+}
+
 function backgroundReference(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   try {
@@ -175,15 +204,10 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
       });
       const reason = text(group?.payload.reason);
       const groupReason = reason === "topic_change" || reason === "capacity_continuation" || reason === "recording_stopped" ? reason : undefined;
-      const sections: NonNullable<TimelineItem["sections"]> = [];
       const summary = text(result.paragraph_summary) || text(result.summary);
-      if (summary) sections.push({ label: "当前内容组总结", text: summary });
       const terms = Array.isArray(result.terms) ? result.terms : Array.isArray(result.rare_terms) ? result.rare_terms : [];
-      terms.forEach((entry) => {
-        const value = object(entry); const term = text(value.term); const explanation = text(value.explanation) || text(value.one_line);
-        if (term || explanation) sections.push({ label: term ? `知识补充 · ${term}` : "知识补充", text: explanation, backgroundReference: backgroundReference(value.background_reference) });
-      });
-      if (sections.length) items.push({ id: cardId, kind: "insight", title: "知识补充", body: "", sections, evidenceIds: sharedEvidence, occurredAt: event.captured_at_wall, provider, groupReason });
+      const sections = teachingSections(result.teaching_sections, summary, terms);
+      if (sections.length) items.push({ id: cardId, kind: "insight", title: "内容组讲解", body: "", sections, evidenceIds: sharedEvidence, occurredAt: event.captured_at_wall, provider, groupReason });
       continue;
     }
 
@@ -201,6 +225,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
 
     if (event.event_type === "session.summary.created") {
       const result = object(payload.result);
+      const sections = teachingSections(result.teaching_sections, "", result.terminology);
       const terminology = Array.isArray(result.terminology)
         ? result.terminology.map((entry) => {
           const value = object(entry); const term = text(value.term); const oneLine = text(value.one_line);
@@ -209,7 +234,7 @@ export function buildCourseDocument(events: EventEnvelope[]): TimelineItem[] {
         }).filter(Boolean)
         : [];
       const body = [text(result.overview), ...strings(result.key_points).map((item) => `• ${item}`), ...terminology].filter(Boolean).join("\n");
-      items.push({ id: text(payload.summary_id) || event.event_id, kind: "session-summary", title: "课程总结", body, evidenceIds: [...evidence(result.evidence_segment_ids), ...evidence(result.asset_page_ids)], occurredAt: event.captured_at_wall, provider: text(result.provider) });
+      items.push({ id: text(payload.summary_id) || event.event_id, kind: "session-summary", title: "课程总结", body, sections, evidenceIds: [...evidence(result.evidence_segment_ids), ...evidence(result.asset_page_ids)], occurredAt: event.captured_at_wall, provider: text(result.provider) });
       continue;
     }
 

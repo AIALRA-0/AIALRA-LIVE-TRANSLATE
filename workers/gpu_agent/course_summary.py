@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from workers.gpu_agent.teaching import PartCaller, source_pieces, source_records
+from workers.gpu_agent.teaching import PartCaller, source_pieces, source_records, valid_provider
 
 COMPILED_PROVIDER = "compiled:content-groups-v1@cpu"  # Historical result compatibility only.
 
@@ -38,8 +38,7 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
         result = await call({"phase": phase, "text": text,
                              "target_language": model_input["target_language"]})
         observed, prose = result.get("provider"), result.get("prose")
-        if (not isinstance(observed, str) or not observed.startswith("ollama:")
-                or not observed.endswith("@cuda") or (provider and provider != observed)
+        if (not valid_provider(observed) or (provider and provider != observed)
                 or not isinstance(prose, str) or not prose.strip()):
             raise ValueError("course_synthesis_invalid")
         provider = observed

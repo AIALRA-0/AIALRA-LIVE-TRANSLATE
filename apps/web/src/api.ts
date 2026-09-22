@@ -99,9 +99,9 @@ export const api = {
     checked<{text: string; revision: number}>(fetch(`/api/v1/sessions/${sessionId}/paragraphs/${encodeURIComponent(paragraphId)}/translation-correction`, {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, base_revision }),
     })),
-  askCourseQuestion: (sessionId: string, question: string) =>
+  askCourseQuestion: (sessionId: string, question: string, context: { card_id?: string; parent_job_id?: string } = {}) =>
     checked<{ job_id: string; status: string }>(fetch(`/api/v1/sessions/${sessionId}/questions`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question }),
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question, ...context }),
     })),
   workspace: (deviceId: string) => checked<WorkspaceSnapshot>(fetch(`/api/v1/workspace?device_id=${encodeURIComponent(deviceId)}`)),
   createFolder: (input: { title: string; parent_id: string | null; sort_order?: number }) => checked<WorkspaceFolder>(fetch("/api/v1/workspace/folders", {
@@ -210,11 +210,10 @@ export const api = {
         body: JSON.stringify({ project_id: projectId, device_id: deviceId, lease_token: leaseToken }),
       }),
     ),
-  uploadAsset: (sessionId: string, file: File, queueExplanation = true) => {
+  uploadAsset: (sessionId: string, file: File) => {
     const form = new FormData();
     form.append("file", file);
-    form.append("queue_explanation", queueExplanation ? "true" : "false");
-    return checked<{ asset_id: string; job_id: string; page_ids: string[]; explain_job_id?: string; explain_status?: string }>(
+    return checked<{ asset_id: string; job_id: string; page_ids: string[] }>(
       fetch(`/api/v1/sessions/${sessionId}/assets`, { method: "POST", body: form }),
     );
   },

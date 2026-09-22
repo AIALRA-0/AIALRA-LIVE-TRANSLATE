@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
@@ -71,10 +72,28 @@ _SPEECH_ACT_SUMMARY = re.compile(
 )
 
 
+def repetition_collapse(text: str) -> bool:
+    """Reject repeated model output, including loops without sentence punctuation."""
+
+    compact = re.sub(r"\s+", "", text)
+    sentences = [
+        re.sub(r"[\s，,：:“”\"‘’、（）()\[\]{}]+", "", part)
+        for part in re.split(r"[。！？!?；;\n]+", text)
+    ]
+    counts = Counter(part for part in sentences if len(part) >= 12)
+    if any(count >= 3 for count in counts.values()):
+        return True
+    if len(compact) < 80:
+        return False
+    windows = Counter(compact[index:index + 16] for index in range(len(compact) - 15))
+    return any(count >= 5 for count in windows.values())
+
+
 def readable_synthesis(text: str, source: str) -> bool:
     """Reject transcript-like narration before it reaches a teaching card."""
     value = text.strip()
-    if not value or len(value) > 1200 or _SPEECH_ACT_SUMMARY.search(value):
+    if (not value or len(value) > 1200 or _SPEECH_ACT_SUMMARY.search(value)
+            or repetition_collapse(value)):
         return False
     if len(source) >= 240 and len(value) < 80:
         return False
@@ -199,7 +218,7 @@ async def generate_part(
             "without inventing details. First identify the practical question, then define "
             "the minimum prerequisites, explain how each object changes and why the result "
             "follows, and finish with the applicable boundary. Organize by meaning and "
-            "dependency, not by transcript order or a fixed heading template. Never narrate "
+            "dependency, not by transcript order. Never narrate "
             "the speech act: do not write 'the teacher says', 'when I explain', 'you can see "
             "what I said', filler acknowledgements, or a line-by-line retelling. Use natural "
             "paragraphs, concrete subjects and explicit referents. Do not expose source "
@@ -209,7 +228,20 @@ async def generate_part(
             "make that direction clear, state that it remains unclear instead of repairing, "
             "reversing or rationalizing it. Playback or simulation speed is not physical chip "
             "speed unless the notes explicitly establish that relationship. "
-            "Return only a JSON object with one field named prose. "
+            "Return only a JSON object with one field named prose. Inside prose, use "
+            "four standalone headings in this order: chapter bridge, main content, "
+            "content explanation, misconceptions. When target_language is Chinese, use "
+            "承上启下, 主要内容, 内容讲解, 易错点. Put only source-supported transition "
+            "material in the bridge; if no prior-to-current connection is established, leave "
+            "that section empty. Make main content a compact list of two to five conclusions "
+            "that the content explanation actually supports. Put the complete connected "
+            "reasoning under content explanation. Include a misconception only when the source "
+            "supports its cause, correction and a way to check it; otherwise leave that section "
+            "empty. For each misconception, write four separate paragraphs with bold labels "
+            "错误理解、错因、正确判断、核对方法, in that order; use the corresponding "
+            "labels misconception, cause, correction, check for other target languages. "
+            "Professional terms come from the separately verified glossary and must not "
+            "be invented here. "
         )
     if request.phase in {"prose", "group", "course"}:
         instruction = (
@@ -228,7 +260,19 @@ async def generate_part(
             "convert a playback or simulator multiplier into a claim about physical chip speed. "
             "Explain uncertainty about quantities or comparisons in ordinary reader-facing "
             "language when the source leaves it unresolved. Do not hide that uncertainty "
-            "merely to produce smoother prose."
+            "merely to produce smoother prose. Organize the prose with four standalone "
+            "headings in this order: chapter bridge, main content, content explanation, "
+            "misconceptions. For Chinese use 承上启下, 主要内容, 内容讲解, 易错点. Only "
+            "include a source-supported bridge; keep it empty when no previous-to-current "
+            "connection is supplied. Make the main content a list of two to five conclusions "
+            "supported by the complete explanation. Include misconceptions only when the source "
+            "provides their cause, correction and a way to check them; use four separate bold "
+            "labels in Chinese (错误理解、错因、正确判断、核对方法) or English "
+            "(misconception, cause, correction, check), in that order. Do not invent professional "
+            "terms; the separately verified glossary supplies those. The JSON object must "
+            "have exactly two keys: prose (a single string containing the four headings "
+            "and their content) and original_terms (an array of source-exact terms). "
+            "Never use the section headings as JSON keys."
         ) if request.phase == "prose" else (
             "Compile these notes into one coherent, beginner-readable "
             + ("guide to this content group" if request.phase == "group"

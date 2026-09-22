@@ -10,7 +10,11 @@ use uuid::Uuid;
 
 const WINDOW_PARAGRAPHS: usize = 20;
 const WINDOW_BYTES: usize = 4_000;
-const MIN_SEMANTIC_GROUP: usize = 4;
+const MIN_TOPIC_WINDOW_PARAGRAPHS: usize = 4;
+const MAX_TOPIC_WINDOW_PARAGRAPHS: usize = 12;
+const TARGET_TOPIC_BYTES: usize = 1_400;
+const MIN_NEW_PARAGRAPHS_SINCE_CHECK: usize = 4;
+const MIN_SEMANTIC_GROUP: usize = 2;
 
 /// Counts throttle analysis, never decide where a topic ends.
 pub fn enqueue_pending(state: &AppState, session_id: &str, force: bool) -> Result<bool> {
@@ -42,7 +46,7 @@ pub fn enqueue_pending(state: &AppState, session_id: &str, force: bool) -> Resul
             .filter_map(Value::as_str),
     );
     let mut segments = Vec::new();
-    let mut characters = 0;
+    let mut bytes = 0;
     let mut capacity = false;
     for event in events
         .iter()
@@ -62,16 +66,16 @@ pub fn enqueue_pending(state: &AppState, session_id: &str, force: bool) -> Resul
             continue;
         };
         if segments.len() == WINDOW_PARAGRAPHS
-            || (!segments.is_empty() && characters + text.len() > WINDOW_BYTES)
+            || (!segments.is_empty() && bytes + text.len() > WINDOW_BYTES)
         {
             capacity = true;
             break;
         }
-        characters += text.len();
+        bytes += text.len();
         segments.push(json!({"id": id, "text": text}));
     }
     capacity |= segments.len() == WINDOW_PARAGRAPHS;
-    if segments.is_empty() || (!force && !capacity && (segments.len() < 8 || characters < 1600)) {
+    if segments.is_empty() || !topic_window_ready(&segments, force, capacity) {
         return Ok(false);
     }
     let ids = segments
@@ -95,7 +99,8 @@ pub fn enqueue_pending(state: &AppState, session_id: &str, force: bool) -> Resul
                     .collect::<HashSet<_>>()
             })
             .unwrap_or_default();
-        if ids.iter().filter(|id| !checked.contains(**id)).count() < 3 {
+        if ids.iter().filter(|id| !checked.contains(**id)).count() < MIN_NEW_PARAGRAPHS_SINCE_CHECK
+        {
             return Ok(false);
         }
     }
@@ -109,6 +114,25 @@ pub fn enqueue_pending(state: &AppState, session_id: &str, force: bool) -> Resul
         idempotency_key: key,
     })?;
     Ok(true)
+}
+
+fn topic_window_ready(segments: &[Value], force: bool, capacity: bool) -> bool {
+    if force || capacity {
+        return true;
+    }
+    if segments.len() < MIN_TOPIC_WINDOW_PARAGRAPHS {
+        return false;
+    }
+    let bytes = segments
+        .iter()
+        .filter_map(|segment| segment["text"].as_str())
+        .map(str::len)
+        .sum::<usize>();
+    let average_bytes = bytes / segments.len();
+    let required_paragraphs = TARGET_TOPIC_BYTES
+        .div_ceil(average_bytes.max(1))
+        .clamp(MIN_TOPIC_WINDOW_PARAGRAPHS, MAX_TOPIC_WINDOW_PARAGRAPHS);
+    segments.len() >= required_paragraphs
 }
 
 #[derive(Deserialize)]
@@ -258,6 +282,90 @@ mod tests {
             .lease_model_job("topic-worker", &["topic".into()], 60)
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn adaptive_topic_trigger_uses_paragraph_size_without_weakening_small_windows() {
+        let long = (0..4)
+            .map(|index| json!({"id": format!("long-{index}"), "text": "Long stable paragraph. ".repeat(22)}))
+            .collect::<Vec<_>>();
+        assert!(topic_window_ready(&long, false, false));
+
+        let short = (0..7)
+            .map(|index| json!({"id": format!("short-{index}"), "text": "Short."}))
+            .collect::<Vec<_>>();
+        assert!(!topic_window_ready(&short, false, false));
+        assert!(topic_window_ready(&short, true, false));
+        assert!(topic_window_ready(&short, false, true));
+
+        let medium = (0..7)
+            .map(|index| json!({"id": format!("medium-{index}"), "text": "Medium stable paragraph. ".repeat(8)}))
+            .collect::<Vec<_>>();
+        assert!(!topic_window_ready(&medium[..6], false, false));
+        assert!(topic_window_ready(&medium, false, false));
+    }
+
+    #[test]
+    fn model_boundary_with_two_paragraphs_of_support_is_accepted() {
+        let (_temp, state) = setup();
+        let job = lease(&state, false);
+        let result = json!({"boundaries": [2], "provider": "ollama:synthetic@cuda"});
+        apply_result(&state, &job, &result).unwrap();
+
+        let groups = state
+            .store
+            .list_events("session_topic_test")
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "content.group.created")
+            .collect::<Vec<_>>();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].payload["paragraph_ids"],
+            json!(["para-0", "para-1"])
+        );
+    }
+
+    #[test]
+    fn topic_recheck_waits_for_four_new_paragraphs() {
+        let (_temp, state) = setup();
+        let job = lease(&state, false);
+        let result = json!({"boundaries": [], "provider": "ollama:synthetic@cuda"});
+        apply_result(&state, &job, &result).unwrap();
+        state
+            .store
+            .complete_model_job(&job.id, "topic-worker", &result)
+            .unwrap();
+
+        for index in 12..15 {
+            state
+                .emit_idempotent(
+                    &format!("topic-test-{index}"),
+                    "session_topic_test",
+                    "fixture",
+                    "paragraph.finalized",
+                    index,
+                    &format!("para-{index}"),
+                    None,
+                    json!({"paragraph_id": format!("para-{index}"), "text": "Added synthetic paragraph. ".repeat(7)}),
+                )
+                .unwrap();
+        }
+        assert!(!enqueue_pending(&state, "session_topic_test", false).unwrap());
+
+        state
+            .emit_idempotent(
+                "topic-test-15",
+                "session_topic_test",
+                "fixture",
+                "paragraph.finalized",
+                15,
+                "para-15",
+                None,
+                json!({"paragraph_id": "para-15", "text": "Added synthetic paragraph. ".repeat(7)}),
+            )
+            .unwrap();
+        assert!(enqueue_pending(&state, "session_topic_test", false).unwrap());
     }
 
     #[test]

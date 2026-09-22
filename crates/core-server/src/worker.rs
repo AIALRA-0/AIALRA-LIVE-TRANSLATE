@@ -31,6 +31,8 @@ pub struct ExplanationResponse {
     pub paragraph_summary: String,
     #[serde(default)]
     pub terms: Vec<ExplanationTerm>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teaching_sections: Option<serde_json::Value>,
     pub evidence_segment_ids: Vec<String>,
     pub asset_page_ids: Vec<String>,
     pub provider: String,

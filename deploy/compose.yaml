@@ -28,8 +28,8 @@ services:
       # WebSocket frame buffers out of the long-lived general heap and returns them on release.
       MALLOC_MMAP_THRESHOLD_: "16384"
       MALLOC_TRIM_THRESHOLD_: "16384"
-      LOCAL_ONLY: "true"
-      CLOUD_TEXT_ALLOWED: "false"
+      LOCAL_ONLY: ${AIALRA_LOCAL_ONLY:-true}
+      CLOUD_TEXT_ALLOWED: ${AIALRA_CLOUD_TEXT_ALLOWED:-false}
       CLOUD_MULTIMODAL_ALLOWED: "false"
       DINGTALK_ACCESS_TOKEN: ${DINGTALK_ACCESS_TOKEN:-}
       DINGTALK_API_BASE: ${DINGTALK_API_BASE:-https://api.dingtalk.com}

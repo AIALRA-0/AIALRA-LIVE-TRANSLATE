@@ -7,12 +7,15 @@ import pytest
 from workers.gpu_agent.teaching import (
     assemble_explanation,
     contains_term,
+    parse_teaching_sections,
     person_reference,
     redundant_bilingual_name,
     source_pieces,
     teaching_chunks,
     valid_definition,
+    valid_provider,
     valid_summary,
+    valid_teaching_sections,
 )
 
 COMPLETE_DEFINITION = (
@@ -40,9 +43,77 @@ def test_agent_quality_gate_matches_core_contract() -> None:
     assert not valid_summary("当我在讲解一个主题", 100, "zh-CN")
     assert not valid_summary("过短", 240, "zh-CN")
     assert not valid_summary("过长" * 601, 240, "zh-CN")
+    assert not valid_summary("这段内容解释算法怎样优化分区设计并节省成本；" * 18, 500, "zh-CN")
     assert valid_definition(COMPLETE_DEFINITION, "zh-CN")
     assert not valid_definition("只有一句很短的定义", "zh-CN")
     assert not valid_definition("这是定义；" + "用于说明技术对象" * 40 + "；这里保留边界", "zh-CN")
+
+
+def test_structured_sections_parse_and_legacy_paragraph_remains_usable() -> None:
+    structured = parse_teaching_sections(
+        "承上启下：前文建立的条件决定本节的问题\n"
+        "主要内容：\n- 结论一\n- 结论二\n"
+        "**内容讲解：**\n先解释对象之间的关系，再说明结果如何产生。\n"
+        "易错点：\n**错误理解：** 把两个阶段当作同一步骤\n\n"
+        "**错因：** 忽略了它们的输入不同\n\n"
+        "**正确判断：** 分别按各自条件核对\n\n"
+        "**核对方法：** 检查每一步的输入和输出",
+        [{"term": "示例术语"}],
+    )
+    assert structured["chapter_bridge"].startswith("前文建立")
+    assert structured["main_content"] == "- 结论一\n- 结论二"
+    assert structured["professional_terms"] == [{"term": "示例术语"}]
+    assert structured["content_explanation"].startswith("先解释对象")
+    assert len(structured["misconceptions"]) == 1
+    assert not structured["legacy_input"]
+    assert valid_teaching_sections(structured, 80, "zh-CN")
+    bullet_roles = parse_teaching_sections(
+        "主要内容：\n- 一个主要结论\n"
+        "内容讲解：\n解释这个结论的因果依据与适用边界。\n"
+        "易错点：\n- 错误理解：把条件当结论\n"
+        "- 错因：遗漏输入限制\n"
+        "- 正确判断：先核对输入限制\n"
+        "- 核对方法：比较条件和结论的来源"
+    )
+    assert len(bullet_roles["misconceptions"]) == 1
+    assert valid_teaching_sections(bullet_roles, 80, "zh-CN")
+    bold_label_roles = parse_teaching_sections(
+        "主要内容：\n- 一项结论\n内容讲解：\n这是结论的依据。\n易错点：\n"
+        "- **错误理解**：忽略限制\n- **错因**：只看结果\n"
+        "- **正确判断**：检查条件\n- **核对方法**：回查输入"
+    )
+    assert valid_teaching_sections(bold_label_roles, 80, "zh-CN")
+    unsupported_mistake = parse_teaching_sections(
+        "主要内容：\n- 一项结论\n内容讲解：\n这是结论的依据。\n"
+        "易错点：\n（原文未提供错误理解、错因、正确判断和核对方法）"
+    )
+    assert unsupported_mistake["misconceptions"] == []
+    assert valid_teaching_sections(unsupported_mistake, 80, "zh-CN")
+    no_supported_mistake = parse_teaching_sections(
+        "主要内容：\n- 一项结论\n内容讲解：\n这是结论的依据。\n易错点：无"
+    )
+    assert no_supported_mistake["misconceptions"] == []
+    assert valid_teaching_sections(no_supported_mistake, 80, "zh-CN")
+    incomplete = {**structured, "misconceptions": ["**错误理解：** 忽略适用条件"]}
+    assert not valid_teaching_sections(incomplete, 80, "zh-CN")
+
+    legacy = parse_teaching_sections("第一句说明输入。第二句说明结果。第三句保留条件。")
+    assert legacy["legacy_input"]
+    assert legacy["content_explanation"] == "第一句说明输入。第二句说明结果。第三句保留条件。"
+    assert legacy["main_content"] == "- 第一句说明输入。\n- 第二句说明结果。\n- 第三句保留条件。"
+    assert valid_teaching_sections(legacy, 80, "zh-CN")
+    legacy_with_old_heading = parse_teaching_sections(
+        "主要内容：旧版标题仍属于正文。旧版内容继续保留。"
+    )
+    assert legacy_with_old_heading["legacy_input"]
+    assert legacy_with_old_heading["content_explanation"].startswith("主要内容：")
+
+
+def test_provider_validation_supports_both_local_and_cloud_lanes() -> None:
+    assert valid_provider("ollama:local-model@cuda")
+    assert valid_provider("kuafushe:deepseek-chat@cloud")
+    assert not valid_provider("kuafushe:deepseek-chat@cuda")
+    assert not valid_provider("other:deepseek-chat@cloud")
 
 
 def test_self_introduced_person_is_not_a_technical_term() -> None:
@@ -194,6 +265,27 @@ async def test_multiple_short_paragraphs_share_one_coherent_model_call() -> None
     }, call)
     assert phases == ["prose"]
     assert result["paragraph_summary"].startswith("先说明电路测试")
+    assert result["teaching_sections"]["legacy_input"]
+    assert result["teaching_sections"]["content_explanation"] == result["paragraph_summary"]
+    assert result["teaching_sections"]["main_content"].startswith("- ")
+
+
+@pytest.mark.asyncio
+async def test_cloud_provider_is_accepted_without_an_extra_generation_call() -> None:
+    phases: list[str] = []
+
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        phases.append(body["phase"])
+        return {"provider": "kuafushe:deepseek-chat@cloud",
+                "prose": "完整解释一个观察到的关系", "original_terms": []}
+
+    result = await assemble_explanation({
+        "segments": [{"id": "a", "text": "A relationship is observed."}],
+        "target_language": "zh-CN",
+    }, call)
+    assert phases == ["prose"]
+    assert result["provider"] == "kuafushe:deepseek-chat@cloud"
+    assert result["paragraph_summary"] == result["teaching_sections"]["content_explanation"]
 
 
 def test_group_chunking_retains_all_text_and_source_ownership() -> None:
@@ -336,7 +428,9 @@ async def test_two_complete_drafts_above_old_byte_limit_are_still_synthesized() 
                 "provider": "ollama:synthetic@cuda",
                 "prose": (
                     "先解释问题与必要条件，再连接两部分机制和例子；"
-                    "最后保留结论成立所依赖的边界。" * 3
+                    "第一部分给出了对象成立的前提，第二部分说明过程怎样产生结果；"
+                    "这两部分按照时间顺序连接，读者可以分别核对条件、过程和结论；"
+                    "最后保留结论成立所依赖的边界。"
                 ),
             }
         return {

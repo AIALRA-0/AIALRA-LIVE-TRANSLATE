@@ -1,7 +1,7 @@
 // Headless Chrome or Edge uses a network-downloaded WAV as its fake microphone while the app uses its real capture path.
 import { chromium } from "@playwright/test";
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -9,6 +9,7 @@ const baseUrl = process.env.AIALRA_BROWSER_BASE_URL || "http://127.0.0.1:18787";
 const apiUrl = `${baseUrl}/api/v1`;
 const identity = process.env.AIALRA_TEST_SUBJECT || "browser-dual-device-test";
 const fixtureUrl = process.env.AIALRA_AUDIO_FIXTURE_URL;
+const fixturePath = process.env.AIALRA_AUDIO_FIXTURE_PATH;
 const fixturePassword = process.env.AIALRA_AUDIO_FIXTURE_PASSWORD;
 const fixtureUsername = process.env.AIALRA_AUDIO_FIXTURE_USERNAME || "soak";
 const browserChannel = process.env.AIALRA_BROWSER_CHANNEL || "chromium";
@@ -16,16 +17,21 @@ const captureSeconds = Number(process.env.AIALRA_BROWSER_CAPTURE_SECONDS || "35"
 const offlineSeconds = Number(process.env.AIALRA_BROWSER_OFFLINE_SECONDS || "5");
 const screenshotPath = process.env.AIALRA_BROWSER_SCREENSHOT_PATH;
 
-if (!fixtureUrl?.startsWith("https://") || !fixturePassword) {
-  throw new Error("controlled HTTPS fixture URL and password are required");
+let fixture;
+if (fixturePath) {
+  // Existing private test recordings stay local; no fixture server or URL is needed.
+  fixture = await readFile(fixturePath);
+} else {
+  if (!fixtureUrl?.startsWith("https://") || !fixturePassword) {
+    throw new Error("controlled local WAV path or HTTPS fixture URL and password are required");
+  }
+  if (!/^[a-z0-9_-]{1,32}$/i.test(fixtureUsername)) throw new Error("invalid controlled fixture username");
+  const fixtureResponse = await fetch(fixtureUrl, {
+    headers: { Authorization: `Basic ${Buffer.from(`${fixtureUsername}:${fixturePassword}`).toString("base64")}` },
+  });
+  if (!fixtureResponse.ok) throw new Error(`fixture download failed: ${fixtureResponse.status}`);
+  fixture = Buffer.from(await fixtureResponse.arrayBuffer());
 }
-if (!/^[a-z0-9_-]{1,32}$/i.test(fixtureUsername)) throw new Error("invalid controlled fixture username");
-
-const fixtureResponse = await fetch(fixtureUrl, {
-  headers: { Authorization: `Basic ${Buffer.from(`${fixtureUsername}:${fixturePassword}`).toString("base64")}` },
-});
-if (!fixtureResponse.ok) throw new Error(`fixture download failed: ${fixtureResponse.status}`);
-const fixture = Buffer.from(await fixtureResponse.arrayBuffer());
 
 function repeatedPcmWav(source, seconds) {
   if (source.toString("ascii", 0, 4) !== "RIFF" || source.toString("ascii", 8, 12) !== "WAVE") {
@@ -152,7 +158,7 @@ async function openSession(page) {
 
 try {
   await Promise.all([openSession(recorder), openSession(observer)]);
-  await recorder.getByText("音频在确认写入后才会从本机发送队列中移除；浏览器端不需要额外配对设备。", { exact: true }).waitFor({ timeout: 10_000 });
+  await recorder.getByRole("button", { name: "开始录音", exact: true }).waitFor({ timeout: 10_000 });
   if (await recorder.locator("details.device-pairing[open]").count()) throw new Error("Android fallback must be collapsed by default");
   await recorder.getByRole("button", { name: "开始录音", exact: true }).click();
   await recorder.getByText("收音正常，服务器已确认全部音频块").waitFor({ timeout: 30_000 });
@@ -209,10 +215,14 @@ try {
     refresh_recovery: true,
     fully_acknowledged_refresh_recovery: true,
     offline_seconds: offlineSeconds,
-    fixture_sha256: createHash("sha256").update(fixture).digest("hex"),
     stable_segments: segments.length,
     stable_translations: translations.length,
   }, null, 2)}\n`);
+} catch (error) {
+  const diagnosticPath = path.join(tmpdir(), `aialra-browser-diagnostic-${randomUUID()}.png`);
+  await recorder.screenshot({ path: diagnosticPath }).catch(() => {});
+  process.stderr.write(`Browser diagnostic screenshot: ${diagnosticPath}\n`);
+  throw error;
 } finally {
   await recorderContext.close();
   await observerContext.close();

@@ -7,8 +7,12 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
-const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v48";
-const COMPATIBLE_QUALITY_TRIGGERS: [&str; 2] = ["quality_contract_v46", "quality_contract_v47"];
+const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v49";
+const COMPATIBLE_QUALITY_TRIGGERS: [&str; 3] = [
+    "quality_contract_v46",
+    "quality_contract_v47",
+    "quality_contract_v48",
+];
 const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
 const MIN_REPAIR_GROUP_PARAGRAPHS: usize = 6;
 
@@ -23,14 +27,28 @@ pub fn enqueue_explanation(
     session_id: &str,
     trigger: &str,
 ) -> Result<ModelJobRecord> {
+    enqueue_explanation_with_materials(state, session_id, trigger, None, &[])
+}
+
+/// Enqueue an explanation only when explicitly requested, with a small set of
+/// extracted pages ranked against the current transcript or a caller query.
+pub fn enqueue_explanation_with_materials(
+    state: &AppState,
+    session_id: &str,
+    trigger: &str,
+    query: Option<&str>,
+    asset_ids: &[String],
+) -> Result<ModelJobRecord> {
     state
         .store
         .get_session(session_id)?
         .context("session not found")?;
-    let (segments, pages) = collect_evidence(state, session_id)?;
+    let events = state.store.list_events(session_id)?;
+    let segments = collect_segments(&events);
     if segments.is_empty() {
         bail!("at least one stable segment is required before explanation");
     }
+    let pages = collect_relevant_pages(&events, &segments, query, asset_ids);
     enqueue_with_evidence(state, session_id, trigger, segments, pages, false)
 }
 
@@ -62,7 +80,7 @@ pub fn enqueue_explanation_for_paragraphs(
     // The scheduler already selects one bounded group. Preserve complete
     // paragraphs: equal per-paragraph truncation can remove the conclusion of
     // a long sentence while leaving unused space for shorter neighbours.
-    let (_, pages) = collect_evidence(state, session_id)?;
+    let pages = collect_relevant_pages(&events, &segments, None, &[]);
     if segments.is_empty() {
         bail!("selected content group has no stable segments");
     }
@@ -154,6 +172,12 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
         if !planned.insert(repair_key.clone()) {
             continue;
         }
+        let repair_segments = repair_ids
+            .iter()
+            .filter_map(|id| Some(json!({"id": id, "text": paragraph_text.get(id)?})))
+            .collect::<Vec<_>>();
+        let repair_pages = collect_relevant_pages(&events, &repair_segments, None, &[]);
+        let repair_key = explanation_evidence_key(&repair_segments, &repair_pages);
         let idempotency_key = format!("explain:{session_id}:{QUALITY_REPAIR_TRIGGER}:{repair_key}");
         if state
             .store
@@ -219,6 +243,7 @@ pub(crate) fn explanation_needs_quality_repair(
             .any(|phrase| summary.contains(phrase))
         || summary.chars().count() > 1200
         || (source_characters >= 240 && summary.chars().count() < 80)
+        || repetition_collapse(summary)
     {
         return true;
     }
@@ -237,6 +262,67 @@ pub(crate) fn explanation_needs_quality_repair(
                 || definition.matches('；').count() < 2
                 || redundant_bilingual_name(name)
         })
+}
+
+fn repetition_collapse(value: &str) -> bool {
+    let compact = value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<Vec<_>>();
+    let mut sentences = std::collections::HashMap::<String, usize>::new();
+    for part in value.split(['。', '！', '？', '!', '?', '；', ';', '\n']) {
+        let normalized = part
+            .chars()
+            .filter(|character| {
+                !character.is_whitespace()
+                    && !matches!(
+                        character,
+                        '，' | ','
+                            | '：'
+                            | ':'
+                            | '“'
+                            | '”'
+                            | '"'
+                            | '‘'
+                            | '’'
+                            | '、'
+                            | '（'
+                            | '）'
+                            | '('
+                            | ')'
+                            | '['
+                            | ']'
+                            | '{'
+                            | '}'
+                    )
+            })
+            .collect::<String>();
+        if normalized.chars().count() >= 12
+            && *sentences
+                .entry(normalized)
+                .and_modify(|count| *count += 1)
+                .or_insert(1)
+                >= 3
+        {
+            return true;
+        }
+    }
+    if compact.len() < 80 {
+        return false;
+    }
+    let mut windows = std::collections::HashMap::<String, usize>::new();
+    for window in compact.windows(16) {
+        let pattern = window.iter().collect::<String>();
+        if *windows
+            .entry(pattern)
+            .and_modify(|count| *count += 1)
+            .or_insert(1)
+            >= 5
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn redundant_bilingual_name(value: &str) -> bool {
@@ -271,7 +357,7 @@ fn enqueue_with_evidence(
         .store
         .get_session(session_id)?
         .context("session not found")?;
-    let evidence_key = evidence_key(&segments);
+    let evidence_key = explanation_evidence_key(&segments, &pages);
     state.enqueue_job(NewModelJob {
         id: format!("job_{}", Uuid::now_v7().simple()),
         session_id: session_id.to_owned(),
@@ -283,9 +369,8 @@ fn enqueue_with_evidence(
     })
 }
 
-/// Persist an explanation job at upload confirmation time. Its queue record is
-/// immediately visible, but EventStore holds it until its material and
-/// transcript dependencies are complete.
+/// Keep coverage for the legacy deferred upload queue record format.
+#[cfg(test)]
 pub fn enqueue_deferred_explanation(
     state: &AppState,
     session_id: &str,
@@ -388,6 +473,12 @@ const MAX_EXPLANATION_CHARS: usize = 2_400;
 
 fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, Vec<Value>)> {
     let events = state.store.list_events(session_id)?;
+    let segments = collect_segments(&events);
+    let pages = collect_relevant_pages(&events, &segments, None, &[]);
+    Ok((segments, pages))
+}
+
+fn collect_segments(events: &[aialra_event_protocol::EventEnvelope]) -> Vec<Value> {
     let has_paragraphs = events
         .iter()
         .any(|event| event.event_type == "paragraph.finalized");
@@ -410,24 +501,117 @@ fn collect_evidence(state: &AppState, session_id: &str) -> Result<(Vec<Value>, V
         })
         .take(MAX_EXPLANATION_SEGMENTS)
         .collect::<Vec<_>>();
-    let segments = complete_recent_segments(segments);
-    let mut pages = events
+    complete_recent_segments(segments)
+}
+
+const MAX_EXPLANATION_PAGES: usize = 4;
+const MAX_EXPLANATION_PAGE_CHARS: usize = 8_000;
+
+fn collect_relevant_pages(
+    events: &[aialra_event_protocol::EventEnvelope],
+    segments: &[Value],
+    query: Option<&str>,
+    asset_ids: &[String],
+) -> Vec<Value> {
+    let query = query
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            segments
+                .iter()
+                .filter_map(|segment| segment["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+    let candidates = events
         .iter()
-        .rev()
         .filter_map(|event| {
             if event.event_type != "asset.page.extracted" {
                 return None;
             }
+            let asset_id = event.payload.get("asset_id")?.as_str()?;
+            if !asset_ids.is_empty() && !asset_ids.iter().any(|candidate| candidate == asset_id) {
+                return None;
+            }
             Some(json!({
                 "id": event.payload.get("page_id")?.as_str()?,
+                "asset_id": asset_id,
                 "title": event.payload.get("title")?.as_str()?,
                 "text": event.payload.get("text")?.as_str()?
             }))
         })
-        .take(12)
         .collect::<Vec<_>>();
-    pages.reverse();
-    Ok((segments, pages))
+    select_relevant_pages(candidates, &query, asset_ids)
+}
+
+fn select_relevant_pages(
+    candidates: Vec<Value>,
+    query: &str,
+    selected_asset_ids: &[String],
+) -> Vec<Value> {
+    let query_terms = lexical_terms(query);
+    let mut ranked = candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(order, page)| {
+            let explicitly_selected = page["asset_id"]
+                .as_str()
+                .is_some_and(|id| selected_asset_ids.iter().any(|selected| selected == id));
+            if !selected_asset_ids.is_empty() && !explicitly_selected {
+                return None;
+            }
+            let title = page["title"].as_str().unwrap_or_default();
+            let text = page["text"].as_str().unwrap_or_default();
+            let title_terms = lexical_terms(title);
+            let page_terms = lexical_terms(text);
+            let overlap = query_terms.intersection(&page_terms).count();
+            let title_overlap = query_terms.intersection(&title_terms).count();
+            let score = overlap + title_overlap * 2;
+            (score > 0 || (query_terms.is_empty() && explicitly_selected))
+                .then_some((score, order, page))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+
+    let mut selected = Vec::new();
+    let mut characters = 0;
+    for (_, _, page) in ranked {
+        if selected.len() == MAX_EXPLANATION_PAGES {
+            break;
+        }
+        let length = page["text"].as_str().unwrap_or_default().chars().count();
+        if length > MAX_EXPLANATION_PAGE_CHARS || characters + length > MAX_EXPLANATION_PAGE_CHARS {
+            continue;
+        }
+        characters += length;
+        selected.push(page);
+    }
+    selected
+}
+
+fn lexical_terms(value: &str) -> HashSet<String> {
+    let characters = value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric())
+        .collect::<Vec<_>>();
+    let mut terms = HashSet::new();
+    for character in &characters {
+        if character.is_ascii_alphanumeric() {
+            terms.insert(character.to_string());
+        }
+    }
+    for pair in characters.windows(2) {
+        terms.insert(pair.iter().collect());
+    }
+    for token in value
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|token| token.chars().count() >= 3)
+    {
+        terms.insert(token);
+    }
+    terms
 }
 
 fn complete_recent_segments(newest_first: Vec<Value>) -> Vec<Value> {
@@ -475,9 +659,21 @@ fn evidence_key(segments: &[Value]) -> String {
         .join(":")
 }
 
+fn explanation_evidence_key(segments: &[Value], pages: &[Value]) -> String {
+    let segment_key = evidence_key(segments);
+    if pages.is_empty() {
+        segment_key
+    } else {
+        format!("{segment_key}:materials:{}", evidence_key(pages))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::enqueue_deferred_explanation;
+    use super::{
+        MAX_EXPLANATION_PAGE_CHARS, MAX_EXPLANATION_PAGES, enqueue_deferred_explanation,
+        select_relevant_pages,
+    };
     use crate::app::AppState;
     use aialra_event_store::{NewModelJob, NewSession};
     use serde_json::json;
@@ -501,6 +697,11 @@ mod tests {
         ));
         assert!(super::explanation_needs_quality_repair(
             &json!({"paragraph_summary": "过长".repeat(601), "terms": []}),
+            400,
+            true,
+        ));
+        assert!(super::explanation_needs_quality_repair(
+            &json!({"paragraph_summary": "这段内容解释算法怎样优化分区设计并节省成本；".repeat(18), "terms": []}),
             400,
             true,
         ));
@@ -550,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_card_version_repair_is_append_only_and_idempotent() {
+    fn v48_repeated_card_queues_an_append_only_v49_repair_once() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
         state
@@ -585,7 +786,7 @@ mod tests {
             0,
             "legacy-card",
             None,
-            json!({"trigger": "quality_contract_v45", "result": {"paragraph_summary": "这段合成材料完整说明测试目标怎样决定故障模型，再说明测试向量怎样激励电路并观察输出，最后保留抽象模型不能覆盖全部物理缺陷这一适用边界，内容仅用于验证版本化重生成队列", "terms": [],
+            json!({"trigger": "quality_contract_v48", "result": {"paragraph_summary": "这段内容解释算法怎样优化分区设计并节省成本；".repeat(18), "terms": [],
                 "evidence_segment_ids": ["paragraph-0", "paragraph-1", "paragraph-2", "paragraph-3"]}}),
         ).unwrap();
 
@@ -597,6 +798,14 @@ mod tests {
             super::enqueue_quality_repairs(&state, "session-quality-repair").unwrap(),
             0
         );
+        let repair = state
+            .store
+            .get_model_job_by_key(
+                "explain:session-quality-repair:quality_contract_v49:paragraph-0:paragraph-1:paragraph-2:paragraph-3",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(repair.input["trigger"], "quality_contract_v49");
         let jobs = state
             .store
             .model_queue_counts(Some("session-quality-repair"))
@@ -749,5 +958,50 @@ mod tests {
             input["depends_on_job_ids"],
             json!(["job-parse-1", "job-parse-2"])
         );
+    }
+
+    #[test]
+    fn material_selection_ranks_related_pages_and_respects_asset_filter() {
+        let pages = vec![
+            json!({"id":"page-unrelated","asset_id":"asset-a","title":"地质构造","text":"岩石层的运动形成山脉"}),
+            json!({"id":"page-related","asset_id":"asset-b","title":"光合作用","text":"植物利用光能把二氧化碳和水转化为糖"}),
+            json!({"id":"page-filtered","asset_id":"asset-c","title":"光合作用","text":"叶绿体吸收光能并参与光合作用"}),
+        ];
+        let selected = select_relevant_pages(pages, "植物的光合作用", &["asset-b".to_owned()]);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]["id"], "page-related");
+    }
+
+    #[test]
+    fn material_selection_bounds_page_count_and_preserves_complete_pages() {
+        let mut pages: Vec<serde_json::Value> = (0..8)
+            .map(|index| {
+                json!({
+                    "id": format!("page-{index}"),
+                    "asset_id": "asset-a",
+                    "title": "Rust async worker",
+                    "text": format!("Rust async worker scheduling example {index}")
+                })
+            })
+            .collect();
+        pages.push(json!({
+            "id": "page-oversized",
+            "asset_id": "asset-a",
+            "title": "Rust async worker",
+            "text": "Rust async worker ".repeat(MAX_EXPLANATION_PAGE_CHARS + 1)
+        }));
+        let selected = select_relevant_pages(pages, "Rust async worker", &[]);
+
+        assert_eq!(selected.len(), MAX_EXPLANATION_PAGES);
+        assert!(selected.iter().all(|page| {
+            page["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Rust async worker")
+        }));
+        assert!(selected.iter().all(|page| {
+            page["text"].as_str().unwrap().chars().count() <= MAX_EXPLANATION_PAGE_CHARS
+        }));
     }
 }

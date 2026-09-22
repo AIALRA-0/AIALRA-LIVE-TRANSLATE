@@ -1,7 +1,7 @@
 //! Versioned HTTP and Server-Sent Events endpoints for the desktop UI.
 
 use crate::app::{ApiError, AppState};
-use crate::explanation::enqueue_explanation;
+use crate::explanation::{enqueue_explanation, enqueue_explanation_with_materials};
 use crate::identity::CurrentUser;
 use crate::projects::hash_token;
 use aialra_event_store::{AssetRecord, NewModelJob, SessionRecord};
@@ -340,10 +340,9 @@ pub async fn upload_asset(
     let mut file_name = None;
     let mut media_type = None;
     let mut bytes = None;
-    let mut queue_explanation = false;
     while let Some(field) = multipart.next_field().await? {
         if field.name() == Some("queue_explanation") {
-            queue_explanation = field.text().await?.trim() == "true";
+            let _ = field.text().await?;
             continue;
         }
         if field.name() == Some("file") || bytes.is_none() {
@@ -401,22 +400,12 @@ pub async fn upload_asset(
         input_object_hash: Some(stored.hash),
         idempotency_key: format!("asset_parse:{session_id}:{asset_id}"),
     })?;
-    let explain_job = if queue_explanation {
-        Some(crate::explanation::enqueue_deferred_explanation(
-            &state,
-            &session_id,
-            &asset_id,
-            &job.id,
-        )?)
-    } else {
-        None
-    };
     Ok(Json(json!({
         "asset_id": asset_id,
         "job_id": job.id,
         "page_ids": [],
-        "explain_job_id": explain_job.as_ref().map(|value| value.id.clone()),
-        "explain_status": explain_job.as_ref().map(|_| "等待材料解析和稳定段落")
+        "explain_job_id": null,
+        "explain_status": null
     })))
 }
 
@@ -445,9 +434,67 @@ pub async fn asset_content(
 pub async fn explain_now(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    request: Option<Json<ExplainRequest>>,
 ) -> Result<Json<Value>, ApiError> {
-    let job = enqueue_explanation(&state, &session_id, "manual")?;
+    let request = request.map(|Json(value)| value).unwrap_or_default();
+    if request.asset_ids.len() > 20
+        || request
+            .query
+            .as_ref()
+            .is_some_and(|query| query.chars().count() > 2_400)
+    {
+        return Err(ApiError::bad_request(
+            "material selection exceeds the request limit",
+        ));
+    }
+    let mut selected_asset_ids = BTreeSet::new();
+    for asset_id in request.asset_ids {
+        if !selected_asset_ids.insert(asset_id.clone()) {
+            continue;
+        }
+        state
+            .store
+            .get_asset(&session_id, &asset_id)?
+            .ok_or_else(|| ApiError::not_found("asset not found"))?;
+    }
+    let selected_asset_ids = selected_asset_ids.into_iter().collect::<Vec<_>>();
+    if !selected_asset_ids.is_empty() {
+        let ready_assets = state
+            .store
+            .list_events(&session_id)?
+            .iter()
+            .filter(|event| event.event_type == "asset.page.extracted")
+            .filter_map(|event| event.payload.get("asset_id")?.as_str())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        if selected_asset_ids
+            .iter()
+            .any(|asset_id| !ready_assets.contains(asset_id.as_str()))
+        {
+            return Err(ApiError::conflict(
+                "selected material is still being processed",
+            ));
+        }
+    }
+    let job = if request.query.is_none() && selected_asset_ids.is_empty() {
+        enqueue_explanation(&state, &session_id, "manual")?
+    } else {
+        enqueue_explanation_with_materials(
+            &state,
+            &session_id,
+            "manual",
+            request.query.as_deref(),
+            &selected_asset_ids,
+        )?
+    };
     Ok(Json(json!({"job_id": job.id, "status": job.status})))
+}
+
+#[derive(Default, Deserialize)]
+pub struct ExplainRequest {
+    #[serde(default)]
+    asset_ids: Vec<String>,
+    query: Option<String>,
 }
 
 fn sanitize_file_name(value: &str) -> String {

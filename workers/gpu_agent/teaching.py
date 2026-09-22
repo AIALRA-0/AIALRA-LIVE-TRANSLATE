@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, TypeGuard
 
 from workers.gpu_agent.reviewed_definitions import reviewed_definition
+from workers.model_worker.teaching import repetition_collapse
 from workers.model_worker.terminology import matching_technical_terms
 
 PartCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -19,6 +20,154 @@ _BANNED_NARRATION = (
     "本段话讲了", "本段内容讲了", "让我们来看",
 )
 
+_SECTION_NAMES = {
+    "chapter_bridge": ("承上启下", "chapter bridge"),
+    "main_content": ("主要内容", "main content"),
+    "professional_terms": ("专业术语", "professional terms", "terms"),
+    "content_explanation": ("内容讲解", "完整讲解", "content explanation", "full explanation"),
+    "misconceptions": ("易错点", "misconceptions", "common mistakes"),
+}
+_SECTION_LOOKUP = {
+    alias.casefold(): key for key, aliases in _SECTION_NAMES.items() for alias in aliases
+}
+_SECTION_LINE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*)?"
+    r"(承上启下|主要内容|专业术语|内容讲解|完整讲解|易错点|"
+    r"chapter bridge|main content|professional terms|terms|content explanation|"
+    r"full explanation|misconceptions|common mistakes)"
+    r"(?:\*\*)?\s*(?:[：:]\s*(?:\*\*)?\s*(.*))?$",
+    re.IGNORECASE,
+)
+
+
+def valid_provider(value: Any) -> TypeGuard[str]:
+    """Accept only the two configured inference lanes and their device suffixes."""
+    return isinstance(value, str) and bool(
+        re.fullmatch(r"ollama:[A-Za-z0-9_.:/+-]+@cuda", value)
+        or re.fullmatch(r"kuafushe:[A-Za-z0-9_.:/+-]+@cloud", value)
+    )
+
+
+def parse_teaching_sections(
+    value: str, terms: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Parse labelled output; map older unlabelled prose without rewriting it."""
+    sections: dict[str, list[str]] = {key: [] for key in _SECTION_NAMES}
+    active: str | None = None
+    saw_explanation = False
+    for line in value.splitlines():
+        match = _SECTION_LINE.fullmatch(line)
+        if match:
+            active = _SECTION_LOOKUP[match.group(1).casefold()]
+            saw_explanation = saw_explanation or active == "content_explanation"
+            if match.group(2):
+                sections[active].append(match.group(2).strip())
+            continue
+        if active is not None:
+            sections[active].append(line)
+
+    clean = {key: "\n".join(lines).strip() for key, lines in sections.items()}
+    explanation = clean["content_explanation"]
+    if not saw_explanation:
+        # Legacy paragraph_summary values remain the complete explanation. The
+        # short summary is a verbatim excerpt, never an additional inference.
+        explanation = value.strip()
+        sentences = [part.strip() for part in re.split(r"(?<=[。！？.!?])\s*|\r?\n+", explanation)
+                    if part.strip()]
+        clean["main_content"] = "\n".join(f"- {part}" for part in sentences[:5])
+        clean["chapter_bridge"] = ""
+        clean["misconceptions"] = ""
+
+    misconception_text = clean["misconceptions"].strip()
+    if misconception_text.strip("。.!！ ") in {"无", "暂无", "没有", "未提及"}:
+        misconception_text = ""
+    if (misconception_text.lstrip("（(").startswith(
+            ("原文未提供", "原文没有提供", "材料未提供", "本段未提供"))
+            and all(label in misconception_text for label in
+                    ("错误理解", "错因", "正确判断", "核对方法"))):
+        # An explicit absence note is not a misconception. The source cannot
+        # support four roles, so this optional section stays empty.
+        misconception_text = ""
+    # Compatible providers often put each of the four required roles in its
+    # own bullet. Those bullets form one misconception, not four incomplete
+    # misconceptions. Canonicalize labels only; never fill in missing roles.
+    role_pattern = re.compile(
+        r"^\s*(?:[-*+]\s+)?(?:\*\*)?(错误理解|错因|正确判断|核对方法)"
+        r"(?:\*\*)?\s*[：:]\s*(?:\*\*)?\s*(.*)$"
+    )
+    roles: list[tuple[str, str]] = []
+    for line in misconception_text.splitlines():
+        if match := role_pattern.match(line):
+            roles.append((match.group(1), match.group(2).strip()))
+        elif line.strip() and roles:
+            name, body = roles[-1]
+            roles[-1] = (name, f"{body}\n{line.strip()}")
+    expected_roles = ("错误理解", "错因", "正确判断", "核对方法")
+    if (roles and len(roles) % 4 == 0
+            and [name for name, _ in roles] == list(expected_roles) * (len(roles) // 4)):
+        misconceptions = ["\n\n".join(
+            f"**{name}：** {body}" for name, body in roles[index:index + 4]
+        ) for index in range(0, len(roles), 4)]
+    elif re.search(r"(?m)^\s*[-*+]\s+", misconception_text):
+        misconceptions = [part.strip() for part in re.split(
+            r"(?m)(?=^\s*[-*+]\s+)", misconception_text
+        ) if part.strip()]
+    else:
+        misconceptions = [misconception_text] if misconception_text else []
+    return {
+        "version": 1,
+        "chapter_bridge": clean["chapter_bridge"],
+        "main_content": clean["main_content"],
+        "professional_terms": terms or [],
+        "content_explanation": explanation,
+        "misconceptions": misconceptions,
+        "legacy_input": not saw_explanation,
+    }
+
+
+def valid_teaching_sections(
+    sections: dict[str, Any], source_characters: int, language: str,
+) -> bool:
+    explanation = sections.get("content_explanation")
+    main = sections.get("main_content")
+    bridge = sections.get("chapter_bridge")
+    misconceptions = sections.get("misconceptions")
+    terms = sections.get("professional_terms")
+    main_items = (
+        [line for line in main.splitlines() if line.strip()]
+        if isinstance(main, str) else []
+    )
+    return bool(
+        isinstance(explanation, str)
+        and valid_summary(explanation, source_characters, language)
+        and isinstance(main, str) and bool(main.strip())
+        and len(main) <= 900 and 1 <= len(main_items) <= 5
+        and isinstance(bridge, str) and len(bridge) <= 500
+        and isinstance(misconceptions, list) and len(misconceptions) <= 5
+        and all(
+            isinstance(item, str) and len(item) <= 700
+            and _complete_misconception_roles(item, language)
+            for item in misconceptions
+        )
+        and isinstance(terms, list)
+    )
+
+
+def _complete_misconception_roles(value: str, language: str) -> bool:
+    roles = (
+        ("错误理解", "错因", "正确判断", "核对方法")
+        if language.casefold().startswith("zh")
+        else ("misconception", "cause", "correction", "check")
+    )
+    labels = re.findall(
+        r"\*\*(错误理解|错因|正确判断|核对方法)[：:]\*\*|"
+        r"\*\*(misconception|cause|correction|check):\*\*",
+        value,
+        re.IGNORECASE,
+    )
+    found = [next(label for label in pair if label).casefold() for pair in labels]
+    return tuple(found) == tuple(role.casefold() for role in roles)
+
 
 def valid_summary(value: str, source_characters: int, language: str) -> bool:
     del language  # Core's final gate is content-based; language is checked by the Worker.
@@ -26,6 +175,7 @@ def valid_summary(value: str, source_characters: int, language: str) -> bool:
     return bool(
         text
         and not any(phrase in text for phrase in _BANNED_NARRATION)
+        and not repetition_collapse(text)
         and len(text) <= 1200
         and (source_characters < 240 or len(text) >= 80)
     )
@@ -137,9 +287,9 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         nonlocal provider
         result = await call(body)
         observed = result.get("provider")
-        if not isinstance(observed, str) or not observed.startswith("ollama:"):
+        if not valid_provider(observed):
             raise ValueError("teaching_provider_unverified")
-        if not observed.endswith("@cuda") or (provider and observed != provider):
+        if provider and observed != provider:
             raise ValueError("teaching_provider_changed")
         provider = observed
         return result
@@ -329,10 +479,13 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         # reads like stitched transcript fragments in the narrow learning rail.
         detailed_prose = heading.strip()
     source_characters = sum(len(item["text"]) for item in segments)
-    if not valid_summary(detailed_prose, source_characters, target):
+    teaching_sections = parse_teaching_sections(detailed_prose, definitions)
+    if (not valid_summary(detailed_prose, source_characters, target)
+            or not valid_teaching_sections(teaching_sections, source_characters, target)):
         raise ValueError("teaching_summary_quality_invalid")
     return {
         "paragraph_summary": detailed_prose, "terms": definitions,
+        "teaching_sections": teaching_sections,
         "evidence_segment_ids": [item["id"] for item in segments],
         "asset_page_ids": [item["id"] for item in pages], "provider": provider,
     }

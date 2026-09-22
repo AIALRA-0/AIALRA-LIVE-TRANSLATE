@@ -20,6 +20,7 @@ from typing import Any, cast
 import httpx
 
 from workers.gpu_agent.course_summary import COMPILED_PROVIDER, compile_course
+from workers.gpu_agent.kuafushe import KuafuTextClient
 from workers.gpu_agent.teaching import assemble_explanation
 
 GATEWAY_URL = os.getenv("AIALRA_GPU_GATEWAY_URL", "http://127.0.0.1:8787").rstrip("/")
@@ -303,8 +304,14 @@ def sanitize_worker_id(value: str) -> str:
     return "".join(character for character in value if character in allowed)[:64] or "rtx-worker"
 
 
-def provider_proves_local_execution(job_type: str, provider: str) -> bool:
-    """ASR may use the local CPU while every language-model result must prove CUDA."""
+def provider_proves_local_execution(
+    job_type: str, provider: str, cloud_authorized: bool = False,
+) -> bool:
+    """Cloud text is limited to explicitly authorized teaching jobs."""
+
+    if (cloud_authorized and job_type in {"explain", "summarize", "course_qa"}
+            and provider.startswith("kuafushe:") and provider.endswith("@cloud")):
+        return True
 
     if job_type == "asr":
         return (
@@ -522,6 +529,8 @@ async def execute_job(
     ):
         raise JobExecutionError(FailureReport("job_payload", "job_payload_invalid"))
     model_input = dict(model_input_value)
+    cloud_text_authorized = model_input.get("cloud_text_authorized") is True
+    cloud = KuafuTextClient(model) if cloud_text_authorized else None
     if job_type == "asr":
         try:
             binary = await _timed_request(
@@ -580,6 +589,8 @@ async def execute_job(
         job_type == "summarize" and model_input.get("summary_contract") == "complete_groups_v1"
     ):
         async def part(body: dict[str, Any]) -> dict[str, Any]:
+            if cloud is not None:
+                return await cloud.teaching_part(body)
             part_response = await scheduler.run_llm(lambda: model_post(
                 model, f"{MODEL_WORKER_URL}/v1/explain/part", json=body, timeout=180,
             ))
@@ -607,6 +618,17 @@ async def execute_job(
             timings["inference_ms"] = int((time.monotonic() - started) * 1000)
         return result
     elif job_type == "course_qa":
+        if cloud is not None:
+            started = time.monotonic()
+            try:
+                answer = await cloud.answer_question(model_input)
+            except ValueError as error:
+                raise JobExecutionError(
+                    FailureReport("model_json", "cloud_question_contract_invalid")
+                ) from error
+            if timings is not None:
+                timings["inference_ms"] = max(0, int((time.monotonic() - started) * 1_000))
+            return answer
         try:
             response = await _timed_request(
                 timings, "inference_ms",
@@ -705,7 +727,7 @@ async def execute_job(
         provider.startswith("ollama:") and provider.endswith("@cuda")
     ):
         raise response_failure("execution_device", "execution_device_unproven", response)
-    if not provider_proves_local_execution(job_type, provider):
+    if not provider_proves_local_execution(job_type, provider, cloud_text_authorized):
         raise response_failure("execution_device", "execution_device_unproven", response)
     return result
 

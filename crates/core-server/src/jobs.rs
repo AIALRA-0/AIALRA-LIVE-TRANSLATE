@@ -177,7 +177,12 @@ pub async fn lease_job(
                 None,
                 json!({"job_id": job.id, "job_type": job.job_type, "attempt": job.attempts}),
             );
-            return Ok((StatusCode::OK, Json(json!({"job": job}))).into_response());
+            let mut leased = serde_json::to_value(&job)?;
+            if matches!(job.job_type.as_str(), "explain" | "summarize" | "course_qa") {
+                leased["input"]["cloud_text_authorized"] =
+                    json!(cloud_text_allowed(&state, &job.session_id)?);
+            }
+            return Ok((StatusCode::OK, Json(json!({"job": leased}))).into_response());
         }
         if tokio::time::Instant::now() >= deadline {
             return Ok(StatusCode::NO_CONTENT.into_response());
@@ -314,6 +319,13 @@ pub async fn complete_job(
         &request.result,
         &request.runtime_proof,
     )?;
+    if request.runtime_proof.execution_device == "cloud"
+        && !cloud_text_allowed(&state, &job.session_id)?
+    {
+        return Err(ApiError::bad_request(
+            "cloud text is not authorized for this project",
+        ));
+    }
     let commit_started = Instant::now();
     apply_result(&state, &job, &request.result, request.elapsed_ms)?;
     if !state
@@ -505,7 +517,7 @@ fn apply_course_qa_result(
         .get("provider")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    require_provider(provider, "ollama:", &["@cuda"])?;
+    require_teaching_provider(state, job, provider)?;
     let answer = result
         .get("answer")
         .and_then(Value::as_str)
@@ -785,7 +797,33 @@ fn apply_explanation_result(
         ));
     }
     let explanation: ExplanationResponse = serde_json::from_value(result.clone())?;
-    require_provider(&explanation.provider, "ollama:", &["@cuda"])?;
+    require_teaching_provider(state, job, &explanation.provider)?;
+    if let Some(sections) = &explanation.teaching_sections {
+        let bridge = sections["chapter_bridge"].as_str().unwrap_or_default();
+        let main = sections["main_content"].as_str().unwrap_or_default();
+        let detail = sections["content_explanation"].as_str().unwrap_or_default();
+        let misconceptions = sections["misconceptions"].as_array();
+        let terms = sections["professional_terms"].as_array();
+        if sections["version"] != 1
+            || main.trim().is_empty()
+            || detail.trim().is_empty()
+            || bridge.chars().count() > 500
+            || main.chars().count() > 900
+            || detail.chars().count() > 1200
+            || !explanation.paragraph_summary.contains(detail)
+            || misconceptions.is_none_or(|items| {
+                items.len() > 5
+                    || items
+                        .iter()
+                        .any(|item| item.as_str().is_none_or(|text| text.chars().count() > 700))
+            })
+            || terms.is_none_or(|items| items.len() != explanation.terms.len())
+        {
+            return Err(ApiError::bad_request(
+                "explanation teaching structure is invalid",
+            ));
+        }
+    }
     let allowed_segments = job
         .input
         .get("segments")
@@ -970,7 +1008,7 @@ fn apply_summary_result(
     let compiled = job.input["summary_contract"] == "complete_groups_v1"
         && summary.provider == "compiled:content-groups-v1@cpu";
     if !compiled {
-        require_provider(&summary.provider, "ollama:", &["@cuda"])?;
+        require_teaching_provider(state, job, &summary.provider)?;
     }
     let allowed_segments = job
         .input
@@ -1776,12 +1814,20 @@ fn validate_runtime_proof(
             "model provider proof lacks execution device",
         ));
     };
-    if !matches!(expected_device, "cpu" | "cuda")
+    if !matches!(expected_device, "cpu" | "cuda" | "cloud")
         || proof.execution_device != expected_device
         || proof.model != expected_model
     {
         return Err(ApiError::bad_request(
             "model runtime proof does not match provider execution details",
+        ));
+    }
+    if expected_device == "cloud"
+        && (!matches!(job.job_type.as_str(), "explain" | "summarize" | "course_qa")
+            || !provider.starts_with("kuafushe:"))
+    {
+        return Err(ApiError::bad_request(
+            "cloud provider is not allowed for this job type",
         ));
     }
     let now_ms = Utc::now().timestamp_millis().max(0) as u64;
@@ -1824,6 +1870,47 @@ fn allowed_capabilities(values: Vec<String>) -> Vec<String> {
 
 fn require_provider(provider: &str, prefix: &str, devices: &[&str]) -> Result<(), ApiError> {
     require_provider_prefixes(provider, &[prefix], devices)
+}
+
+fn cloud_text_allowed(state: &AppState, session_id: &str) -> Result<bool, ApiError> {
+    cloud_text_allowed_for(
+        state,
+        session_id,
+        crate::workspace::cloud_text_route_enabled(),
+    )
+}
+
+fn cloud_text_allowed_for(
+    state: &AppState,
+    session_id: &str,
+    route_enabled: bool,
+) -> Result<bool, ApiError> {
+    if !route_enabled {
+        return Ok(false);
+    }
+    let Some(project) = state.store.project_for_session(session_id)? else {
+        return Ok(false);
+    };
+    let policy = state.store.get_project_ai_policy(&project.id)?;
+    Ok(policy.cloud_enabled && policy.allowed_modalities.iter().any(|item| item == "text"))
+}
+
+fn require_teaching_provider(
+    state: &AppState,
+    job: &aialra_event_store::ModelJobRecord,
+    provider: &str,
+) -> Result<(), ApiError> {
+    if provider.starts_with("kuafushe:") && provider.ends_with("@cloud") {
+        if matches!(job.job_type.as_str(), "explain" | "summarize" | "course_qa")
+            && cloud_text_allowed(state, &job.session_id)?
+        {
+            return Ok(());
+        }
+        return Err(ApiError::bad_request(
+            "cloud text is not authorized for this project",
+        ));
+    }
+    require_provider(provider, "ollama:", &["@cuda"])
 }
 
 fn require_provider_prefixes(
@@ -2060,6 +2147,79 @@ mod tests {
                 &["@cuda"],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn cloud_teaching_requires_current_project_text_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_project(&NewProject {
+                id: "cloud-policy-project".into(),
+                owner_subject: "owner".into(),
+                title: "Synthetic project".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+            })
+            .unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "cloud-policy-session".into(),
+                title: "Synthetic session".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .store
+            .attach_session_to_project(
+                "cloud-policy-project",
+                "cloud-policy-session",
+                "owner",
+                "fixture",
+            )
+            .unwrap();
+        let job = state
+            .store
+            .enqueue_model_job(&NewModelJob {
+                id: "cloud-policy-job".into(),
+                session_id: "cloud-policy-session".into(),
+                job_type: "explain".into(),
+                priority: 30,
+                input: json!({}),
+                input_object_hash: None,
+                idempotency_key: "cloud-policy-job".into(),
+            })
+            .unwrap();
+        assert!(!super::cloud_text_allowed(&state, "cloud-policy-session").unwrap());
+        assert!(
+            super::require_teaching_provider(&state, &job, "kuafushe:deepseek-chat@cloud",)
+                .is_err()
+        );
+        state
+            .store
+            .update_project_ai_policy("cloud-policy-project", true, &["text".into()])
+            .unwrap();
+        assert!(!super::cloud_text_allowed(&state, "cloud-policy-session").unwrap());
+        assert!(super::cloud_text_allowed_for(&state, "cloud-policy-session", true).unwrap());
+        assert!(
+            super::require_teaching_provider(&state, &job, "kuafushe:deepseek-chat@cloud",)
+                .is_err()
+        );
+        state
+            .store
+            .update_project_ai_policy("cloud-policy-project", false, &[])
+            .unwrap();
+        assert!(!super::cloud_text_allowed_for(&state, "cloud-policy-session", true).unwrap());
+        assert!(
+            super::require_teaching_provider(&state, &job, "kuafushe:deepseek-chat@cloud",)
+                .is_err()
         );
     }
 
@@ -2646,7 +2806,7 @@ mod tests {
                     json!({"paragraph_id": format!("para-{index}"), "segment_ids": [format!("seg-{index}")], "text": "A coherent technical passage explains attention, representation learning, optimization, and the evidence needed to compare these mechanisms in a lecture setting. This paragraph intentionally carries enough semantic content for the teaching gate."}),
                 )
                 .unwrap();
-            if index < 8 {
+            if index < 6 {
                 maybe_enqueue_coherent_explanation(
                     &state,
                     "session_explanation",
@@ -2932,7 +3092,7 @@ mod tests {
                     .model_queue_counts(Some("session_short_group"))
                     .unwrap()
                     .queued,
-                if index == 20 { 1 } else { 0 }
+                if index >= 12 { 1 } else { 0 }
             );
         }
     }
