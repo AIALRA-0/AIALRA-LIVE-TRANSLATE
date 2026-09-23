@@ -88,7 +88,7 @@ export function CourseQuestions({ sessionId, sessionState, events, hasStableEvid
     </div>
     <form onSubmit={(event) => { event.preventDefault(); if (canAsk && question.trim()) void submit(question.trim()); }}>
       {parentJobId && <p className="course-question-context" role="status">正在追问上方回答；新问题会带上父回答作为上下文</p>}
-      {cardId && <p className="course-question-context" role="status">问题将围绕当前讲解卡片 {cardId.slice(-8)} 展开</p>}
+      {cardId && <p className="course-question-context" role="status">问题将围绕当前讲解展开</p>}
       <label>向这节课提问<textarea ref={questionInput} disabled={!canAsk || submitting} value={question} maxLength={2000} onChange={(event) => setQuestion(event.target.value)} placeholder={parentJobId ? "继续追问这条回答…" : "例如：为什么要先做故障模型验证？"} /></label>
       <button type="submit" disabled={!canAsk || submitting || !question.trim()}>{submitting ? "正在提交" : parentJobId ? "提交追问" : "提问"}</button>
     </form>
