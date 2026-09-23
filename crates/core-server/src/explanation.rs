@@ -4,15 +4,10 @@ use crate::app::AppState;
 use aialra_event_store::{ModelJobRecord, NewModelJob};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
-const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v49";
-const COMPATIBLE_QUALITY_TRIGGERS: [&str; 3] = [
-    "quality_contract_v46",
-    "quality_contract_v47",
-    "quality_contract_v48",
-];
+const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v50";
 const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
 const MIN_REPAIR_GROUP_PARAGRAPHS: usize = 6;
 
@@ -122,7 +117,9 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
                 .map(str::to_owned)
         })
         .collect::<Vec<_>>();
-    let mut latest = BTreeMap::<String, (Vec<String>, Value, String)>::new();
+    let paragraph_ids = paragraph_text.keys().cloned().collect::<HashSet<_>>();
+    let mut cards = Vec::<(Vec<String>, Value, String)>::new();
+    let mut latest_card_by_paragraph = HashMap::<String, String>::new();
     for event in events
         .iter()
         .filter(|event| event.event_type == "explanation.card.created")
@@ -135,15 +132,24 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        if !ids.is_empty() {
-            let trigger = event
-                .payload
-                .get("trigger")
-                .and_then(Value::as_str)
-                .unwrap_or("legacy")
-                .to_owned();
-            latest.insert(ids.join(":"), (ids, result.clone(), trigger));
+        if ids.is_empty()
+            || !ids.iter().any(|id| paragraph_ids.contains(id))
+            || !card_has_visible_content(result)
+        {
+            continue;
         }
+        let card_id = event
+            .payload
+            .get("card_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| event.event_id.to_string());
+        for id in &ids {
+            if paragraph_ids.contains(id) {
+                latest_card_by_paragraph.insert(id.clone(), card_id.clone());
+            }
+        }
+        cards.push((ids, result.clone(), card_id));
     }
     let chinese = session
         .target_language
@@ -151,20 +157,25 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
         .starts_with("zh");
     let mut queued = 0;
     let mut planned = HashSet::new();
-    for (_key, (ids, result, trigger)) in latest {
+    for (ids, result, card_id) in cards {
         if queued == MAX_QUALITY_REPAIRS_PER_ENSURE {
             break;
+        }
+        let is_latest_visible = ids.iter().any(|id| {
+            paragraph_ids.contains(id)
+                && latest_card_by_paragraph
+                    .get(id)
+                    .is_some_and(|latest| latest == &card_id)
+        });
+        if !is_latest_visible {
+            continue;
         }
         let source_characters = ids
             .iter()
             .filter_map(|id| paragraph_text.get(id))
             .map(|text| text.chars().count())
             .sum();
-        if (trigger == QUALITY_REPAIR_TRIGGER
-            || COMPATIBLE_QUALITY_TRIGGERS.contains(&trigger.as_str()))
-            && ids.len() >= 4
-            && !explanation_needs_quality_repair(&result, source_characters, chinese)
-        {
+        if has_current_teaching_quality(&result, source_characters, chinese) {
             continue;
         }
         let repair_ids = expanded_repair_evidence(&ids, &paragraph_order);
@@ -190,6 +201,55 @@ pub fn enqueue_quality_repairs(state: &AppState, session_id: &str) -> Result<usi
         queued += 1;
     }
     Ok(queued)
+}
+
+/// Match the course document's visibility rule: cards without any renderable
+/// teaching section never appear to learners and must not trigger repairs.
+fn card_has_visible_content(result: &Value) -> bool {
+    let summary = result["paragraph_summary"]
+        .as_str()
+        .or_else(|| result["summary"].as_str())
+        .is_some_and(|text| !text.trim().is_empty());
+    let sections = &result["teaching_sections"];
+    let text_sections = ["chapter_bridge", "main_content", "content_explanation"]
+        .iter()
+        .any(|field| {
+            sections[*field]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty())
+        });
+    let terms = sections["professional_terms"]
+        .as_array()
+        .or_else(|| result["terms"].as_array())
+        .or_else(|| result["rare_terms"].as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item["term"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty())
+                    || item["explanation"]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+                    || item["one_line"]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+            })
+        });
+    let misconceptions = match &sections["misconceptions"] {
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| item.as_str().is_some_and(|text| !text.trim().is_empty())),
+        _ => false,
+    };
+    summary || text_sections || terms || misconceptions
+}
+
+/// Existing cards are current only when they carry the published structure
+/// version and pass the learner-facing quality checks.
+fn has_current_teaching_quality(result: &Value, source_characters: usize, chinese: bool) -> bool {
+    result["teaching_sections"]["version"] == 1
+        && !explanation_needs_quality_repair(result, source_characters, chinese)
 }
 
 /// A tiny final group is usually the tail of the preceding explanation rather
@@ -676,7 +736,7 @@ mod tests {
     };
     use crate::app::AppState;
     use aialra_event_store::{NewModelJob, NewSession};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn quality_contract_rejects_narration_thin_summaries_and_shallow_definitions() {
@@ -751,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn v48_repeated_card_queues_an_append_only_v49_repair_once() {
+    fn v49_repeated_card_queues_an_append_only_v50_repair_once() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
         state
@@ -786,7 +846,7 @@ mod tests {
             0,
             "legacy-card",
             None,
-            json!({"trigger": "quality_contract_v48", "result": {"paragraph_summary": "这段内容解释算法怎样优化分区设计并节省成本；".repeat(18), "terms": [],
+            json!({"trigger": "quality_contract_v49", "card_id": "legacy-card", "result": {"paragraph_summary": "这段内容解释算法怎样优化分区设计并节省成本；".repeat(18), "terms": [],
                 "evidence_segment_ids": ["paragraph-0", "paragraph-1", "paragraph-2", "paragraph-3"]}}),
         ).unwrap();
 
@@ -801,11 +861,11 @@ mod tests {
         let repair = state
             .store
             .get_model_job_by_key(
-                "explain:session-quality-repair:quality_contract_v49:paragraph-0:paragraph-1:paragraph-2:paragraph-3",
+                "explain:session-quality-repair:quality_contract_v50:paragraph-0:paragraph-1:paragraph-2:paragraph-3",
             )
             .unwrap()
             .unwrap();
-        assert_eq!(repair.input["trigger"], "quality_contract_v49");
+        assert_eq!(repair.input["trigger"], "quality_contract_v50");
         let jobs = state
             .store
             .model_queue_counts(Some("session-quality-repair"))
@@ -824,7 +884,151 @@ mod tests {
     }
 
     #[test]
-    fn v46_card_remains_compatible_when_its_terms_fit_the_tighter_contract() {
+    fn v50_repairs_only_latest_visible_legacy_cards_and_skips_current_quality_cards() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session-latest-visible-repair".to_owned(),
+                title: "Synthetic latest-visible repair".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for index in 0..8 {
+            state
+                .emit_idempotent(
+                    &format!("latest-visible-paragraph-{index}"),
+                    "session-latest-visible-repair",
+                    "fixture",
+                    "paragraph.finalized",
+                    index,
+                    &format!("paragraph-{index}"),
+                    None,
+                    json!({
+                        "paragraph_id": format!("paragraph-{index}"),
+                        "text": "A complete synthetic technical paragraph used only to verify append-only quality repair behavior."
+                    }),
+                )
+                .unwrap();
+        }
+        let emit_card =
+            |event_id: &str, card_id: &str, sequence, evidence: Vec<String>, mut result: Value| {
+                result["evidence_segment_ids"] = json!(evidence);
+                state.emit_idempotent(
+                    event_id,
+                    "session-latest-visible-repair",
+                    "fixture",
+                    "explanation.card.created",
+                    sequence,
+                    card_id,
+                    None,
+                    json!({"trigger": "manual", "card_id": card_id, "result": result}),
+                )
+            };
+
+        // The later two cards fully supersede the broad historical card. One
+        // already satisfies v1; only the latest legacy card should be repaired.
+        emit_card(
+            "superseded-historical-card",
+            "historical-card",
+            0,
+            (0..8).map(|index| format!("paragraph-{index}")).collect(),
+            json!({"paragraph_summary": "旧版历史讲解需要由当前质量结构替代。".repeat(12), "terms": []}),
+        )
+            .unwrap();
+        let current_detail = "故障模型把需要检测的失效方式转成可验证的测试目标。";
+        emit_card(
+            "latest-current-card",
+            "current-card",
+            1,
+            (0..4).map(|index| format!("paragraph-{index}")).collect(),
+            json!({
+                "paragraph_summary": format!("{current_detail}随后，测试流程依据该目标选择激励并检查输出，同时保留模型范围不能覆盖全部物理缺陷这一边界。这一限制提醒工程师，测试覆盖率描述的是模型中的故障集合，不代表芯片所有可能的真实失效都已经被验证。"),
+                "terms": [],
+                "teaching_sections": {
+                    "version": 1,
+                    "chapter_bridge": "",
+                    "main_content": "故障模型确定测试要覆盖的失效目标。",
+                    "content_explanation": current_detail,
+                    "professional_terms": [],
+                    "misconceptions": []
+                }
+            }),
+        )
+            .unwrap();
+        emit_card(
+            "latest-legacy-card",
+            "legacy-card",
+            2,
+            (4..8).map(|index| format!("paragraph-{index}")).collect(),
+            json!({"paragraph_summary": "旧版内容组讲解尚未具备课程讲解结构。".repeat(12), "terms": []}),
+        )
+            .unwrap();
+        emit_card(
+            "orphan-visible-card",
+            "orphan-card",
+            3,
+            vec!["missing-paragraph".to_owned()],
+            json!({"paragraph_summary": "这张旧卡引用的段落正文不存在，因此没有可重建的证据。".repeat(4), "terms": []}),
+        )
+            .unwrap();
+
+        let queued =
+            super::enqueue_quality_repairs(&state, "session-latest-visible-repair").unwrap();
+        assert_eq!(queued, 1);
+        assert_eq!(
+            super::enqueue_quality_repairs(&state, "session-latest-visible-repair").unwrap(),
+            0
+        );
+        let repair = state
+            .store
+            .get_model_job_by_key(
+                "explain:session-latest-visible-repair:quality_contract_v50:paragraph-4:paragraph-5:paragraph-6:paragraph-7",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(repair.input["trigger"], "quality_contract_v50");
+        assert!(state
+            .store
+            .get_model_job_by_key(
+                "explain:session-latest-visible-repair:quality_contract_v50:paragraph-0:paragraph-1:paragraph-2:paragraph-3",
+            )
+            .unwrap()
+            .is_none());
+        assert!(state
+            .store
+            .get_model_job_by_key(
+                "explain:session-latest-visible-repair:quality_contract_v50:paragraph-0:paragraph-1:paragraph-2:paragraph-3:paragraph-4:paragraph-5:paragraph-6:paragraph-7",
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            state
+                .store
+                .model_queue_counts(Some("session-latest-visible-repair"))
+                .unwrap()
+                .queued,
+            1
+        );
+        assert_eq!(
+            state
+                .store
+                .list_events("session-latest-visible-repair")
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == "explanation.card.created")
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn v46_card_with_current_sections_is_skipped_when_quality_passes() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
         state
@@ -862,6 +1066,7 @@ mod tests {
             json!({"trigger": "quality_contract_v46", "result": {
                 "paragraph_summary": "这段合成材料完整说明测试目标怎样决定故障模型，再说明测试向量怎样激励电路并观察输出，最后保留抽象模型不能覆盖全部物理缺陷这一适用边界，内容仅用于验证兼容版本不会被重复排队",
                 "terms": [{"term": "故障模型（Fault Model）", "explanation": "故障模型是对电路失效方式的抽象表示；它帮助测试流程选择需要激励和观察的目标；工程师按模型生成并评估测试向量；它适用于描述指定故障范围，不等同于器件中的全部物理缺陷"}],
+                "teaching_sections": {"version": 1},
                 "evidence_segment_ids": ["paragraph-0", "paragraph-1", "paragraph-2", "paragraph-3"]
             }}),
         ).unwrap();
