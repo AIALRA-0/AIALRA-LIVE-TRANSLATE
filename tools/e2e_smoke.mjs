@@ -398,6 +398,15 @@ const acknowledgements = await sendPcm(
 );
 if (RETAINED_RECORDING) process.stderr.write("\n");
 if (!acknowledgements.commitIdsValid) throw new Error("one or more durable ACKs lacked commit_id");
+const stopRecording = async () => {
+  await stopLeaseRenewal();
+  await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
+  }));
+};
+// A short retained sample can have interim text but no sealed segment until
+// stop flushes the ASR window. Do not wait for a finalized segment first.
+if (RETAINED_RECORDING) await stopRecording();
 let events = await waitForEvents(
   session.id,
   (items) =>
@@ -419,11 +428,8 @@ if (!RETAINED_RECORDING) {
     session.id,
     (items) => items.some((item) => item.event_type === "asset.page.extracted"),
   );
+  await stopRecording();
 }
-await stopLeaseRenewal();
-await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
-  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
-}));
 events = await waitForEvents(
   session.id,
   (items) =>
