@@ -1,4 +1,4 @@
-import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { FormEvent, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { api, subscribeEvents, subscribeProject, subscribeWorkspace, type RuntimeHealth } from "./api";
 import { BrowserCapture, listAudioInputs, testMicrophone, type CaptureMode, type CapturePhase, type MicrophoneTestProgress, type MicrophoneTestResult } from "./audio";
 import { applySessionStateEvent } from "./sessionState";
@@ -804,11 +804,28 @@ const DocumentItem = memo(function DocumentItem({ item, languageView, sessionId,
   );
 });
 
-function TeachingSectionsView({ sections }: { sections: NonNullable<TimelineItem["sections"]> }) {
+export function TeachingSectionsView({ sections }: { sections: NonNullable<TimelineItem["sections"]> }) {
+  const termsHeadingId = useId();
   if (!sections.length) return null;
-  return <div className="teaching-sections-view">{sections.map((section, index) => section.label.startsWith("专业术语")
-    ? <details key={`${section.label}:${index}`} className="teaching-term"><summary>{section.label}</summary><p>{section.text}</p>{section.backgroundReference && <a href={section.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}</details>
-    : <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p></section>)}</div>;
+  const terms = sections.filter((section) => section.label.startsWith("专业术语"));
+  const termsStartIndex = sections.findIndex((section) => section.label.startsWith("专业术语"));
+  return <div className="teaching-sections-view">{sections.flatMap((section, index) => {
+    if (section.label.startsWith("专业术语")) {
+      if (index !== termsStartIndex) return [];
+      return [<section key="professional-terms" className="teaching-terms" aria-labelledby={termsHeadingId}>
+        <h4 id={termsHeadingId}>专业术语</h4>
+        <div className="teaching-term-list">{terms.map((term, termIndex) => {
+          const label = term.label.replace(/^专业术语(?:\s*·\s*)?/, "").trim() || "术语说明";
+          return <details key={`${term.label}:${termIndex}`} className="teaching-term">
+            <summary>{label}</summary>
+            <p>{term.text}</p>
+            {term.backgroundReference && <a href={term.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}
+          </details>;
+        })}</div>
+      </section>];
+    }
+    return [<section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p></section>];
+  })}</div>;
 }
 
 function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, retrying, onRetry, onAsk }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null>; focusKey: string; retryAvailable: boolean; retrying: boolean; onRetry: () => void; onAsk: (cardId: string) => void }) {
