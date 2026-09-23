@@ -1,0 +1,30 @@
+workers/gpu_agent/kuafushe.py
+  s_4d8bb530e409af::t_3624c6859deb45 275,279-281,286-302
+  s_4d8bb530e409af::t_0264044ad15880 11,35-53,55-66,378,382,385-396,399,413
+  s_4d8bb530e409af::t_3b4e585e04e221 54
+  s_4d8bb530e409af::t_4be1aec2ea2ed6 276-278
+  s_4d8bb530e409af::t_538d767024513d 282-285
+  s_4d8bb530e409af::t_4f70f1cac7d0fd 379-381,397-398
+workers/gpu_agent/test_kuafushe.py
+  s_4d8bb530e409af::t_b17d510137c09b 448-466,469-511
+  s_4d8bb530e409af::t_4073cbaf297bd1 467-468
+  s_4d8bb530e409af::t_720c1f5f070812 12-17,75-76,82-146,150-185,446
+  s_4d8bb530e409af::t_9610f17bc14f92 77-81,147-149,186-217,447
+  s_4d8bb530e409af::t_e9fa66cb41299a 218-219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8573bfc27859b80a22e354b88c230ce5c5451b92",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
