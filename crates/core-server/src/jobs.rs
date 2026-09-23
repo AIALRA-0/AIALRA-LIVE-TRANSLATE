@@ -1403,9 +1403,9 @@ fn summary_group_is_reusable(
     source_positions: &HashMap<String, usize>,
     page_ids: &HashSet<String>,
 ) -> bool {
-    if !result["paragraph_summary"]
+    if result["paragraph_summary"]
         .as_str()
-        .is_some_and(|summary| !summary.trim().is_empty())
+        .is_none_or(|summary| summary.trim().is_empty())
         || !result["provider"]
             .as_str()
             .is_some_and(summary_group_provider_is_complete)
