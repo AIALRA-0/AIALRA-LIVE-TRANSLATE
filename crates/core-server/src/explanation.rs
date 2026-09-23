@@ -1,6 +1,7 @@
 //! Evidence-bounded explanation jobs are persisted before the GPU agent sees course text.
 
 use crate::app::AppState;
+use aialra_core_domain::SessionState;
 use aialra_event_store::{ModelJobRecord, NewModelJob};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -8,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 const QUALITY_REPAIR_TRIGGER: &str = "quality_contract_v50";
+const SEMANTIC_CONTENT_GROUP_TRIGGER: &str = "semantic_content_group";
 const MAX_QUALITY_REPAIRS_PER_ENSURE: usize = 32;
 const MIN_REPAIR_GROUP_PARAGRAPHS: usize = 6;
 
@@ -422,9 +424,12 @@ fn enqueue_with_evidence(
         id: format!("job_{}", Uuid::now_v7().simple()),
         session_id: session_id.to_owned(),
         job_type: "explain".to_owned(),
-        // Historical card repair runs behind live teaching and summaries so
-        // a backlog never delays the next actual classroom explanation.
-        priority: if trigger == QUALITY_REPAIR_TRIGGER {
+        // Historical repairs and completed-course group backfills run behind
+        // active teaching so their backlog cannot delay the current lesson.
+        priority: if trigger == QUALITY_REPAIR_TRIGGER
+            || (trigger == SEMANTIC_CONTENT_GROUP_TRIGGER
+                && session.state == SessionState::Completed)
+        {
             10
         } else {
             30
@@ -741,6 +746,7 @@ mod tests {
         select_relevant_pages,
     };
     use crate::app::AppState;
+    use aialra_core_domain::SessionState;
     use aialra_event_store::{NewModelJob, NewSession};
     use serde_json::{Value, json};
 
@@ -786,6 +792,97 @@ mod tests {
             400,
             true,
         ));
+    }
+
+    #[test]
+    fn completed_group_backfill_is_low_priority_without_lowering_live_or_manual_jobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        let new_session = |id: &str| NewSession {
+            id: id.to_owned(),
+            title: format!("Synthetic {id}"),
+            source_language: "en".to_owned(),
+            target_language: "zh-CN".to_owned(),
+            privacy_mode: "local_only".to_owned(),
+            consent_confirmed: true,
+            demo_mode: false,
+        };
+
+        for id in ["session-recording-priority", "session-completed-priority"] {
+            state.store.create_session(&new_session(id)).unwrap();
+            state
+                .store
+                .transition_session(id, SessionState::Ready)
+                .unwrap();
+            state
+                .store
+                .transition_session(id, SessionState::Recording)
+                .unwrap();
+        }
+        for next in [
+            SessionState::Stopping,
+            SessionState::Processing,
+            SessionState::Completed,
+        ] {
+            state
+                .store
+                .transition_session("session-completed-priority", next)
+                .unwrap();
+        }
+
+        for (session_id, paragraph_id) in [
+            ("session-recording-priority", "recording-paragraph"),
+            ("session-completed-priority", "completed-paragraph"),
+        ] {
+            state
+                .emit_idempotent(
+                    &format!("{paragraph_id}-event"),
+                    session_id,
+                    "fixture",
+                    "paragraph.finalized",
+                    0,
+                    paragraph_id,
+                    None,
+                    json!({
+                        "paragraph_id": paragraph_id,
+                        "text": "A complete synthetic paragraph used to verify explanation priority."
+                    }),
+                )
+                .unwrap();
+        }
+
+        let recording = super::enqueue_explanation_for_paragraphs(
+            &state,
+            "session-recording-priority",
+            "semantic_content_group",
+            &["recording-paragraph".to_owned()],
+        )
+        .unwrap();
+        let recording = state.store.get_model_job(&recording.id).unwrap().unwrap();
+        assert_eq!(recording.priority, 30);
+
+        let completed_group = super::enqueue_explanation_for_paragraphs(
+            &state,
+            "session-completed-priority",
+            "semantic_content_group",
+            &["completed-paragraph".to_owned()],
+        )
+        .unwrap();
+        let completed_group = state
+            .store
+            .get_model_job(&completed_group.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed_group.priority, 10);
+
+        let completed_manual =
+            super::enqueue_explanation(&state, "session-completed-priority", "manual").unwrap();
+        let completed_manual = state
+            .store
+            .get_model_job(&completed_manual.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed_manual.priority, 30);
     }
 
     #[test]
