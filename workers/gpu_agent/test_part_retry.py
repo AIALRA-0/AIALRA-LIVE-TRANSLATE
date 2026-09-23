@@ -13,15 +13,18 @@ from workers.gpu_agent.main import (
 )
 
 
-def test_only_known_transient_local_part_responses_are_retryable() -> None:
+def test_one_local_503_part_response_is_retryable_without_exposing_its_body() -> None:
     assert retryable_teaching_part_response(httpx.Response(
         503, json={"detail": "model_worker_busy"},
     ))
     assert retryable_teaching_part_response(httpx.Response(
         503, json={"detail": "teaching_part_contract_invalid"},
     ))
-    assert not retryable_teaching_part_response(httpx.Response(
+    assert retryable_teaching_part_response(httpx.Response(
         503, json={"detail": "model_execution_failed"},
+    ))
+    assert retryable_teaching_part_response(httpx.Response(
+        503, content=b"unclassified transient response",
     ))
     assert not retryable_teaching_part_response(httpx.Response(
         429, json={"detail": "model_worker_busy"},

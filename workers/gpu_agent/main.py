@@ -178,10 +178,12 @@ def teaching_part_failure_kind(response: httpx.Response) -> str:
 
 
 def retryable_teaching_part_response(response: httpx.Response) -> bool:
-    """Retry only bounded local refusals with a known, privacy-safe detail."""
-    return teaching_part_failure_kind(response) in {
-        "model_worker_busy", "teaching_part_contract_invalid",
-    }
+    """One local 503 retry prevents discarding earlier course parts.
+
+    The local Worker can transiently return a 503 without a stable JSON detail;
+    a repeat of the same bounded part has succeeded in the retained-course test.
+    """
+    return response.status_code == 503
 
 
 class GpuScheduler:
