@@ -675,6 +675,15 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
 .course-question-context { margin: 0; padding: 8px 10px; border-radius: 7px; color: var(--muted); background: var(--soft); font-size: 10px !important; }
 .session-system-details > summary { min-height: 40px; }
 .session-system-details[open] > summary { border-bottom: 1px solid var(--line); }
+
+.course-summary-overview-sections { display: grid; gap: 8px; }
+.course-summary-overview-sections > section { display: grid; gap: 5px; padding: 9px 11px; border-left: 2px solid var(--line); background: color-mix(in srgb, var(--soft) 32%, var(--paper)); }
+.course-summary-overview-sections h5 { margin: 0; color: var(--ink); font-size: 12px; }
+.course-summary-overview-sections p { margin: 0; white-space: pre-wrap; }
+.course-summary-chapter-list { display: grid; gap: 6px !important; max-height: min(38vh, 28rem); padding: 0 4px 0 24px !important; overflow-y: auto; scrollbar-width: thin; }
+.course-summary-chapter { border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--soft) 24%, var(--paper)); }
+.course-summary-chapter > summary { padding: 8px 10px; cursor: pointer; color: var(--ink); font-size: 12px; font-weight: 650; line-height: 1.5; overflow-wrap: anywhere; }
+.course-summary-chapter > p { margin: 0 !important; padding: 0 10px 10px; color: var(--muted) !important; font-size: 12px !important; line-height: 1.65 !important; white-space: pre-wrap; }
 .diagnostics-hint { margin-left: auto; font-size: 10px; font-weight: 500; }
 
 .cloud-text-policy { grid-column: 1 / -1; gap: 12px; }

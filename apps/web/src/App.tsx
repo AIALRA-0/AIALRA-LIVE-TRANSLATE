@@ -828,6 +828,74 @@ export function TeachingSectionsView({ sections }: { sections: NonNullable<Timel
   })}</div>;
 }
 
+const courseOverviewHeadings = ["承上启下", "主要内容", "内容讲解", "易错点"] as const;
+type CourseOverviewSection = { label: typeof courseOverviewHeadings[number]; text: string };
+
+function parseCourseOverviewSections(value: string): CourseOverviewSection[] | null {
+  const sections: { label: CourseOverviewSection["label"]; lines: string[] }[] = [];
+  const seen = new Set<string>();
+  let current: { label: CourseOverviewSection["label"]; lines: string[] } | null = null;
+
+  for (const line of value.split(/\r?\n/)) {
+    const heading = line.match(/^\s{0,3}(?:#{1,6}\s*)?(?:\*\*)?(承上启下|主要内容|内容讲解|易错点)(?:\*\*)?\s*(?:[：:]\s*(.*))?\s*$/);
+    if (!heading) {
+      if (!current) {
+        if (line.trim()) return null;
+      } else {
+        current.lines.push(line);
+      }
+      continue;
+    }
+
+    const label = heading[1] as CourseOverviewSection["label"];
+    if (seen.has(label)) return null;
+    seen.add(label);
+    current = { label, lines: [] };
+    sections.push(current);
+    const inlineText = heading[2]?.replace(/^\*\*\s*|\s*\*\*$/g, "").trim();
+    if (inlineText) current.lines.push(inlineText);
+  }
+
+  if (courseOverviewHeadings.some((label) => !seen.has(label))) return null;
+  return sections.map(({ label, lines }) => ({ label, text: lines.join("\n").trim() }));
+}
+
+function shortCourseChapterLabel(point: string): string {
+  const structured = parseCourseOverviewSections(point);
+  const main = structured?.find((section) => section.label === "主要内容")?.text
+    || structured?.find((section) => section.label === "内容讲解")?.text;
+  const firstLine = (main ?? point).split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+    ?.replace(/^(?:[-•*]\s*|\d+[.)、]\s*)/, "") ?? "";
+  const firstSentence = firstLine.match(/^(.+?[。！？]|.+?\.(?=\s|$))/)?.[1]?.trim() ?? firstLine;
+  const characters = Array.from(firstSentence);
+  return characters.length <= 52 ? firstSentence : `${characters.slice(0, 51).join("").trimEnd()}…`;
+}
+
+type CourseSummaryTerm = { term: string; one_line: string; background_reference?: string };
+
+export function CourseSummaryView({ overview, fallbackText, points, terms, teachingSections }: {
+  overview: string;
+  fallbackText: string;
+  points: string[];
+  terms: CourseSummaryTerm[];
+  teachingSections: NonNullable<TimelineItem["sections"]>;
+}) {
+  const overviewSections = parseCourseOverviewSections(overview);
+  const overviewText = overview.trim() || (!points.length && !terms.length ? fallbackText.trim() : "");
+  const additionalTeachingSections = teachingSections.filter((section) => !section.label.startsWith("专业术语"));
+
+  return <>
+    {overviewSections ? <section><h4>这节课讲了什么</h4><div className="course-summary-overview-sections">
+      {overviewSections.map((section) => <section key={section.label}><h5>{section.label}</h5><p>{section.text}</p></section>)}
+    </div></section> : overviewText && <section><h4>这节课讲了什么</h4><p>{overviewText}</p></section>}
+    {points.length > 0 && <section><h4>按内容顺序回顾</h4><ol className="course-summary-chapter-list">{points.map((point, index) => <li key={`${index}:${point.slice(0, 32)}`}>
+      <details className="course-summary-chapter"><summary>{shortCourseChapterLabel(point)}</summary><p>{point}</p></details>
+    </li>)}</ol></section>}
+    {terms.length > 0 && <section><h4>专业名词与背景</h4><dl>{terms.map((term, index) => <div key={`${term.term}:${index}`}><dt>{term.term}</dt><dd>{term.one_line}{term.background_reference && <a href={term.background_reference} target="_blank" rel="noopener noreferrer">查看来源 ↗</a>}</dd></div>)}</dl></section>}
+    {!overviewSections && additionalTeachingSections.length > 0 && <section><h4>课程讲解结构</h4><TeachingSectionsView sections={additionalTeachingSections} /></section>}
+  </>;
+}
+
 function ParagraphInsightPanel({ items, documentRef, focusKey, retryAvailable, retrying, onRetry, onAsk }: { items: TimelineItem[]; documentRef: React.RefObject<HTMLDivElement | null>; focusKey: string; retryAvailable: boolean; retrying: boolean; onRetry: () => void; onAsk: (cardId: string) => void }) {
   const paragraphs = useMemo(() => items.filter((item) => item.kind === "paragraph"), [items]);
   const insights = items.filter((item) => item.kind === "insight");
@@ -1628,8 +1696,6 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const latestCourseSummary = summaryStatus.summaryId
     ? timeline.items.find((item) => item.kind === "session-summary" && item.id === summaryStatus.summaryId)
     : null;
-  const courseTeachingGroups = timeline.items.filter((item) => item.kind === "insight"
-    && item.sections?.some((section) => !section.label.startsWith("专业术语")));
   const summaryResult = timeline.events.find((event) => event.event_type === "session.summary.created"
     && event.payload.summary_id === summaryStatus.summaryId)?.payload.result;
   const courseOverview = summaryResult && typeof summaryResult === "object" && !Array.isArray(summaryResult)
@@ -1787,12 +1853,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           {learningView === "course" && <section className="side-card course-summary-panel learning-content" aria-label="课程总结">
             <div className="card-heading"><h3>课程总结</h3><StatusBadge tone={summaryPending || summaryRetryRequested ? "yellow" : summaryStatus.phase === "failed" ? "red" : latestCourseSummary ? "green" : "gray"}>{summaryStatus.phase === "failed" && !summaryRetryRequested ? "生成失败" : summaryPending || summaryRetryRequested ? "生成中" : latestCourseSummary ? "已生成" : "尚未生成"}</StatusBadge></div>
             {latestCourseSummary ? <div className="course-summary-body">
-              <section><h4>这节课讲了什么</h4>{(courseOverview || latestCourseSummary.body).split(/\n\s*\n/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</section>
-              {coursePoints.length > 0 && <section><h4>按内容顺序回顾</h4><ol>{coursePoints.map((point, index) => <li key={index}>{point}</li>)}</ol></section>}
-              {courseTerms.length > 0 && <section><h4>专业名词与背景</h4><dl>{courseTerms.map((term, index) => <div key={`${term.term}:${index}`}><dt>{term.term}</dt><dd>{term.one_line}{term.background_reference && <a href={term.background_reference} target="_blank" rel="noopener noreferrer">查看来源 ↗</a>}</dd></div>)}</dl></section>}
-               {latestCourseSummary.sections?.some((item) => !item.label.startsWith("专业术语")) && <section><h4>课程讲解结构</h4><TeachingSectionsView sections={latestCourseSummary.sections} /></section>}
+              <CourseSummaryView overview={courseOverview} fallbackText={latestCourseSummary.body} points={coursePoints} terms={courseTerms} teachingSections={latestCourseSummary.sections ?? []} />
             </div> : <p>{summaryStatus.phase === "failed" && !summaryRetryRequested ? "本次课程的音频、原文和译文已保存，课程总结生成失败，可重新排队" : summaryPending || summaryRetryRequested ? "课程总结已排队，完成后会出现在这里" : "课程停止并完成处理后会生成课程总结"}</p>}
-             {courseTeachingGroups.length > 0 && <section className="course-summary-teaching"><h4>内容组讲解</h4><p>与当前内容视图使用相同的结构化讲解；展开任一内容组可查看承接关系、主要内容和易错点。</p>{courseTeachingGroups.map((group, index) => <details key={group.id}><summary>内容组 {index + 1} · {group.evidenceIds.length} 条依据</summary><TeachingSectionsView sections={group.sections ?? []} /></details>)}</section>}
             {summaryRetryable && <button type="button" className="secondary-button" disabled={busy} onClick={() => {
               setSummaryRetryForEventId(summaryStatus.eventId);
               void api.summarize(project.id, session.id)
@@ -1807,7 +1869,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
           </aside>
           {notice && <div className="notice-box session-notice" role="status">{notice}</div>}
         </div>
-        <details className="session-system-details"><summary>运行诊断与同步 <StatusBadge tone={runtime?.worker?.online ? "green" : "yellow"}>{runtime?.worker?.online ? "本机模型在线" : "本机模型待连接"}</StatusBadge><StatusBadge tone={!readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : "green"}>ReadWeave {!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "有冲突" : "已连接"}</StatusBadge><span className="diagnostics-hint">设备、队列与同步明细</span></summary>
+        <details className="session-system-details"><summary>运行诊断与同步 <StatusBadge tone={runtime?.worker?.online ? "green" : "yellow"}>{runtime?.worker?.online ? "处理服务在线" : "处理服务待连接"}</StatusBadge><StatusBadge tone={!readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : "green"}>ReadWeave {!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "有冲突" : "已连接"}</StatusBadge><span className="diagnostics-hint">设备、队列与同步明细</span></summary>
           <div className="system-details-content"><GpuPanel runtime={runtime} />
           <section className="side-card system-card readweave-card">
             <div className="card-heading"><h3>ReadWeave</h3><StatusBadge tone={readWeaveTone}>{!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "存在冲突" : readWeave.syncing > 0 || readWeave.queued > 0 ? "同步中" : "已同步"}</StatusBadge></div>
