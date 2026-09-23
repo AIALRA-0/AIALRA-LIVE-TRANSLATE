@@ -1,0 +1,21 @@
+tools/production_browser_smoke.mjs
+  s_4d8bb530e409af::t_92893b13f3ac84 65-77,272
+  s_4d8bb530e409af::t_d53179f1bc90db 1-8,10-40,42-64,78-108,110-131,133-140,142-148,162-271,273-295
+  s_4d8bb530e409af::t_1e1aadc219fa8b 9,41,109,132,141,149-161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d8347646b5530e326792504246f1518447617e5a",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
