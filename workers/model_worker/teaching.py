@@ -176,7 +176,8 @@ def valid_part(payload: dict[str, Any], request: TeachingPartRequest) -> bool:
             and (request.phase not in {"group", "course", "course_reduce"}
                  or readable_synthesis(prose, request.text))
             and (request.phase != "course_reduce"
-                 or (len(prose) <= 500 and len(prose.encode()) <= 1600))
+                 or (len(prose) <= 700 and len(prose.encode()) <= 2100
+                     and len(prose.encode()) < len(request.text.encode())))
         )
     name, definition = payload.get("term"), payload.get("definition")
     return (
@@ -343,8 +344,9 @@ async def generate_part(
             + (
                 "This is an intermediate reduction for a long course. Preserve the main "
                 "relationships and important limits while the original chapter notes remain "
-                "available separately. Use at most 500 Unicode characters and 1,600 UTF-8 "
-                "bytes. Do not reproduce every example in this compact overview. "
+                "available separately. Use at most 700 Unicode characters and 2,100 UTF-8 "
+                "bytes; the output must be shorter in bytes than the input. Do not reproduce "
+                "every example in this compact overview. "
                 if request.phase == "course_reduce" else
                 "For a short source, use roughly 120 to 350 Chinese characters; for a "
                 "long source, use 350 to 900 and never exceed 1,200. "
@@ -355,7 +357,8 @@ async def generate_part(
         )
         properties: dict[str, Any] = {"prose": {
             "type": "string", "minLength": 1,
-            **({"maxLength": 1200} if request.phase != "prose" else {}),
+            **({"maxLength": 700 if request.phase == "course_reduce" else 1200}
+               if request.phase != "prose" else {}),
         }}
         if request.phase == "prose":
             properties["original_terms"] = {"type": "array", "uniqueItems": True,
@@ -368,7 +371,7 @@ async def generate_part(
                     "items": {"type": "integer", "minimum": 0,
                               "maximum": len(request.material_references) - 1},
                 }
-        budget = (650 if request.phase == "course_reduce" else
+        budget = (900 if request.phase == "course_reduce" else
                   900 if request.phase == "group" else
                   1400 if request.phase == "course" else 1000)
     else:
@@ -451,8 +454,9 @@ async def generate_part(
         timeout_seconds=75, attempts=2,
         accept=lambda result: valid_part(bound_inventory(result, request), request),
         repair_instruction=(
-            "Return only a compact overview of at most 500 Unicode characters and 1,600 "
-            "UTF-8 bytes. Preserve the main relationships, conditions and limitations; "
+            "Return only a compact overview of at most 700 Unicode characters and 2,100 "
+            "UTF-8 bytes, shorter in bytes than the supplied notes. Preserve the main "
+            "relationships, conditions and limitations; "
             "remove repeated examples and speech-act narration."
             if request.phase == "course_reduce" else
             "Return only a coherent direct explanation in prose. Remove speech-act narration, "

@@ -82,14 +82,21 @@ def test_definition_requires_exact_source_and_bounded_context() -> None:
 
 def test_course_reduction_requires_a_real_byte_shrink() -> None:
     request = TeachingPartRequest(
-        phase="course_reduce", text="Synthetic chapter notes", target_language="zh-CN",
+        phase="course_reduce", text="Synthetic chapter notes. " * 100,
+        target_language="zh-CN",
     )
     assert valid_part({
         "prose": "故障模型限定可检查的对象；测试向量激励电路并观察输出；"
-                 "通过测试不等于排除全部物理缺陷。",
+                 "通过测试不等于排除全部物理缺陷。覆盖率还取决于选定的故障清单、"
+                 "实际施加的测试向量以及观测点；改变清单会改变覆盖率的分母，"
+                 "因此比较两个结果时必须先确认条件相同。",
         "original_terms": [],
     }, request)
-    assert not valid_part({"prose": "概念关系" * 130, "original_terms": []}, request)
+    assert not valid_part({"prose": "概念关系" * 190, "original_terms": []}, request)
+    short_source = TeachingPartRequest(
+        phase="course_reduce", text="短笔记", target_language="zh-CN",
+    )
+    assert not valid_part({"prose": "更长的概述", "original_terms": []}, short_source)
 
 
 @pytest.mark.asyncio
@@ -98,16 +105,19 @@ async def test_course_reduction_repair_matches_the_validated_limits() -> None:
         system: str, user: str, schema: dict[str, Any], **options: Any,
     ) -> dict[str, Any]:
         repair = options["repair_instruction"]
-        assert "500 Unicode characters" in repair
-        assert "1,600 UTF-8 bytes" in repair
+        assert "700 Unicode characters" in repair
+        assert "2,100 UTF-8 bytes" in repair
         assert "1,200" not in repair
         return {
-            "prose": "故障模型说明电路需要检查的错误条件；测试向量用于观察响应。",
+            "prose": "故障模型说明电路需要检查的错误条件；测试向量用于观察响应。"
+                     "覆盖率只能描述所选模型内已被检测的故障，不能推出所有物理缺陷"
+                     "都已消失；比较两个覆盖率时应先核对故障清单和观测条件。",
             "original_terms": [],
         }
 
     result = await generate_part(TeachingPartRequest(
-        phase="course_reduce", text="Synthetic chapter notes", target_language="zh-CN",
+        phase="course_reduce", text="Synthetic chapter notes. " * 100,
+        target_language="zh-CN",
     ), infer, "synthetic-model", "cuda")
     assert result is not None
 

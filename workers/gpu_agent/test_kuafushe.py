@@ -473,8 +473,9 @@ async def test_live_course_reduction_fits_byte_budget_when_requested() -> None:
         result = await cloud.teaching_part({
             "phase": "course_reduce", "text": notes, "target_language": "zh-CN",
         })
-    assert len(result["prose"].encode()) <= 1600
-    assert len(result["prose"]) <= 500
+    assert len(result["prose"].encode()) <= 2100
+    assert len(result["prose"].encode()) < len(notes.encode())
+    assert len(result["prose"]) <= 700
     assert not repetition_collapse(result["prose"])
 
 
