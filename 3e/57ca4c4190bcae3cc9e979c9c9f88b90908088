@@ -1,0 +1,20 @@
+crates/core-server/src/explanation.rs
+  s_4d8bb530e409af::t_d8589d932314d6 871
+  s_4d8bb530e409af::t_be03d392022e01 425-427
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3e57ca4c4190bcae3cc9e979c9c9f88b90908088",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
