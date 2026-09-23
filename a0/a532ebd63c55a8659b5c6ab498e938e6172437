@@ -1,0 +1,35 @@
+apps/web/tests/ui_contract_smoke.mjs
+  s_4d8bb530e409af::t_36c664172ab3fb 54
+workers/model_worker/test_teaching.py
+  s_4d8bb530e409af::t_7177195cd4f8d6 57-61,231-248
+  s_4d8bb530e409af::t_a0f3439334d9d7 249-250
+tools/diagnose_cloud_teaching.py
+  s_4d8bb530e409af::t_6fbb6d5ef2dad8 1-50,55-69
+  s_4d8bb530e409af::t_b5b2aafd201f5f 51-54
+workers/gpu_agent/test_teaching.py
+  s_4d8bb530e409af::t_3bc33c86cddb0c 419-427,432-443,445-447
+  s_4d8bb530e409af::t_dfeb23ac8b8a86 230-231,233-234,238-239,397,412-418,444
+  s_4d8bb530e409af::t_88c72564be5e7e 428-431
+workers/gpu_agent/teaching.py
+  s_4d8bb530e409af::t_74e4f0d39ecc6f 26-27
+  s_4d8bb530e409af::t_388fd46b249215 309-311,313,320-335,337,524
+  s_4d8bb530e409af::t_0c1774b83ee071 18-25,449-451,462-464,473-475
+workers/model_worker/teaching.py
+  s_4d8bb530e409af::t_a6edb10ff9c73e 27,34-36,214-216,366
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a0a532ebd63c55a8659b5c6ab498e938e6172437",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
