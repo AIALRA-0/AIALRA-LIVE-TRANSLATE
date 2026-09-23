@@ -192,6 +192,8 @@ export const api = {
     ),
   ensureTopics: (projectId: string, sessionId: string) =>
     checked<{ queued: boolean; retried: number; repaired: number }>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/topics/ensure`, { method: "POST" })),
+  retryExplanations: (projectId: string, sessionId: string) =>
+    checked<{ retried: number }>(fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/explanations/retry`, { method: "POST" })),
   dingtalkCapabilities: (sessionId: string) =>
     checked<DingtalkCapabilities>(
       fetch(`/api/v1/sessions/${sessionId}/dingtalk/capabilities`),

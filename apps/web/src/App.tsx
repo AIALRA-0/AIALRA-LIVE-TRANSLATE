@@ -27,6 +27,18 @@ const TARGET_LANGUAGE_OPTIONS = [
   ["zh-CN", "简体中文"], ["en", "英文"], ["ja", "日文"], ["ko", "韩文"],
   ["es", "西班牙文"], ["fr", "法文"], ["de", "德文"],
 ] as const;
+const RETRYABLE_EXPLANATION_ERROR_KINDS = new Set([
+  "model_http_error",
+  "provider_unavailable",
+  "explanation_content_rejected",
+  "teaching_contract_invalid",
+  "teaching_group_synthesis_invalid",
+  "teaching_language_required",
+  "teaching_part_invalid",
+  "teaching_provider_changed",
+  "teaching_provider_unverified",
+  "teaching_summary_quality_invalid",
+]);
 
 function languageLabel(value: string): string {
   return [...SOURCE_LANGUAGE_OPTIONS, ...TARGET_LANGUAGE_OPTIONS].find(([code]) => code === value)?.[1] ?? value;
@@ -1638,12 +1650,13 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     }
   }
   const explanationRetryAvailable = [...explanationJobStatus.values()].some(({ event, errorKind }) =>
-    event === "model.job.failed" && ["model_http_error", "provider_unavailable"].includes(errorKind));
+    event === "model.job.failed" && RETRYABLE_EXPLANATION_ERROR_KINDS.has(errorKind));
   const retryExplanations = async () => {
     setRetryingExplanation(true);
     try {
-      const result = await api.ensureTopics(project.id, initial.id);
-      const count = result.retried + result.repaired;
+      const retryResult = await api.retryExplanations(project.id, initial.id);
+      const topicResult = await api.ensureTopics(project.id, initial.id);
+      const count = retryResult.retried + topicResult.retried + topicResult.repaired;
       setNotice(count ? `已重新排队 ${count} 项讲解；录音内容保持不变` : "当前没有可重试的讲解任务");
     } catch {
       setNotice("讲解重新排队失败，请稍后重试；已保存的录音不受影响");

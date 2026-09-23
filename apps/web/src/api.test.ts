@@ -13,3 +13,15 @@ it("keeps course questions compatible and supports optional card and parent cont
   expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ question: "问题" });
   expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ question: "追问", card_id: "card-test", parent_job_id: "job-parent" });
 });
+
+it("manually retries failed explanations with a bodyless project session request", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ retried: 2 }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await expect(api.retryExplanations("project-test", "session-test")).resolves.toEqual({ retried: 2 });
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    "/api/v1/projects/project-test/sessions/session-test/explanations/retry",
+    { method: "POST" },
+  );
+});

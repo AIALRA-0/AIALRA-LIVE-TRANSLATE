@@ -733,6 +733,28 @@ pub async fn ensure_session_topics(
     ))
 }
 
+pub async fn retry_session_explanations(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((project_id, session_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    owned_project_session(&state, &user.0, &project_id, &session_id)?;
+    let has_active_lease = state
+        .store
+        .get_recording_lease(&project_id)?
+        .is_some_and(|lease| lease.session_id == session_id && lease.expires_at > Utc::now());
+    if has_active_lease {
+        return Err(ApiError::conflict_with_code(
+            "课程正在录音，请停止录音后再重试",
+            "recording_lease_active",
+        ));
+    }
+    let retried = state
+        .store
+        .requeue_failed_explanation_content_for_trigger(&session_id, "semantic_content_group")?;
+    Ok(Json(json!({"retried": retried})))
+}
+
 fn project_sse_event(update: &ProjectUpdateRecord) -> Event {
     Event::default()
         .id(update.cursor.to_string())
@@ -1137,6 +1159,200 @@ mod tests {
                 .unwrap()
                 .status,
             "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_explanation_retry_is_owner_scoped_lease_aware_and_idempotent() {
+        fn enqueue_failed_explanation(
+            state: &AppState,
+            id: &str,
+            session_id: &str,
+            trigger: &str,
+            priority: i64,
+        ) {
+            let job = state
+                .store
+                .enqueue_model_job(&NewModelJob {
+                    id: id.to_owned(),
+                    session_id: session_id.to_owned(),
+                    job_type: "explain".to_owned(),
+                    priority,
+                    input: json!({"trigger": trigger, "segments": []}),
+                    input_object_hash: None,
+                    idempotency_key: format!("explain:{id}"),
+                })
+                .unwrap();
+            state
+                .store
+                .lease_model_job_for("fixture-worker", &["explain".to_owned()], 60, Some(&job.id))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                state
+                    .store
+                    .retry_or_fail_model_job(
+                        &job.id,
+                        "fixture-worker",
+                        "teaching_contract_invalid",
+                        false,
+                        1,
+                    )
+                    .unwrap()
+                    .as_deref(),
+                Some("failed")
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_project(&NewProject {
+                id: "project_manual_retry".into(),
+                owner_subject: "owner".into(),
+                title: "Synthetic course".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+            })
+            .unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "session_manual_retry".into(),
+                title: "Synthetic lesson".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for next in [
+            SessionState::Ready,
+            SessionState::Recording,
+            SessionState::Stopping,
+            SessionState::Processing,
+            SessionState::Completed,
+        ] {
+            state
+                .store
+                .transition_session("session_manual_retry", next)
+                .unwrap();
+        }
+        state
+            .store
+            .attach_session_to_project(
+                "project_manual_retry",
+                "session_manual_retry",
+                "owner",
+                "fixture",
+            )
+            .unwrap();
+        enqueue_failed_explanation(
+            &state,
+            "manual-retry-target",
+            "session_manual_retry",
+            "semantic_content_group",
+            57,
+        );
+        enqueue_failed_explanation(
+            &state,
+            "manual-retry-other-trigger",
+            "session_manual_retry",
+            "quality_contract_v50",
+            31,
+        );
+
+        let path = ("project_manual_retry".into(), "session_manual_retry".into());
+        assert!(
+            retry_session_explanations(
+                State(state.clone()),
+                Extension(CurrentUser("other".into())),
+                Path(path.clone()),
+            )
+            .await
+            .is_err()
+        );
+
+        let lease_hash = "manual-retry-lease-hash";
+        state
+            .store
+            .acquire_recording_lease(
+                "project_manual_retry",
+                "session_manual_retry",
+                "fixture-device",
+                lease_hash,
+                LEASE_SECONDS,
+            )
+            .unwrap();
+        assert!(
+            retry_session_explanations(
+                State(state.clone()),
+                Extension(CurrentUser("owner".into())),
+                Path(path.clone()),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            state
+                .store
+                .get_model_job("manual-retry-target")
+                .unwrap()
+                .unwrap()
+                .status,
+            "failed"
+        );
+        assert!(state
+            .store
+            .release_recording_lease(
+                "project_manual_retry",
+                "session_manual_retry",
+                lease_hash,
+            )
+            .unwrap());
+
+        let Json(first) = retry_session_explanations(
+            State(state.clone()),
+            Extension(CurrentUser("owner".into())),
+            Path(path.clone()),
+        )
+        .await
+        .unwrap();
+        let Json(second) = retry_session_explanations(
+            State(state.clone()),
+            Extension(CurrentUser("owner".into())),
+            Path(path),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, json!({"retried": 1}));
+        assert_eq!(second, json!({"retried": 0}));
+        let retried = state
+            .store
+            .get_model_job("manual-retry-target")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retried.status, "queued");
+        assert_eq!(retried.priority, 57);
+        assert_eq!(retried.attempts, 0);
+        assert_eq!(
+            state
+                .store
+                .get_model_job("manual-retry-other-trigger")
+                .unwrap()
+                .unwrap()
+                .status,
+            "failed"
+        );
+        assert_eq!(
+            state
+                .store
+                .model_queue_counts(Some("session_manual_retry"))
+                .unwrap()
+                .queued,
+            1
         );
     }
 
