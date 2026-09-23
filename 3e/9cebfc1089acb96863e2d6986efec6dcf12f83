@@ -1,0 +1,25 @@
+docs/CHANGELOG.md
+  s_4d8bb530e409af::t_11537912b3b722 13
+docs/VALIDATION_REPORT.md
+  s_4d8bb530e409af::t_11537912b3b722 27-28
+PROJECT_STATE.md
+  s_4d8bb530e409af::t_11537912b3b722 15-16
+docs/KNOWN_ISSUES.md
+  s_4d8bb530e409af::t_11537912b3b722 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3e9cebfc1089acb96863e2d6986efec6dcf12f83",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
