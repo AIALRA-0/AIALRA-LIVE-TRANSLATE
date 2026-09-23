@@ -40,7 +40,7 @@ const stressPositions = Array.from({ length: 5551 }, (_, index) => ({
   playback_start_ms: index * 1000, playback_end_ms: (index + 1) * 1000,
 }));
 
-const pcm = Buffer.alloc(64_000);
+const pcm = Buffer.alloc(16_000 * 2 * 45);
 const wav = Buffer.alloc(44 + pcm.length);
 wav.write("RIFF", 0); wav.writeUInt32LE(wav.length - 8, 4); wav.write("WAVEfmt ", 8);
 wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
@@ -66,7 +66,17 @@ try {
         { captured_at_ms: 1000, duration_ms: 30000, playback_start_ms: 0, playback_end_ms: 30000 },
         { captured_at_ms: 20_000, duration_ms: 30000, playback_start_ms: 30000, playback_end_ms: 60000 },
       ] } });
-      if (path.endsWith("/audio/segment")) return route.fulfill({ status: 200, contentType: "audio/wav", body: wav });
+      if (path.endsWith("/audio/segment")) {
+        const range = route.request().headers().range;
+        if (!range) return route.fulfill({ status: 200, headers: { "content-type": "audio/wav", "accept-ranges": "bytes", "content-length": String(wav.length) }, body: wav });
+        const match = range.match(/^bytes=(\d*)-(\d*)$/);
+        if (!match || (!match[1] && !match[2])) return route.fulfill({ status: 400, body: "invalid range" });
+        const start = match[1] ? Number(match[1]) : Math.max(0, wav.length - Number(match[2]));
+        const end = match[1] && match[2] ? Math.min(wav.length - 1, Number(match[2])) : wav.length - 1;
+        if (start >= wav.length || end < start) return route.fulfill({ status: 400, body: "invalid range" });
+        const body = wav.subarray(start, end + 1);
+        return route.fulfill({ status: 206, headers: { "content-type": "audio/wav", "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${wav.length}`, "content-length": String(body.length) }, body });
+      }
       if (path.endsWith("/audio")) {
         const range = route.request().headers().range;
         const start = range ? Number(range.match(/bytes=(\d+)/)?.[1] ?? 0) : 0;
@@ -127,12 +137,23 @@ try {
     }
     const playbackSlider = page.getByRole("slider", { name: "回放位置" });
     if (await playbackSlider.inputValue() !== "0") throw new Error("playback slider did not start at zero");
+    const mediaTime = async () => page.getByLabel("课程录音", { exact: true }).evaluate((audio) => audio.readyState > 0 && Number.isFinite(audio.currentTime) ? audio.currentTime : null);
+    const assertPlaybackAt = async (seconds) => {
+      const sliderTime = Number(await playbackSlider.inputValue());
+      if (Math.abs(sliderTime - seconds) > 0.5) throw new Error(`playback slider was ${sliderTime}s instead of ${seconds}s`);
+      const currentTime = await mediaTime();
+      if (currentTime !== null && Math.abs(currentTime - seconds) > 0.5) throw new Error(`media currentTime was ${currentTime}s instead of ${seconds}s`);
+    };
+    await assertPlaybackAt(0);
     await page.getByRole("button", { name: "前进 15 秒" }).click();
     await page.waitForTimeout(1500); // Cover the delayed metadata/timeupdate race from a cold segment.
-    if (Number(await playbackSlider.inputValue()) < 14.5) throw new Error("forward skip was reset by stale media time");
+    await assertPlaybackAt(15);
+    await page.getByRole("button", { name: "前进 15 秒" }).click();
+    await page.waitForTimeout(500);
+    await assertPlaybackAt(30);
     await page.getByRole("button", { name: "后退 15 秒" }).click();
     await page.waitForTimeout(500);
-    if (Number(await playbackSlider.inputValue()) > 0.5) throw new Error("backward skip did not return to the start");
+    await assertPlaybackAt(15);
     await page.getByRole("button", { name: "修订译文" }).first().click();
     await page.getByLabel("修订译文").fill("人工校对后的合成译文");
     await page.getByRole("button", { name: "保存译文" }).click();
@@ -149,7 +170,7 @@ try {
     await page.getByRole("button", { name: "导出课程笔记" }).click();
     const download = await downloadPromise;
     if (!download.suggestedFilename().endsWith(".md")) throw new Error("Markdown export is missing");
-    await page.getByRole("button", { name: "课程概览" }).click();
+    await page.getByRole("button", { name: "课程结构" }).click();
     await page.getByRole("region", { name: "课程章节与观点树" }).waitFor();
     if (await page.locator(".course-outline > details").count() !== 2) throw new Error("topic chapters were not separated");
     if (screenshotDir) await page.screenshot({ path: `${screenshotDir}/synthetic-course-${width}.png`, fullPage: true });
