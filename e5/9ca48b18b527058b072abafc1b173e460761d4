@@ -1,0 +1,43 @@
+docs/VALIDATION_REPORT.md
+  s_4d8bb530e409af::t_717f3a69bda63b 21-22
+  s_4d8bb530e409af::t_9646c549d23263 53
+  s_4d8bb530e409af::t_a4ce0b42a2d147 13-14
+  s_4d8bb530e409af::t_331d95bba2c44d 19-20
+  s_4d8bb530e409af::t_8c13edd5c89356 48-52,54
+  s_4d8bb530e409af::t_c13c912fdf0f67 23-30,35-36,47
+  s_4d8bb530e409af::t_81ed4fa4be9386 31-34
+  s_4d8bb530e409af::t_c3a7e40655c35c 42
+  s_4d8bb530e409af::t_3a691e6b4a92f6 37-41,43-46
+  s_d8a6c2c7869d89::t_d8d7d438b6204d 55
+PROJECT_STATE.md
+  s_4d8bb530e409af::t_717f3a69bda63b 11-12
+docs/CHANGELOG.md
+  s_4d8bb530e409af::t_717f3a69bda63b 11
+  s_4d8bb530e409af::t_19959685b5fdcd 10
+docs/KNOWN_ISSUES.md
+  s_4d8bb530e409af::t_717f3a69bda63b 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e59ca48b18b527058b072abafc1b173e460761d4",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_d8a6c2c7869d89": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ac66-5ced-79f0-8a2d-3451930b38e6",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
