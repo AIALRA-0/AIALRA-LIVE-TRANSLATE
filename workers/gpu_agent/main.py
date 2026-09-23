@@ -162,6 +162,20 @@ def response_failure(
     )
 
 
+def retryable_teaching_part_response(response: httpx.Response) -> bool:
+    """Retry only bounded local refusals with a known, privacy-safe detail."""
+    if response.status_code != 503:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return (
+        isinstance(body, dict)
+        and body.get("detail") in {"model_worker_busy", "teaching_part_contract_invalid"}
+    )
+
+
 class GpuScheduler:
     """Keep ASR responsive while serializing the longer Ollama requests."""
 
@@ -591,9 +605,18 @@ async def execute_job(
         async def part(body: dict[str, Any]) -> dict[str, Any]:
             if cloud is not None:
                 return await cloud.teaching_part(body)
-            part_response = await scheduler.run_llm(lambda: model_post(
-                model, f"{MODEL_WORKER_URL}/v1/explain/part", json=body, timeout=180,
-            ))
+            # A long summary can contain dozens of independent bounded parts.
+            # Retry a transient local refusal at this part, while retaining the
+            # earlier successful parts in memory, instead of restarting the
+            # entire course after one busy/contract response.
+            for attempt in range(2):
+                part_response = await scheduler.run_llm(lambda: model_post(
+                    model, f"{MODEL_WORKER_URL}/v1/explain/part", json=body, timeout=180,
+                ))
+                if attempt == 0 and retryable_teaching_part_response(part_response):
+                    await asyncio.sleep(2)
+                    continue
+                break
             if part_response.status_code >= 400:
                 raise response_failure("model_http", "model_http_error", part_response)
             try:
