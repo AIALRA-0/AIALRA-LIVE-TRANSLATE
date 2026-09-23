@@ -1,0 +1,22 @@
+workers/gpu_agent/main.py
+  s_4d8bb530e409af::t_8a66098f31318d 165-166,168,172-177,181
+  s_4d8bb530e409af::t_bd15b3f8ea2c66 178-180,182-184,629-631
+workers/gpu_agent/test_part_retry.py
+  s_4d8bb530e409af::t_e4f3c22ba954e9 12,29-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "136018da08f6394b5f2e1b237aefabcf55e2e4d9",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
