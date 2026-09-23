@@ -1,0 +1,21 @@
+docs/BROWSER_LONG_COURSE_7653651.md
+  s_4d8bb530e409af::t_630aaa4371e105 1,3,5,7,9,11-12,14-18
+  s_4d8bb530e409af::t_cec9c7a0c46606 10,13
+  s_4d8bb530e409af::t_fcebf38f54a654 2,4,6,8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9154d0b9e7246adc84b5c978dcc42d5a76692fa9",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
