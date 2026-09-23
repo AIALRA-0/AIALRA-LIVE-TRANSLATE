@@ -28,6 +28,15 @@ def fixture_routes() -> tuple[Route, Route]:
     )
 
 
+COURSE_REDUCE_REPAIR_MARKERS = (
+    "Compress only the supplied ordered notes.",
+    "core relationships, comparison direction, conditions, quantities, uncertainty, and limits",
+    "Do not repeat examples.",
+    "at most 500 Unicode characters and 1,500 UTF-8 bytes",
+    "single field prose",
+)
+
+
 def test_section_envelope_keeps_actual_material_use() -> None:
     value = {
         "承上启下": "", "主要内容": ["一项结论"], "内容讲解": "完整讲解",
@@ -262,6 +271,78 @@ async def test_overlong_complete_card_switches_to_backup() -> None:
         })
     assert result["prose"] == generated_prose(short_card)
     assert seen == ["synthetic-one", "synthetic-two"]
+
+
+@pytest.mark.asyncio
+async def test_course_reduce_repairs_overlong_primary_on_backup() -> None:
+    notes = (
+        "The fault model bounds the faults covered by tests. A passing test cannot rule out "
+        "defects outside that model. " * 40
+    )[:3000]
+    overlong = "".join(chr(0x4E00 + index) for index in range(1425))
+    accepted = (
+        "故障模型限定测试对象，测试向量只能检测模型列出的故障。若输出与预期不符，"
+        "可支持对相应故障的判断；通过测试只表示这些向量未发现模型内故障，不能证明"
+        "模型外的物理缺陷不存在。结论还受故障清单、向量覆盖与输出观察条件限制。"
+    )
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.headers["authorization"].split()[-1]
+        body = json.loads(request.content)
+        seen.append((token, body["instructions"]))
+        prose = overlong if token == "synthetic-one" else accepted
+        return httpx.Response(200, json={
+            "output_text": json.dumps({"prose": prose}, ensure_ascii=False),
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await KuafuTextClient(http, fixture_routes()).teaching_part({
+            "phase": "course_reduce", "text": notes, "target_language": "zh-CN",
+        })
+
+    assert len(notes.encode()) == 3000
+    assert len(overlong) == 1425
+    assert len(accepted) <= 500 and len(accepted.encode()) <= 1500
+    assert result["prose"] == generated_prose(accepted)
+    assert [token for token, _ in seen] == ["synthetic-one", "synthetic-two"]
+    assert all(marker not in seen[0][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
+    assert all(marker in seen[1][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
+
+
+@pytest.mark.asyncio
+async def test_course_reduce_appends_repair_after_preferred_route_transport_error() -> None:
+    notes = (
+        "The selected fault model bounds test coverage; passing results cannot rule out "
+        "unmodeled defects. " * 50
+    )[:3259]
+    overlong = "".join(chr(0x4E00 + index) for index in range(1399))
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.headers["authorization"].split()[-1]
+        body = json.loads(request.content)
+        seen.append((token, body["instructions"]))
+        if token == "synthetic-two":
+            raise httpx.ConnectError("synthetic route unavailable", request=request)
+        return httpx.Response(200, json={
+            "output_text": json.dumps({"prose": overlong}, ensure_ascii=False),
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        cloud = KuafuTextClient(http, fixture_routes())
+        cloud.preferred = 1
+        with pytest.raises(ValueError, match="cloud_teaching_contract_invalid"):
+            await cloud.teaching_part({
+                "phase": "course_reduce", "text": notes, "target_language": "zh-CN",
+            })
+
+    assert len(notes.encode()) == 3259
+    assert len(overlong) == 1399
+    assert [token for token, _ in seen] == ["synthetic-two", "synthetic-one"]
+    assert all(marker not in seen[0][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
+    assert all(marker in seen[1][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
+    assert cloud.last_failures == ["transport_error", "contract_rejected"]
 
 
 @pytest.mark.asyncio

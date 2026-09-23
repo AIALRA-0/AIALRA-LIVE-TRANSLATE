@@ -242,6 +242,16 @@ class KuafuTextClient:
                     "The complete prose, including all headings and sections, must be "
                     "at most 1,200 Unicode characters."
                 )
+            elif request.phase == "course_reduce":
+                repair_instruction += (
+                    " Compress only the supplied ordered notes. Preserve their core "
+                    "relationships, comparison direction, conditions, quantities, "
+                    "uncertainty, and limits; do not add facts or resolve ambiguity by "
+                    "guessing. Do not repeat examples. Keep prose to at most 500 Unicode "
+                    "characters and 1,500 UTF-8 bytes, and shorter in bytes than the notes. "
+                    "Return only the required JSON object with the single field prose; "
+                    "put only the compact overview in that field."
+                )
             return await self.infer_json(
                 system,
                 user,
