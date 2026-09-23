@@ -302,7 +302,9 @@ def test_latency_sensitive_model_jobs_have_independent_lanes() -> None:
     capabilities = {lane.suffix: lane.capabilities for lane in LANES}
     assert capabilities["asr"] == ("asr",)
     assert capabilities["translate"] == ("translate",)
-    assert capabilities["explain"] == ("topic", "explain", "summarize", "asset_parse", "course_qa")
+    assert capabilities["explain"] == ("topic", "explain", "asset_parse", "course_qa")
+    assert capabilities["summary"] == ("summarize",)
+    assert set(capabilities["explain"]).isdisjoint(capabilities["summary"])
 
 
 def test_topic_job_uses_background_endpoint_and_preserves_source_payload() -> None:

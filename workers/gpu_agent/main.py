@@ -76,7 +76,11 @@ LANES = (
     # leases also make the server-side pickup metric reflect actual worker
     # availability instead of the duration of the previous LLM generation.
     Lane("translate", ("translate",)),
-    Lane("explain", ("topic", "explain", "summarize", "asset_parse", "course_qa")),
+    # A long course summary can make dozens of remote calls. Keep its lease
+    # separate so a newly spoken topic or follow-up can be processed now.
+    # Local inference still passes through GpuScheduler for VRAM admission.
+    Lane("explain", ("topic", "explain", "asset_parse", "course_qa")),
+    Lane("summary", ("summarize",)),
 )
 
 
