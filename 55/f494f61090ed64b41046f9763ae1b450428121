@@ -1,0 +1,23 @@
+workers/gpu_agent/kuafushe.py
+  s_4d8bb530e409af::t_39f5f5465225c8 245-254
+workers/gpu_agent/test_kuafushe.py
+  s_4d8bb530e409af::t_39f5f5465225c8 31-39,276-306,308-345
+  s_4d8bb530e409af::t_60ee0b5669d389 307
+  s_4d8bb530e409af::t_ebd289cfd79e2f 346-347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "55f494f61090ed64b41046f9763ae1b450428121",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
