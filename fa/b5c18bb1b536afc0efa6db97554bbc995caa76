@@ -1,0 +1,23 @@
+crates/event-store/src/lib.rs
+  s_4d8bb530e409af::t_c3576e427a498a 1897-1908
+crates/core-server/src/topics.rs
+  s_4d8bb530e409af::t_c3576e427a498a 86-89,403-447,454-464
+  s_4d8bb530e409af::t_4d310566340809 448-453
+  s_4d8bb530e409af::t_40915095fe9f51 465-466
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fab5c18bb1b536afc0efa6db97554bbc995caa76",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
