@@ -1,0 +1,21 @@
+tools/diagnose_cloud_course.py
+  s_4d8bb530e409af::t_65e6c7077f426d 86-89
+tools/test_diagnose_cloud_course.py
+  s_4d8bb530e409af::t_8f4c6f5135a56a 68,73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cbd0e3f9a16f71cabefd6927be02cd9616342b3e",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
