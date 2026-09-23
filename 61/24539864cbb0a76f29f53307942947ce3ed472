@@ -1,0 +1,23 @@
+apps/web/src/SessionPlayer.tsx
+  s_4d8bb530e409af::t_cebfba3ffcfdea 29,79-81,83-89,91-98,100-103,105
+  s_4d8bb530e409af::t_a137c4b8aed610 82,90
+apps/web/src/SessionPlayer.test.tsx
+  s_4d8bb530e409af::t_afa282f3ad2eaa 92-93
+  s_4d8bb530e409af::t_2a4297cbdb9b29 60-91,94-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6124539864cbb0a76f29f53307942947ce3ed472",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
