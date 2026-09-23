@@ -1901,7 +1901,7 @@ impl EventStore {
         let now = Utc::now().to_rfc3339();
         let connection = self.lock()?;
         Ok(connection.execute(
-            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?2, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?2, completed_at = NULL WHERE idempotency_key = ?1 AND job_type = 'topic' AND status = 'failed'",
+            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?2, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?2, completed_at = NULL WHERE idempotency_key = ?1 AND job_type = 'topic' AND status = 'failed' AND last_error_kind IN ('model_http_error', 'gateway_completion_http_500', 'provider_unavailable')",
             params![key, now],
         )? == 1)
     }

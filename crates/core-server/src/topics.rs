@@ -465,6 +465,31 @@ mod tests {
     }
 
     #[test]
+    fn permanent_topic_failure_does_not_loop_on_repeated_ensure() {
+        let (_temp, state) = setup();
+        assert!(enqueue_pending(&state, "session_topic_test", true).unwrap());
+        let job = state
+            .store
+            .lease_model_job("topic-worker", &["topic".into()], 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state
+                .store
+                .retry_or_fail_model_job(&job.id, "topic-worker", "topic_input_invalid", false, 1)
+                .unwrap()
+                .as_deref(),
+            Some("failed")
+        );
+        assert!(!enqueue_pending(&state, "session_topic_test", true).unwrap());
+        assert!(!enqueue_pending(&state, "session_topic_test", true).unwrap());
+        assert_eq!(
+            state.store.get_model_job(&job.id).unwrap().unwrap().status,
+            "failed"
+        );
+    }
+
+    #[test]
     fn semantic_groups_keep_open_tail_and_stop_seals_it_once() {
         let (_temp, state) = setup();
         let job = lease(&state, false);
