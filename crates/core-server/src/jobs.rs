@@ -1707,11 +1707,12 @@ pub fn enqueue_summary(
             _ => {}
         }
     }
+    let priority = if trigger == "manual" { 10 } else { 20 };
     let record = state.enqueue_job(NewModelJob {
         id: format!("job_{}", Uuid::now_v7().simple()),
         session_id: session_id.to_owned(),
         job_type: "summarize".to_owned(),
-        priority: 20,
+        priority,
         input: json!({"summary_contract": "complete_groups_v1", "segments": snapshot.segments, "asset_pages": snapshot.pages, "complete_groups": snapshot.complete_groups, "target_language": session.target_language, "trigger": trigger, "recording_run": run}),
         input_object_hash: None,
         idempotency_key,
@@ -3084,6 +3085,84 @@ mod tests {
             1,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn summary_priority_distinguishes_manual_backfill_and_preserves_existing_priority() {
+        fn create_summary_session(state: &AppState, session_id: &str) {
+            state
+                .store
+                .create_session(&NewSession {
+                    id: session_id.to_owned(),
+                    title: "Synthetic course".to_owned(),
+                    source_language: "en".to_owned(),
+                    target_language: "zh-CN".to_owned(),
+                    privacy_mode: "local_only".to_owned(),
+                    consent_confirmed: true,
+                    demo_mode: false,
+                })
+                .unwrap();
+            state
+                .emit(
+                    session_id,
+                    "test",
+                    "paragraph.finalized",
+                    1,
+                    "test",
+                    None,
+                    json!({"paragraph_id": "p1", "text": "Synthetic paragraph"}),
+                )
+                .unwrap();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        for session_id in [
+            "manual-summary-priority",
+            "recording-summary-priority",
+            "teaching-summary-priority",
+        ] {
+            create_summary_session(&state, session_id);
+        }
+
+        let manual = enqueue_summary(&state, "manual-summary-priority", "manual").unwrap();
+        let recording_stopped =
+            enqueue_summary(&state, "recording-summary-priority", "recording_stopped").unwrap();
+        let teaching_completed =
+            enqueue_summary(&state, "teaching-summary-priority", "teaching_completed").unwrap();
+        assert_eq!(manual.priority, 10);
+        assert_eq!(recording_stopped.priority, 20);
+        assert_eq!(teaching_completed.priority, 20);
+
+        state
+            .store
+            .lease_model_job_for(
+                "summary-priority-worker",
+                &["summarize".to_owned()],
+                60,
+                Some(&recording_stopped.id),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state
+                .store
+                .retry_or_fail_model_job(
+                    &recording_stopped.id,
+                    "summary-priority-worker",
+                    "model_http_error",
+                    false,
+                    1,
+                )
+                .unwrap()
+                .as_deref(),
+            Some("failed")
+        );
+
+        let requeued = enqueue_summary(&state, "recording-summary-priority", "manual").unwrap();
+        assert_eq!(requeued.id, recording_stopped.id);
+        assert_eq!(requeued.status, "queued");
+        assert_eq!(requeued.priority, 20);
     }
 
     #[test]
