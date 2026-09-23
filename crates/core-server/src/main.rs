@@ -22,9 +22,14 @@ use axum::{
     Router, middleware,
     routing::{get, post},
 };
+use http::{self, StatusCode};
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use tower_http::compression::{
+    CompressionLayer,
+    predicate::{DefaultPredicate, Predicate},
+};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -78,7 +83,7 @@ async fn main() -> Result<()> {
         )
         .route(
             "/sessions/{session_id}/audio/index",
-            get(course_content::session_audio_index),
+            get(course_content::session_audio_index).layer(gzip_response_layer()),
         )
         .route(
             "/sessions/{session_id}/audio/segment",
@@ -216,7 +221,7 @@ async fn main() -> Result<()> {
         .route("/sessions/{session_id}/events", get(api::list_events))
         .route(
             "/sessions/{session_id}/document-snapshot",
-            get(api::course_document_snapshot),
+            get(api::course_document_snapshot).layer(gzip_response_layer()),
         )
         .route("/sessions/{session_id}/stream", get(api::stream_events))
         .route("/sessions/{session_id}/assets", post(api::upload_asset))
@@ -266,12 +271,10 @@ async fn main() -> Result<()> {
 
     // The Rust server serves the compiled React app in packaged mode and returns index.html for client routing.
     let web_dist = PathBuf::from("apps/web/dist");
-    let static_files =
-        ServeDir::new(&web_dist).fallback(ServeFile::new(web_dist.join("index.html")));
     let app = Router::new()
         .nest("/api/v1", api.merge(public_api))
         .nest("/internal/v1", internal)
-        .fallback_service(static_files)
+        .fallback_service(static_web_router(web_dist))
         // Keep request tracing useful without putting session IDs, project IDs,
         // query strings or temporary paths into ordinary application logs.
         .layer(TraceLayer::new_for_http().make_span_with(
@@ -288,4 +291,24 @@ async fn main() -> Result<()> {
     info!(address = %address, "AIALRA core listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn static_web_router(web_dist: PathBuf) -> Router {
+    let static_files =
+        ServeDir::new(&web_dist).fallback(ServeFile::new(web_dist.join("index.html")));
+    Router::new()
+        .fallback_service(static_files)
+        .layer(gzip_response_layer())
+}
+
+fn gzip_response_layer() -> CompressionLayer<impl Predicate> {
+    CompressionLayer::new().compress_when(DefaultPredicate::new().and(
+        |status: StatusCode,
+         _version: http::Version,
+         headers: &http::HeaderMap,
+         _extensions: &http::Extensions| {
+            status != StatusCode::PARTIAL_CONTENT
+                && !headers.contains_key(http::header::CONTENT_RANGE)
+        },
+    ))
 }
