@@ -14,7 +14,11 @@ from typing import Any
 
 import httpx
 
-from workers.gpu_agent.teaching import parse_teaching_sections, valid_teaching_sections
+from workers.gpu_agent.teaching import (
+    parse_teaching_sections,
+    valid_summary,
+    valid_teaching_sections,
+)
 from workers.model_worker.teaching import TeachingPartRequest, generate_part
 from workers.model_worker.teaching_format import generated_prose
 
@@ -212,17 +216,28 @@ class KuafuTextClient:
                     if request.target_language.casefold().startswith("zh")
                     else prose
                 )
-                return valid_teaching_sections(
+                return valid_summary(
+                    normalized, len(request.text), request.target_language,
+                ) and valid_teaching_sections(
                     parse_teaching_sections(normalized),
                     len(request.text),
                     request.target_language,
                 )
 
             if request.phase == "prose":
+                schema = {
+                    **schema,
+                    "properties": {
+                        **schema["properties"],
+                        "prose": {**schema["properties"]["prose"], "maxLength": 1200},
+                    },
+                }
                 repair_instruction += (
                     " The four teaching headings are mandatory. In misconceptions, "
                     "use all four labelled roles with source-supported content, or leave "
-                    "the section empty. A bare warning or partial role is invalid."
+                    "the section empty. A bare warning or partial role is invalid. "
+                    "The complete prose, including all headings and sections, must be "
+                    "at most 1,200 Unicode characters."
                 )
             return await self.infer_json(
                 system,

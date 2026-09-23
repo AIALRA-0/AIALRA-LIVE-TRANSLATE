@@ -18,6 +18,7 @@ from workers.gpu_agent.teaching import (
     valid_teaching_sections,
 )
 from workers.model_worker.teaching import repetition_collapse
+from workers.model_worker.teaching_format import generated_prose
 
 
 def fixture_routes() -> tuple[Route, Route]:
@@ -196,6 +197,46 @@ async def test_incomplete_teaching_sections_switch_to_backup() -> None:
 
 
 @pytest.mark.asyncio
+async def test_overlong_complete_card_switches_to_backup() -> None:
+    bridge = "".join(chr(0x4E00 + index) for index in range(430))
+    conclusions = "".join(chr(0x5200 + index) for index in range(700))
+    explanation = (
+        "故障模型限定测试对象；测试向量只检验列入模型的故障；"
+        "通过一次测试不能证明所有物理缺陷不存在；应核对覆盖范围与观察结果。"
+    )
+    long_card = (
+        f"承上启下：{bridge}\n主要内容：\n- {conclusions[:350]}\n"
+        f"- {conclusions[350:]}\n内容讲解：{explanation}\n易错点：无"
+    )
+    short_card = (
+        "承上启下：\n主要内容：\n- 故障模型限定测试对象\n"
+        f"内容讲解：{explanation}\n易错点：无"
+    )
+    source = "A fault model limits what a test vector can prove."
+    assert len(long_card) > 1200
+    assert valid_teaching_sections(parse_teaching_sections(long_card), len(source), "zh-CN")
+    assert not valid_summary(long_card, len(source), "zh-CN")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["text"]["format"]["schema"]["properties"]["prose"]["maxLength"] == 1200
+        token = request.headers["authorization"].split()[-1]
+        seen.append(token)
+        return httpx.Response(200, json={"output_text": json.dumps({
+            "prose": long_card if token == "synthetic-one" else short_card,
+            "original_terms": [],
+        }, ensure_ascii=False)})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await KuafuTextClient(http, fixture_routes()).teaching_part({
+            "phase": "prose", "text": source, "target_language": "zh-CN",
+        })
+    assert result["prose"] == generated_prose(short_card)
+    assert seen == ["synthetic-one", "synthetic-two"]
+
+
+@pytest.mark.asyncio
 async def test_live_ds_routes_independently_when_explicitly_requested() -> None:
     if os.getenv("AIALRA_RUN_LIVE_PROVIDER_TEST") != "1":
         pytest.skip("live provider probe requires explicit opt-in")
@@ -282,7 +323,7 @@ async def test_live_synthetic_teaching_flow_when_requested() -> None:
                 _complete_misconception_roles(item, "zh-CN") for item in sections["misconceptions"]
             ]
             section_lengths = {
-                key: len(value) if isinstance(value, (str, list)) else -1
+                key: len(value) if isinstance(value, str | list) else -1
                 for key, value in sections.items()
             }
             raise AssertionError(
