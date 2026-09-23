@@ -379,6 +379,26 @@ async def test_live_course_reduction_fits_byte_budget_when_requested() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_question_has_evidence_structure_when_requested() -> None:
+    if os.getenv("AIALRA_RUN_LIVE_PROVIDER_TEST") != "1":
+        pytest.skip("live provider probe requires explicit opt-in")
+    async with httpx.AsyncClient() as http:
+        cloud = KuafuTextClient(http)
+        assert cloud.available
+        result = await cloud.answer_question({
+            "question": "通过一次故障测试能否证明芯片没有所有物理缺陷？",
+            "segments": [{"id": "synthetic-p1", "text": (
+                "A stuck-at fault model represents only selected signal failures. "
+                "A passing test vector does not prove every physical defect is absent."
+            )}],
+            "target_language": "zh-CN", "context": [],
+        })
+    assert result["sufficient_evidence"] is True
+    assert result["evidence_segment_ids"] == ["synthetic-p1"]
+    assert all(label in result["answer"] for label in ("直接回答", "依据", "适用边界"))
+
+
+@pytest.mark.asyncio
 async def test_live_retained_course_teaching_without_logging_source() -> None:
     if (
         os.getenv("AIALRA_RUN_LEGACY_COURSE_TEST") != "1"

@@ -253,6 +253,15 @@ const question = await checked(fetch(`${API}/sessions/${session.id}/questions`, 
 events = await waitForEvents(session.id,
   (items) => items.some((item) => item.event_type === "course.question.answered" && item.payload.job_id === question.job_id),
   300_000);
+function assertStructuredAnswer(jobId) {
+  const result = events.find((item) => item.event_type === "course.question.answered" && item.payload.job_id === jobId);
+  const answer = String(result?.payload?.answer || "");
+  const sufficient = result?.payload?.sufficient_evidence === true;
+  if (!answer || (sufficient && !["直接回答", "依据", "适用边界"].every(
+    (label) => new RegExp(`(?:^|\\n)\\s*(?:\\*\\*)?${label}(?:\\*\\*)?[：:](?:\\*\\*)?`).test(answer),
+  ))) throw new Error("course answer lacks the three-part evidence structure");
+}
+assertStructuredAnswer(question.job_id);
 const followUp = await checked(fetch(`${API}/sessions/${session.id}/questions`, {
   method: "POST", headers: { "content-type": "application/json" },
   body: JSON.stringify({ question: "它适用于什么条件？", card_id: card.payload.card_id, parent_job_id: question.job_id }),
@@ -260,6 +269,7 @@ const followUp = await checked(fetch(`${API}/sessions/${session.id}/questions`, 
 events = await waitForEvents(session.id,
   (items) => items.some((item) => item.event_type === "course.question.answered" && item.payload.job_id === followUp.job_id),
   300_000);
+assertStructuredAnswer(followUp.job_id);
 if (events.some((item) => item.event_type === "model.job.failed")) {
   throw new Error("session contains a final model.job.failed event");
 }
