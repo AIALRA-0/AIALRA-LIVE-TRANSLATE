@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from workers.gpu_agent.course_summary import compile_course
+from workers.gpu_agent.course_summary import COURSE_NOTE_BATCH_BYTES, compile_course
 
 
 @pytest.mark.asyncio
@@ -160,6 +160,31 @@ async def test_long_course_reduces_utf8_bytes_without_dropping_chapters() -> Non
     assert result["evidence_segment_ids"] == [item["id"] for item in segments]
     assert len(result["key_points"]) > 1
     assert result["overview"]
+
+
+@pytest.mark.asyncio
+async def test_course_chapter_sources_fit_the_cloud_writing_contract() -> None:
+    chapter_sizes: list[int] = []
+
+    async def synthesis(body: dict[str, Any]) -> dict[str, Any]:
+        if body["phase"] == "course":
+            chapter_sizes.append(len(body["text"].encode()))
+        return {
+            "prose": "承上启下：\n\n主要内容：有效事实。\n\n内容讲解：有效事实。\n\n易错点：无",
+            "provider": "kuafushe:test@cloud",
+        }
+
+    groups = [{"coverage_contract": "all_sources_v1", "result": {
+        "paragraph_summary": "电路故障模型与仿真边界。" * 24,
+        "terms": [], "evidence_segment_ids": [f"p{index}"], "asset_page_ids": [],
+    }} for index in range(12)]
+    result = await compile_course({
+        "segments": [{"id": f"p{index}", "text": f"source {index}"} for index in range(12)],
+        "complete_groups": groups, "target_language": "zh-CN",
+    }, synthesis)
+    assert len(chapter_sizes) > 1
+    assert all(size <= COURSE_NOTE_BATCH_BYTES for size in chapter_sizes)
+    assert result["evidence_segment_ids"] == [f"p{index}" for index in range(12)]
 
 
 @pytest.mark.asyncio

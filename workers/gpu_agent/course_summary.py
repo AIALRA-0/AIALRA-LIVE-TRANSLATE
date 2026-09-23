@@ -7,6 +7,11 @@ from typing import Any
 from workers.gpu_agent.teaching import PartCaller, source_pieces, source_records, valid_provider
 
 COMPILED_PROVIDER = "compiled:content-groups-v1@cpu"  # Historical result compatibility only.
+# The cloud writing contract caps a chapter at 1,200 characters. Feeding it a
+# whole 3,500-byte note batch asks it to preserve more facts than can fit and
+# repeatedly produces rejected, truncated chapters. Keep each chapter's source
+# small; the separate reduce pass still combines the complete chapter list.
+COURSE_NOTE_BATCH_BYTES = 1700
 
 
 def note_batches(notes: list[str], capacity: int = 3500) -> list[str]:
@@ -126,7 +131,7 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
                     if ref not in indexed_terms[key][field]:
                         indexed_terms[key][field].append(ref)
     notes = [group["paragraph_summary"].strip() for group in groups]
-    batches = note_batches(notes)
+    batches = note_batches(notes, capacity=COURSE_NOTE_BATCH_BYTES)
     if len(batches) == 1:
         overview = await synthesize(batches[0])
         chapters = notes if len(notes) > 1 else []
