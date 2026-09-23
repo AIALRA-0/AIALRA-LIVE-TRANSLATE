@@ -34,7 +34,7 @@ COURSE_REDUCE_REPAIR_MARKERS = (
     "Compress only the supplied ordered notes.",
     "core relationships, comparison direction, conditions, quantities, uncertainty, and limits",
     "Do not repeat examples.",
-    "at most 500 Unicode characters and 1,500 UTF-8 bytes",
+    "at most 300 Unicode characters and 900 UTF-8 bytes",
     "single field prose",
 )
 
@@ -323,10 +323,10 @@ async def test_course_reduce_repairs_overlong_primary_on_backup(retry_transport:
 
     assert len(notes.encode()) == 3000
     assert len(overlong) == 1425
-    assert len(accepted) <= 500 and len(accepted.encode()) <= 1500
+    assert len(accepted) <= 300 and len(accepted.encode()) <= 900
     assert result["prose"] == generated_prose(accepted)
     assert [token for token, _, _ in seen] == ["synthetic-one", "synthetic-two"]
-    assert [tokens for _, _, tokens in seen] == [900, 600]
+    assert [tokens for _, _, tokens in seen] == [900, 450]
     assert all(marker not in seen[0][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
     assert all(marker in seen[1][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
 
@@ -363,7 +363,7 @@ async def test_course_reduce_appends_repair_after_preferred_route_transport_erro
     assert len(notes.encode()) == 3259
     assert len(overlong) == 1011
     assert [token for token, _, _ in seen] == ["synthetic-two", "synthetic-one"]
-    assert [tokens for _, _, tokens in seen] == [900, 600]
+    assert [tokens for _, _, tokens in seen] == [900, 450]
     assert all(marker not in seen[0][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
     assert all(marker in seen[1][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
     assert cloud.last_failures == ["transport_error", "contract_rejected"]

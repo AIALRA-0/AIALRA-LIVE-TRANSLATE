@@ -252,12 +252,12 @@ class KuafuTextClient:
                     " Compress only the supplied ordered notes. Preserve their core "
                     "relationships, comparison direction, conditions, quantities, "
                     "uncertainty, and limits; do not add facts or resolve ambiguity by "
-                    "guessing. Do not repeat examples. Keep prose to at most 500 Unicode "
-                    "characters and 1,500 UTF-8 bytes, and shorter in bytes than the notes. "
+                    "guessing. Do not repeat examples. Keep prose to at most 300 Unicode "
+                    "characters and 900 UTF-8 bytes, and shorter in bytes than the notes. "
                     "Return only the required JSON object with the single field prose; "
                     "put only the compact overview in that field."
                 )
-                options["retry_max_tokens"] = 600
+                options["retry_max_tokens"] = 450
             return await self.infer_json(
                 system,
                 user,
