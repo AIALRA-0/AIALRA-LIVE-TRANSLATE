@@ -1,0 +1,21 @@
+workers/gpu_agent/course_summary.py
+  s_4d8bb530e409af::t_20f0918aff9ed1 129-135,137
+workers/gpu_agent/test_course_summary.py
+  s_4d8bb530e409af::t_20f0918aff9ed1 7,166-167,170,176,178,185-188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "47b5e64288b17d3c3d31ffbb873600141e7ed975",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
