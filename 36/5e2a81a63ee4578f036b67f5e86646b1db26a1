@@ -1,0 +1,23 @@
+tools/e2e_smoke.mjs
+  s_4d8bb530e409af::t_a802b52913e190 281-285,372-375,387,403,406,432,532,534-538
+  s_4d8bb530e409af::t_485b8e1da7016c 257-265,275-278,287
+  s_4d8bb530e409af::t_f194d8fbb8b25f 12,34-36,98,100,153-154,170-172,204,516-517
+  s_4d8bb530e409af::t_e9fa9f7bc518d5 533
+  s_4d8bb530e409af::t_7272ff6b155ba9 21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "365e2a81a63ee4578f036b67f5e86646b1db26a1",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
