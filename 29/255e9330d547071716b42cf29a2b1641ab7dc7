@@ -1,0 +1,24 @@
+workers/gpu_agent/test_kuafushe.py
+  s_4d8bb530e409af::t_7978b5f3c57cb6 200-234,236-238
+  s_4d8bb530e409af::t_9ad8b008e554ce 326
+  s_4d8bb530e409af::t_77b206919cf368 21,235
+  s_4d8bb530e409af::t_715835ebc48373 199
+workers/gpu_agent/kuafushe.py
+  s_4d8bb530e409af::t_7537de679c17e0 17-21,219-221,228-234,238-240
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "29255e9330d547071716b42cf29a2b1641ab7dc7",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
