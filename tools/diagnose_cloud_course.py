@@ -83,6 +83,10 @@ async def diagnose(model_input: dict[str, Any]) -> None:
                     "input_bytes": input_bytes,
                     "elapsed_ms": round((time.perf_counter() - started) * 1000),
                     "route_status_categories": categories,
+                    "rejected_prose_lengths": [
+                        shape["prose_length"] for shape in cloud.last_shapes
+                        if isinstance(shape.get("prose_length"), int)
+                    ],
                 })
 
         result = await compile_course(model_input, call)

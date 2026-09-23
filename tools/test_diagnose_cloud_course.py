@@ -65,11 +65,12 @@ def test_diagnostic_outputs_metadata_only_with_synthetic_client(
     )
     assert all(set(record) == {
         "phase_index", "phase_type", "input_bytes", "elapsed_ms",
-        "route_status_categories",
+        "route_status_categories", "rejected_prose_lengths",
     } for record in records[:-1])
     assert all(record["elapsed_ms"] >= 0 for record in records[:-1])
     assert [record["input_bytes"] for record in records[:-1]] == observed_input_bytes
     assert records[0]["route_status_categories"] == ["http_5xx", "other", "accepted"]
+    assert records[0]["rejected_prose_lengths"] == []
     final = records[-1]
     assert set(final) == {
         "record_type", "summary_characters", "chapter_count", "terminology_count",
