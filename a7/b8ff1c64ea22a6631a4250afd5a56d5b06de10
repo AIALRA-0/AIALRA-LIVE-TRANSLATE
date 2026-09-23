@@ -1,0 +1,28 @@
+crates/core-server/src/jobs.rs
+  s_4d8bb530e409af::t_2cdfd01021a022 1008-1011,1013-1016
+  s_4d8bb530e409af::t_c46a63cde4aa2a 1443-1446,1515,1517-1518,1644,1695,1699,2788-2809,2846,2916-2922,2955-2956,2966-2973
+  s_4d8bb530e409af::t_14e40ee76fc5e7 1012
+  s_4d8bb530e409af::t_1ae1fcdd9c368b 2759-2787,2810-2845,2847-2915,2923-2943,2946-2954,2957-2965,2974-2976
+  s_4d8bb530e409af::t_c96697b816bf1d 19,1007,1017-1018,1334-1442,1447-1450,1452-1473,1475-1482,1486-1496,1498,1501,1506-1514,1520-1522,1535,1537-1546,1548-1551,1553-1643,1645-1691,1696-1698,1700-1708,1715
+  s_4d8bb530e409af::t_cc8eb2a6d01c61 2944-2945
+  s_4d8bb530e409af::t_4efc8b002f361b 1474,1519,1547,2733,3027,3153,3178
+  s_4d8bb530e409af::t_e386010855129c 2977
+crates/core-server/src/explanation.rs
+  s_4d8bb530e409af::t_beec143cd2bf75 427-431
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a7b8ff1c64ea22a6631a4250afd5a56d5b06de10",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
