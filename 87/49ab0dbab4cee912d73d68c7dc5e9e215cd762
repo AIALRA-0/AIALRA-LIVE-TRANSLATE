@@ -1,0 +1,37 @@
+workers/gpu_agent/test_teaching.py
+  s_4d8bb530e409af::t_881966bfe2e7b9 481-498
+  s_f4bc084e1b5e1b::t_8ff645acb49cb1 480
+workers/model_worker/teaching.py
+  s_4d8bb530e409af::t_46436a1dcef055 135-140,147,212-226
+workers/gpu_agent/teaching.py
+  s_4d8bb530e409af::t_46436a1dcef055 505,507-512
+workers/gpu_agent/test_kuafushe.py
+  s_4d8bb530e409af::t_f1732785ee9c37 202-226
+  s_4d8bb530e409af::t_93412c1d0be1ad 201
+workers/model_worker/test_teaching.py
+  s_4d8bb530e409af::t_881966bfe2e7b9 135-144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8749ab0dbab4cee912d73d68c7dc5e9e215cd762",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_f4bc084e1b5e1b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05e85-d752-7582-abf7-4d4f5901369e",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
