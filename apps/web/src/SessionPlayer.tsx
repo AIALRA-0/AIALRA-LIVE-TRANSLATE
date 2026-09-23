@@ -26,6 +26,7 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
   onReady: (ready: boolean) => void;
 }) {
   const audio = useRef<HTMLAudioElement>(null);
+  const indexedSessionId = useRef(sessionId);
   const lastSeekSerial = useRef(0);
   const resumeAfterLoad = useRef(false);
   const pendingOffset = useRef(0);
@@ -75,19 +76,33 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
 
   useEffect(() => {
     let active = true;
+    const sessionChanged = indexedSessionId.current !== sessionId;
+    if (sessionChanged) {
+      indexedSessionId.current = sessionId;
+      lastSeekSerial.current = 0;
+      setIndex(null);
+      positionRef.current = 0;
+      setPosition(0);
+      segmentStartRef.current = 0;
+      setSegmentStart(0);
+      setSource(segmentUrl(sessionId, 0));
+      pendingOffset.current = 0;
+      pendingAbsoluteSeek.current = 0;
+      resumeAfterLoad.current = false;
+      setPlaying(false);
+      setBuffering(false);
+      setError("");
+      if (activeBlobUrl.current) URL.revokeObjectURL(activeBlobUrl.current);
+      activeBlobUrl.current = null;
+      releasePrefetch();
+    }
     api.sessionAudioIndex(sessionId).then((next) => {
-      if (active) {
-        setIndex(next);
-        positionRef.current = 0;
-        setPosition(0);
-        segmentStartRef.current = 0;
-        setSegmentStart(0);
-        setSource(segmentUrl(sessionId, 0));
-        setError("");
-      }
-    }).catch(() => { if (active) { setIndex(null); onReady(false); } });
+      if (active) setIndex(next);
+    }).catch(() => {
+      if (active && sessionChanged) setIndex(null);
+    });
     return () => { active = false; };
-  }, [sessionId, sessionState, onReady]);
+  }, [sessionId, sessionState, releasePrefetch]);
 
   useEffect(() => { onReady(Boolean(index)); }, [index, onReady]);
 

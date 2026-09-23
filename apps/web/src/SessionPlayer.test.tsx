@@ -57,6 +57,42 @@ it("keeps a skip target when a stale media time update arrives", async () => {
   expect(screen.getByRole("slider", { name: "回放位置" })).toHaveValue("30");
 });
 
+it("preserves the selected segment when session state refreshes audio and resets for a new session", async () => {
+  sessionAudioIndex
+    .mockResolvedValueOnce({
+      duration_ms: 180_000,
+      positions: [{ captured_at_ms: 1_000, duration_ms: 180_000, playback_start_ms: 0, playback_end_ms: 180_000 }],
+    })
+    .mockResolvedValueOnce({
+      duration_ms: 240_000,
+      positions: [{ captured_at_ms: 1_000, duration_ms: 240_000, playback_start_ms: 0, playback_end_ms: 240_000 }],
+    });
+  const onReady = vi.fn();
+  const props = { seekRequest: null, onReady };
+  const { rerender } = render(<SessionPlayer sessionId="session-test" sessionState="recording" {...props} />);
+  await act(async () => undefined);
+
+  const audio = screen.getByLabelText("课程录音") as HTMLAudioElement;
+  const slider = screen.getByRole("slider", { name: "回放位置" });
+  fireEvent.change(slider, { target: { value: "60" } });
+  expect(slider).toHaveValue("60");
+  expect(audio.src).toContain("/sessions/session-test/audio/segment?start_ms=45000");
+
+  rerender(<SessionPlayer sessionId="session-test" sessionState="completed" {...props} />);
+  await act(async () => undefined);
+
+  expect(sessionAudioIndex).toHaveBeenCalledTimes(2);
+  expect(slider).toHaveValue("60");
+  expect(slider).toHaveAttribute("max", "240");
+  expect(audio.src).toContain("/sessions/session-test/audio/segment?start_ms=45000");
+
+  rerender(<SessionPlayer sessionId="session-next" sessionState="recording" {...props} />);
+  await act(async () => undefined);
+
+  expect(screen.getByRole("slider", { name: "回放位置" })).toHaveValue("0");
+  expect((screen.getByLabelText("课程录音") as HTMLAudioElement).src).toContain("/sessions/session-next/audio/segment?start_ms=0");
+});
+
 it("loads the current segment before the first skip instead of resetting it", async () => {
   render(<SessionPlayer sessionId="session-test" sessionState="completed" seekRequest={null} onReady={vi.fn()} />);
   await act(async () => undefined);
