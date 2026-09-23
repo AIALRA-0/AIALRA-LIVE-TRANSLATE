@@ -422,7 +422,9 @@ fn enqueue_with_evidence(
         id: format!("job_{}", Uuid::now_v7().simple()),
         session_id: session_id.to_owned(),
         job_type: "explain".to_owned(),
-        priority: 30,
+        // Historical card repair runs behind live teaching and summaries so
+        // a backlog never delays the next actual classroom explanation.
+        priority: if trigger == QUALITY_REPAIR_TRIGGER { 10 } else { 30 },
         input: explanation_input(segments, pages, &session.target_language, trigger, deferred),
         input_object_hash: None,
         idempotency_key: format!("explain:{session_id}:{trigger}:{evidence_key}"),
@@ -866,6 +868,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(repair.input["trigger"], "quality_contract_v50");
+        assert_eq!(repair.priority, 10);
         let jobs = state
             .store
             .model_queue_counts(Some("session-quality-repair"))
