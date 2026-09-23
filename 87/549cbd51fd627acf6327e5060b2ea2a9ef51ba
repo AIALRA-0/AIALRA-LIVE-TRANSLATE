@@ -1,0 +1,20 @@
+crates/core-server/src/jobs.rs
+  s_4d8bb530e409af::t_a99caa45231c02 1710,1715,3090-3165
+  s_4d8bb530e409af::t_87e06f530dd439 3166-3167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "87549cbd51fd627acf6327e5060b2ea2a9ef51ba",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
