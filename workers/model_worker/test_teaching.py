@@ -92,6 +92,26 @@ def test_course_reduction_requires_a_real_byte_shrink() -> None:
     assert not valid_part({"prose": "概念关系" * 130, "original_terms": []}, request)
 
 
+@pytest.mark.asyncio
+async def test_course_reduction_repair_matches_the_validated_limits() -> None:
+    async def infer(
+        system: str, user: str, schema: dict[str, Any], **options: Any,
+    ) -> dict[str, Any]:
+        repair = options["repair_instruction"]
+        assert "500 Unicode characters" in repair
+        assert "1,600 UTF-8 bytes" in repair
+        assert "1,200" not in repair
+        return {
+            "prose": "故障模型说明电路需要检查的错误条件；测试向量用于观察响应。",
+            "original_terms": [],
+        }
+
+    result = await generate_part(TeachingPartRequest(
+        phase="course_reduce", text="Synthetic chapter notes", target_language="zh-CN",
+    ), infer, "synthetic-model", "cuda")
+    assert result is not None
+
+
 def test_batched_definitions_preserve_source_order_and_full_contract() -> None:
     request = TeachingPartRequest(
         phase="definitions",

@@ -419,12 +419,16 @@ async def generate_part(
         timeout_seconds=75, attempts=2,
         accept=lambda result: valid_part(bound_inventory(result, request), request),
         repair_instruction=(
+            "Return only a compact overview of at most 500 Unicode characters and 1,600 "
+            "UTF-8 bytes. Preserve the main relationships, conditions and limitations; "
+            "remove repeated examples and speech-act narration."
+            if request.phase == "course_reduce" else
             "Return only a coherent direct explanation in prose. Remove speech-act narration, "
             "filler acknowledgements and line-by-line retelling; use no more than 1,200 "
             "characters; retain all consequential facts, "
             "conditions and distinctions. Preserve both sides and the direction of every "
             "comparison; mark ambiguity instead of inventing a relationship."
-            if request.phase in {"group", "course", "course_reduce"} else
+            if request.phase in {"group", "course"} else
             "Return every original_terms item exactly once and in order. Apply the complete "
             "definition contract to each item; do not merge terms or add another term."
             if request.phase == "definitions" else
