@@ -1,0 +1,29 @@
+apps/web/src/CourseSummaryView.test.tsx
+  s_4d8bb530e409af::t_a3c58d3ab1391b 35
+  s_4d8bb530e409af::t_6936be76fd757f 1-31,33-34,37-39,41-55,65-68
+  s_4d8bb530e409af::t_052a971b50359d 32,36,40
+  s_4d8bb530e409af::t_ca41ab345be311 56-64
+apps/web/src/App.tsx
+  s_4d8bb530e409af::t_11d5732e9ce550 831-834,836-863,869-886,888-895,897-898,1856
+  s_4d8bb530e409af::t_9c62a6f960e435 887,896
+  s_4d8bb530e409af::t_ca41ab345be311 864-868
+  s_4d8bb530e409af::t_5bc43aae104c7a 835,1872
+apps/web/src/styles.css
+  s_4d8bb530e409af::t_27ce125d520e73 678-686
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "31754780ea73180912f25aaf2c864a8246c9ff62",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
