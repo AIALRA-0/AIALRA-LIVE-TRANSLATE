@@ -1,0 +1,59 @@
+workers/model_worker/test_teaching.py
+  s_4d8bb530e409af::t_ade4972fde7d85 261-263,272
+  s_4d8bb530e409af::t_1103d2f907acb7 72-80
+  s_4d8bb530e409af::t_84ac4e929bcb34 81-86,92
+  s_4d8bb530e409af::t_0de664eec72020 87-91
+workers/gpu_agent/course_summary.py
+  s_4d8bb530e409af::t_36d9c40e6af02d 93-94,145
+  s_4d8bb530e409af::t_dc1daee315bd8a 125-128,131-135
+workers/gpu_agent/test_course_summary.py
+  s_4d8bb530e409af::t_226c1d4f035dd5 1,29,35,39-61
+  s_4d8bb530e409af::t_207a442f01cfc3 141-162
+  s_5acd167c2115aa::t_4ec91a8e48c99b 62-63
+workers/gpu_agent/teaching.py
+  s_4d8bb530e409af::t_080cc3bf543db7 348-349
+  s_4d8bb530e409af::t_933d64c9471f12 329,334,342,346-347,350-354
+tools/diagnose_cloud_teaching.py
+  s_4d8bb530e409af::t_2ebb210ec9fa21 60
+workers/gpu_agent/test_kuafushe.py
+  s_4d8bb530e409af::t_261969cc1728cb 12,30-37
+  s_4d8bb530e409af::t_50ac306014b941 357-380
+  s_4d8bb530e409af::t_ab01ac23d001a8 304-326
+  s_4d8bb530e409af::t_3fa86398163e66 38-39,303,356
+workers/gpu_agent/test_teaching.py
+  s_4d8bb530e409af::t_b84b2cd566f0ed 410-413
+  s_4d8bb530e409af::t_8723bf6fae6ad4 221-222,406,441
+workers/gpu_agent/kuafushe.py
+  s_4d8bb530e409af::t_002e64ac7c1f0e 338-339
+workers/model_worker/teaching.py
+  s_4d8bb530e409af::t_788ff3e9c793de 230-233
+  s_4d8bb530e409af::t_f6411d7c3126d0 24,167,169-170
+  s_4d8bb530e409af::t_627c60bb59c1cf 198,238,271,311-321,339-341,427
+  s_4d8bb530e409af::t_60f9f14b189d9e 228-229,234-235
+  s_4d8bb530e409af::t_ff5c8a6273946a 64,144,155-164
+  s_4d8bb530e409af::t_dec9b212c02a3d 298-302,333-338
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "223f5b0c72b4a580bd826057b5dac2411c488322",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_5acd167c2115aa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03a21-3e91-7be2-8cf4-5616c2bcfc48",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
