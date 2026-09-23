@@ -162,18 +162,26 @@ def response_failure(
     )
 
 
-def retryable_teaching_part_response(response: httpx.Response) -> bool:
-    """Retry only bounded local refusals with a known, privacy-safe detail."""
+def teaching_part_failure_kind(response: httpx.Response) -> str:
+    """Classify only known local Worker details; never expose arbitrary text."""
     if response.status_code != 503:
-        return False
+        return "model_http_error"
     try:
         body = response.json()
     except ValueError:
-        return False
-    return (
-        isinstance(body, dict)
-        and body.get("detail") in {"model_worker_busy", "teaching_part_contract_invalid"}
-    )
+        return "model_http_error"
+    if isinstance(body, dict) and body.get("detail") in {
+        "model_worker_busy", "teaching_part_contract_invalid", "model_execution_failed",
+    }:
+        return body["detail"]
+    return "model_http_error"
+
+
+def retryable_teaching_part_response(response: httpx.Response) -> bool:
+    """Retry only bounded local refusals with a known, privacy-safe detail."""
+    return teaching_part_failure_kind(response) in {
+        "model_worker_busy", "teaching_part_contract_invalid",
+    }
 
 
 class GpuScheduler:
@@ -618,7 +626,9 @@ async def execute_job(
                     continue
                 break
             if part_response.status_code >= 400:
-                raise response_failure("model_http", "model_http_error", part_response)
+                raise response_failure(
+                    "model_http", teaching_part_failure_kind(part_response), part_response,
+                )
             try:
                 value = part_response.json()
             except ValueError as error:

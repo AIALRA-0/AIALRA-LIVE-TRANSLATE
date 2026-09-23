@@ -9,6 +9,7 @@ from workers.gpu_agent.main import (
     GpuScheduler,
     execute_job,
     retryable_teaching_part_response,
+    teaching_part_failure_kind,
 )
 
 
@@ -25,6 +26,12 @@ def test_only_known_transient_local_part_responses_are_retryable() -> None:
     assert not retryable_teaching_part_response(httpx.Response(
         429, json={"detail": "model_worker_busy"},
     ))
+    assert teaching_part_failure_kind(httpx.Response(
+        503, json={"detail": "teaching_part_contract_invalid"},
+    )) == "teaching_part_contract_invalid"
+    assert teaching_part_failure_kind(httpx.Response(
+        503, json={"detail": "private model output"},
+    )) == "model_http_error"
 
 
 def test_explanation_retries_one_busy_part_in_the_same_job() -> None:
