@@ -1,14 +1,39 @@
-// This smoke runner exercises the compiled local services with a synthetic, non-private lecture fixture.
+// This runner covers the local services with a synthetic fixture or an authorized retained recording.
+// `--retained-recording` is an explicitly authorized, in-memory replay path for local E2E runs.
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import WebSocket from "ws";
 
 const API = process.env.AIALRA_API_URL || "http://127.0.0.1:8787/api/v1";
 const WS_BASE = process.env.AIALRA_WS_BASE || API.replace(/^http/, "ws").replace(/\/api\/v1$/, "");
-const FIXTURE = process.argv[2] || "data/test-fixtures/pipeline-lecture.pcm";
+const CLI_ARGS = process.argv.slice(2);
+const RETAINED_RECORDING = CLI_ARGS.includes("--retained-recording");
+const PREPARE_ONLY = CLI_ARGS.includes("--prepare-only");
+const POSITIONAL_ARGS = CLI_ARGS.filter((argument) => !argument.startsWith("--"));
+const UNKNOWN_OPTIONS = CLI_ARGS.filter((argument) => argument.startsWith("--") &&
+  !["--retained-recording", "--prepare-only", "--help"].includes(argument));
+if (CLI_ARGS.includes("--help")) {
+  process.stdout.write(
+    "Usage: node tools/e2e_smoke.mjs [fixture.pcm] | --retained-recording [--prepare-only]\n" +
+    "--retained-recording loads a consented, completed local-only recording window in memory\n" +
+    "--prepare-only validates and describes the selected audio without calling services\n" +
+    "The E2E replay requires AIALRA_TEST_CLOUD_TEXT=true; the server policy is restricted to text\n",
+  );
+  process.exit(0);
+}
+if (UNKNOWN_OPTIONS.length > 0 || POSITIONAL_ARGS.length > 1 ||
+    (RETAINED_RECORDING && POSITIONAL_ARGS.length > 0) || (PREPARE_ONLY && !RETAINED_RECORDING)) {
+  throw new Error("invalid E2E smoke runner arguments; use --help for usage");
+}
+if (RETAINED_RECORDING && !PREPARE_ONLY && process.env.AIALRA_TEST_CLOUD_TEXT !== "true") {
+  throw new Error("retained recording E2E requires explicit server-side cloud text opt-in");
+}
+const FIXTURE = POSITIONAL_ARGS[0] || "data/test-fixtures/pipeline-lecture.pcm";
 const TEST_SUBJECT = process.env.AIALRA_TEST_SUBJECT || "";
 const PROXY_MARKER = process.env.AIALRA_TEST_PROXY_MARKER === "true";
 const TEST_CLOUD_TEXT = process.env.AIALRA_TEST_CLOUD_TEXT === "true";
-const REPLAY_REALTIME = process.env.AIALRA_REPLAY_REALTIME === "true";
+const REPLAY_REALTIME = RETAINED_RECORDING || process.env.AIALRA_REPLAY_REALTIME === "true";
 const nativeFetch = globalThis.fetch;
 globalThis.fetch = (input, init = {}) => {
   const url = String(input);
@@ -30,13 +55,155 @@ async function checked(responsePromise) {
     let code = "";
     try {
       const body = await response.json();
-      code = typeof body?.code === "string" ? body.code : "";
+      code = typeof body?.code === "string" ? body.code.replace(/[^a-z0-9_-]/gi, "") : "";
     } catch {
       // A non-JSON response is still represented by its status only.
     }
     throw new Error(`HTTP ${response.status}${code ? ` (${code})` : ""}`);
   }
   return await response.json();
+}
+
+// Read a short real recording window without exporting it to a file or logging
+// any session identifiers, object hashes, event payloads, transcripts, or keys.
+async function loadRetainedRecording() {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch {
+    throw new Error("retained recording mode requires Node.js with built-in SQLite support");
+  }
+
+  const dataRoot = "data";
+  const database = new DatabaseSync(join(dataRoot, "aialra.sqlite"), { readOnly: true });
+  let sourceChunks;
+  let selectedWindowStart;
+  let stableEventCount;
+  try {
+    database.exec("PRAGMA query_only = ON");
+    const candidates = database.prepare(`
+      SELECT s.id, COUNT(*) AS chunk_count
+      FROM sessions s
+      JOIN audio_chunks c ON c.session_id = s.id
+      WHERE s.consent_confirmed = 1
+        AND s.demo_mode = 0
+        AND s.privacy_mode = 'local_only'
+        AND s.state = 'completed'
+      GROUP BY s.id
+      HAVING COUNT(*) >= 20
+      ORDER BY chunk_count DESC
+    `).all();
+
+    for (const candidate of candidates) {
+      const chunks = database.prepare(`
+        SELECT sequence, captured_at_ms, sample_rate, channels, encoding,
+               duration_ms, object_hash, size_bytes
+        FROM audio_chunks
+        WHERE session_id = ?
+        ORDER BY sequence
+      `).all(candidate.id);
+      if (chunks.length !== candidate.chunk_count) continue;
+      const validSequence = chunks.every((chunk, index) =>
+        chunk.sequence === chunks[0].sequence + index &&
+        chunk.sample_rate === 16_000 &&
+        chunk.channels === 1 &&
+        chunk.encoding === "pcm_s16le" &&
+        chunk.duration_ms === 1_000 &&
+        chunk.size_bytes === 32_000,
+      );
+      if (!validSequence) continue;
+
+      const stableTimes = database.prepare(`
+        SELECT captured_at_wall
+        FROM events
+        WHERE session_id = ? AND event_type = 'segment.finalized'
+        ORDER BY rowid
+      `).all(candidate.id)
+        .map((event) => Date.parse(event.captured_at_wall))
+        .filter(Number.isFinite);
+      if (stableTimes.length === 0) continue;
+
+      const nearestEvents = stableTimes.map((capturedAt) => {
+        let low = 0;
+        let high = chunks.length;
+        while (low < high) {
+          const mid = (low + high) >>> 1;
+          if (chunks[mid].captured_at_ms < capturedAt) low = mid + 1;
+          else high = mid;
+        }
+        const right = Math.min(low, chunks.length - 1);
+        const left = Math.max(0, right - 1);
+        const center = Math.abs(chunks[left].captured_at_ms - capturedAt) <=
+          Math.abs(chunks[right].captured_at_ms - capturedAt) ? left : right;
+        return {
+          center,
+          deltaMs: Math.abs(chunks[center].captured_at_ms - capturedAt),
+        };
+      }).sort((left, right) => left.deltaMs - right.deltaMs);
+
+      sourceChunks = chunks;
+      stableEventCount = stableTimes.length;
+      const testedStarts = new Set();
+      for (const event of nearestEvents) {
+        const start = Math.max(0, Math.min(chunks.length - 20, event.center - 10));
+        if (testedStarts.has(start)) continue;
+        testedStarts.add(start);
+        selectedWindowStart = start;
+        break;
+      }
+      if (selectedWindowStart !== undefined) break;
+    }
+  } finally {
+    database.close();
+  }
+
+  if (!sourceChunks || selectedWindowStart === undefined) {
+    throw new Error("no eligible completed, consented local-only recording with stable ASR timing was found");
+  }
+
+  // The closest stable ASR timestamp is centered in a 20-second window.
+  const windowCandidates = sourceChunks.slice(selectedWindowStart, selectedWindowStart + 20);
+  if (windowCandidates.length !== 20) throw new Error("retained recording window is not contiguous");
+
+  const buffers = [];
+  let hasSignal = false;
+  for (const chunk of windowCandidates) {
+    const match = /^sha256:([a-f0-9]{64})$/i.exec(chunk.object_hash);
+    if (!match) throw new Error("retained recording object reference is invalid");
+    const hash = match[1].toLowerCase();
+    let bytes;
+    try {
+      bytes = await readFile(join(dataRoot, "objects", hash.slice(0, 2), hash));
+    } catch {
+      throw new Error("retained recording object is unavailable");
+    }
+    if (bytes.length !== chunk.size_bytes ||
+        `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== chunk.object_hash.toLowerCase()) {
+      throw new Error("retained recording object integrity check failed");
+    }
+    for (let offset = 0; offset < bytes.length; offset += 2) {
+      if (bytes.readInt16LE(offset) !== 0) {
+        hasSignal = true;
+        break;
+      }
+    }
+    buffers.push(bytes);
+  }
+  if (!hasSignal) throw new Error("selected retained recording window contains no audio signal");
+
+  return {
+    pcm: Buffer.concat(buffers),
+    metadata: {
+      source: "retained_recording_memory",
+      duration_seconds: 20,
+      sample_rate_hz: 16_000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      signal_detected: true,
+      near_stable_asr_event: true,
+      stable_asr_event_count: stableEventCount,
+    },
+  };
 }
 
 // Polling waits for asynchronous GPU work without assuming a model-specific latency.
@@ -56,7 +223,7 @@ async function waitForEvents(sessionId, predicate, timeoutMs = 300_000) {
 }
 
 // The WebSocket sender uses one-second frames and waits until every sequence has an ACK.
-async function sendPcm(sessionId, leaseToken, pcm) {
+async function sendPcm(sessionId, leaseToken, pcm, onAcknowledgement) {
   const chunks = [];
   for (let offset = 0, sequence = 1; offset < pcm.length; offset += 32_000, sequence += 1) {
     const payload = pcm.subarray(offset, Math.min(offset + 32_000, pcm.length));
@@ -100,12 +267,16 @@ async function sendPcm(sessionId, leaseToken, pcm) {
       if (typeof response.commit_id === "string" && response.commit_id.length > 0) {
         acknowledgementCommitIds.add(response.sequence);
       }
-      if (acknowledgements.size === chunks.length) {
+      onAcknowledgement?.(acknowledgements.size, chunks.length);
+      if (acknowledgements.size >= chunks.length) {
         clearTimeout(timer);
         socket.close();
+        const persistedSequences = chunks.filter(({ sequence }) =>
+          acknowledgements.has(sequence) && acknowledgementCommitIds.has(sequence),
+        ).length;
         resolve({
-          count: acknowledgements.size,
-          commitIdsValid: acknowledgementCommitIds.size === chunks.length,
+          count: persistedSequences,
+          commitIdsValid: persistedSequences === chunks.length,
         });
       }
     };
@@ -172,9 +343,12 @@ function startLeaseRenewal(projectId, sessionId, deviceId, leaseToken) {
   };
 }
 
-// One real session covers consent, audio durability, ASR, translation, asset parsing, explanation, and stop.
+// One isolated session covers consent, audio durability, ASR, translation, explanation, and stop.
+async function runE2e(pcmInput) {
 const startedAt = Date.now();
 let project;
+let result;
+let archived = false;
 try {
 project = await checked(
   fetch(`${API}/projects`, {
@@ -186,7 +360,11 @@ project = await checked(
 const deviceId = "smoke-device-0001";
 const session = await checked(fetch(`${API}/projects/${project.id}/sessions`, {
   method: "POST", headers: { "content-type": "application/json" },
-  body: JSON.stringify({ title: "端到端合成课程验证", consent_confirmed: true, device_id: deviceId }),
+  body: JSON.stringify({
+    title: RETAINED_RECORDING ? "保留录音回放验证" : "端到端合成课程验证",
+    consent_confirmed: true,
+    device_id: deviceId,
+  }),
 }));
 if (TEST_CLOUD_TEXT) {
   const policy = await checked(fetch(`${API}/projects/${project.id}/ai-policy`, {
@@ -207,8 +385,18 @@ const contention = await fetch(`${API}/projects/${project.id}/sessions/${session
 });
 if (contention.status !== 409) throw new Error(`second recorder was not rejected: ${contention.status}`);
 const capabilities = await checked(fetch(`${API}/sessions/${session.id}/dingtalk/capabilities`));
-const pcm = await readFile(FIXTURE);
-const acknowledgements = await sendPcm(session.id, lease.lease_token, pcm);
+if (RETAINED_RECORDING) process.stderr.write("已获许可，开始实时回放保留录音\n");
+const acknowledgements = await sendPcm(
+  session.id,
+  lease.lease_token,
+  pcmInput.pcm,
+  RETAINED_RECORDING
+    ? (acknowledged, total) => process.stderr.write(
+        `\r录音回放中：${acknowledged}/${total} 秒已持久化确认`,
+      )
+    : undefined,
+);
+if (RETAINED_RECORDING) process.stderr.write("\n");
 if (!acknowledgements.commitIdsValid) throw new Error("one or more durable ACKs lacked commit_id");
 let events = await waitForEvents(
   session.id,
@@ -217,19 +405,21 @@ let events = await waitForEvents(
     items.some((item) => item.event_type === "translation.finalized"),
 );
 
-// A text page enters the lightweight material library without triggering an explanation.
-const material = new FormData();
-material.append(
-  "file",
-  new Blob(["Pipeline forwarding reduces some read-after-write stalls."], { type: "text/plain" }),
-  "pipeline-notes.txt",
-);
-const uploadedMaterial = await checked(fetch(`${API}/sessions/${session.id}/assets`, { method: "POST", body: material }));
-if (uploadedMaterial.explain_job_id) throw new Error("material upload unexpectedly queued an explanation");
-await waitForEvents(
-  session.id,
-  (items) => items.some((item) => item.event_type === "asset.page.extracted"),
-);
+if (!RETAINED_RECORDING) {
+  // This synthetic material is unrelated to the retained course, so only add it to fixture runs.
+  const material = new FormData();
+  material.append(
+    "file",
+    new Blob(["Pipeline forwarding reduces some read-after-write stalls."], { type: "text/plain" }),
+    "pipeline-notes.txt",
+  );
+  const uploadedMaterial = await checked(fetch(`${API}/sessions/${session.id}/assets`, { method: "POST", body: material }));
+  if (uploadedMaterial.explain_job_id) throw new Error("material upload unexpectedly queued an explanation");
+  await waitForEvents(
+    session.id,
+    (items) => items.some((item) => item.event_type === "asset.page.extracted"),
+  );
+}
 await stopLeaseRenewal();
 await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
@@ -283,9 +473,7 @@ const health = await waitForQueueDrain();
 
 // Machine-readable output is stored by the caller and can be compared across model changes.
 const count = (eventType) => events.filter((item) => item.event_type === eventType).length;
-process.stdout.write(
-  `${JSON.stringify(
-    {
+result = {
       status: "PASS",
       elapsed_ms: Date.now() - startedAt,
       audio_acknowledgements: acknowledgements.count,
@@ -303,17 +491,35 @@ process.stdout.write(
       build_id: health.build_id,
       dingtalk_configured: capabilities.configured,
       dingtalk_live_pcm_verified: capabilities.incremental_pcm_verified,
-    },
-    null,
-    2,
-  )}\n`,
-);
+      ...(pcmInput.metadata ? { audio_input: pcmInput.metadata } : {}),
+    };
 } finally {
   if (project?.id) {
-    await checked(fetch(`${API}/projects/${project.id}/placement`, {
+    const archiveRequest = checked(fetch(`${API}/projects/${project.id}/placement`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ folder_id: null, sort_order: 9999, archived: true }),
-    })).catch(() => undefined);
+    }));
+    if (RETAINED_RECORDING) {
+      const archivedPlacement = await archiveRequest;
+      if (!archivedPlacement.archived_at) {
+        throw new Error("isolated retained-recording project archive was not confirmed");
+      }
+      archived = true;
+    } else {
+      await archiveRequest.catch(() => undefined);
+    }
   }
+}
+if (RETAINED_RECORDING) result.isolated_test_project_archived = archived;
+process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+const pcmInput = RETAINED_RECORDING
+  ? await loadRetainedRecording()
+  : { pcm: await readFile(FIXTURE), metadata: null };
+if (PREPARE_ONLY) {
+  process.stdout.write(`${JSON.stringify({ status: "PREPARED", audio_input: pcmInput.metadata }, null, 2)}\n`);
+} else {
+  await runE2e(pcmInput);
 }
