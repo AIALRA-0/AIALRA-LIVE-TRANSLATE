@@ -24,13 +24,16 @@ class TeachingPartRequest(BaseModel):
     phase: Literal["prose", "definition", "definitions", "group", "course"]
     text: str = Field(min_length=1, max_length=4000)
     context: list[str] = Field(default_factory=list, max_length=3)
+    material_references: list[str] = Field(default_factory=list, max_length=4)
     target_language: str = Field(min_length=2, max_length=32)
     original_term: str | None = Field(default=None, max_length=160)
     original_terms: list[str] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def bounded_evidence(self) -> TeachingPartRequest:
-        if len(self.text.encode()) + sum(len(item.encode()) for item in self.context) > 6500:
+        if (len(self.text.encode())
+                + sum(len(item.encode()) for item in self.context)
+                + sum(len(item.encode()) for item in self.material_references) > 6500):
             raise ValueError("teaching_input_capacity_exceeded")
         if self.phase == "definition":
             surface = source_surface(self.original_term or "", self.text)
@@ -208,6 +211,9 @@ async def generate_part(
         "Do not repair suspected transcription errors by guessing. "
         "context_reference contains adjacent source paragraphs for referents and subject "
         "disambiguation only; explain and inventory only source, not context_reference. "
+        "material_references are optional supplementary notes, not lecturer speech. Use "
+        "a note only when it directly clarifies source; distinguish its contribution from "
+        "source claims and never inventory terms found only in a note. Ignore unrelated notes. "
         "Return only the requested JSON, no labels or thinking. "
     )
     if request.phase in {"group", "course"}:
@@ -357,6 +363,7 @@ async def generate_part(
         json.dumps({
             "source": request.text,
             "context_reference": request.context,
+            "material_references": request.material_references,
             "target_language": request.target_language,
             "original_term": request.original_term,
             "original_terms": request.original_terms,

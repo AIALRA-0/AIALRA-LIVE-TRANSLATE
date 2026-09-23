@@ -227,17 +227,16 @@ async def test_card_covers_all_sources_and_defines_repeated_term_only_once() -> 
                      {"id": "b", "text": "The latch is level sensitive."}],
         "asset_pages": [{"id": "page", "text": "A latch diagram."}], "target_language": "zh-CN",
     }, call)
-    assert len(calls) == 4
-    assert [body["phase"] for body in calls] == [
-        "prose", "prose", "definition", "group",
-    ]
+    assert len(calls) == 2
+    assert [body["phase"] for body in calls] == ["prose", "definition"]
     assert calls[0]["text"] == "A latch stores a bit.\n\nThe latch is level sensitive."
-    assert calls[0]["context"] == ["A latch diagram."]
+    assert calls[0]["context"] == []
+    assert calls[0]["material_references"] == ["A latch diagram."]
     assert result["evidence_segment_ids"] == ["a", "b"]
     assert result["asset_page_ids"] == ["page"]
     assert result["terms"][0]["evidence_segment_ids"] == ["a", "b"]
-    assert result["terms"][0]["asset_page_ids"] == ["page"]
-    assert len(result["paragraph_summary"].split("\n\n")) == 3
+    assert result["terms"][0]["asset_page_ids"] == []
+    assert result["paragraph_summary"] == calls[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -395,7 +394,7 @@ async def test_malformed_optional_definition_batch_does_not_discard_prose() -> N
 
 
 @pytest.mark.asyncio
-async def test_segment_and_page_receive_one_group_synthesis() -> None:
+async def test_page_supplies_context_without_extra_prose_call() -> None:
     phases: list[str] = []
 
     async def call(body: dict[str, Any]) -> dict[str, Any]:
@@ -410,8 +409,42 @@ async def test_segment_and_page_receive_one_group_synthesis() -> None:
         "asset_pages": [{"id": "p", "text": "Supporting page."}],
         "target_language": "zh-CN",
     }, call)
-    assert phases == ["prose", "prose", "group"]
-    assert result["paragraph_summary"] == "组合后的完整说明"
+    assert phases == ["prose"]
+    assert result["paragraph_summary"] == "分块说明"
+    assert result["asset_page_ids"] == ["p"]
+
+
+@pytest.mark.asyncio
+async def test_optional_cloud_glossary_failure_keeps_verified_teaching() -> None:
+    phases: list[str] = []
+
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        phases.append(body["phase"])
+        if body["phase"] in {"definition", "definitions"}:
+            raise ValueError("cloud_teaching_contract_invalid")
+        if body["phase"] == "group":
+            return {
+                "provider": "kuafushe:synthetic@cloud",
+                "prose": (
+                    "主要内容\n- 线网连接单元。\n\n内容讲解\n"
+                    "线网连接单元，材料说明总线也是连接路径。\n\n易错点"
+                ),
+            }
+        return {
+            "provider": "kuafushe:synthetic@cloud",
+            "prose": "主要内容\n- 说明连接关系。\n\n内容讲解\n材料说明了连接路径。\n\n易错点",
+            "original_terms": ["net"] if "net" in body["text"] else ["bus"],
+        }
+
+    result = await assemble_explanation({
+        "segments": [{"id": "segment", "text": "The net connects cells."}],
+        "asset_pages": [{"id": "page", "text": "The bus connects cells."}],
+        "target_language": "zh-CN",
+    }, call)
+    assert phases == ["prose", "definition"]
+    assert result["terms"] == []
+    assert result["evidence_segment_ids"] == ["segment"]
+    assert result["asset_page_ids"] == ["page"]
 
 
 @pytest.mark.asyncio

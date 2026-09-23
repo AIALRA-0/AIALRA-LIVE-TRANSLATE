@@ -51,7 +51,7 @@ try {
         deployment_mode: "local", processing_location: "local", worker: null,
         model_queue: { queued: 0, leased: 0, completed: 0, failed: 0 },
       };
-      else if (p.endsWith("/recording-status")) body = { project_id: project.id, lease: null, admission: { allowed: true } };
+      else if (p.endsWith("/recording/status")) body = { project_id: project.id, lease: null, admission: { allowed: true }, sessions: [] };
       else if (p.endsWith("/ai-policy")) body = { cloud_enabled: false, allowed_modalities: [], route_available: false };
       else if (p.endsWith("/readweave/status")) body = { configured: false, conflicts: 0, syncing: 0, queued: 0 };
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });

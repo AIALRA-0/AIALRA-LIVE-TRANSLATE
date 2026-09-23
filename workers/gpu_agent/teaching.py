@@ -15,6 +15,16 @@ MAX_GROUP_TERMS = 8
 MAX_DEFINITION_BATCH = 2
 MAX_SOURCE_CHUNK_BYTES = 2800
 MAX_SYNTHESIS_INPUT_BYTES = 6200
+
+
+def optional_definition_failure(error: Exception) -> bool:
+    """An invalid glossary completion must not discard verified teaching prose."""
+    return isinstance(error, RuntimeError) or (
+        isinstance(error, ValueError)
+        and str(error) in {"cloud_teaching_contract_invalid", "teaching_part_invalid"}
+    )
+
+
 _BANNED_NARRATION = (
     "当我在讲解", "你会看到我所说", "老师说", "讲者提到",
     "本段话讲了", "本段内容讲了", "让我们来看",
@@ -296,17 +306,35 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
 
     prose: list[str] = []
     term_sources: dict[str, dict[str, Any]] = {}
-    chunks = [(kind, chunk) for kind, records in [("segment", segments), ("page", pages)]
-              for chunk in teaching_chunks(records)]
+    # Material pages are reference data, not separate lecture passages. A short
+    # page must not have to satisfy the full teaching-card writing contract.
+    chunks = [("segment", chunk) for chunk in teaching_chunks(segments)]
     texts = ["\n\n".join(item["text"] for item in chunk) for _, chunk in chunks]
+    cited_page_ids: list[str] = []
     # All source fragments finish before a card is published. A failed call
     # leaves the single persistent job retryable, never a fake partial card.
     for index, (kind, sources) in enumerate(chunks):
         piece = texts[index]
         # The topic is already sealed. Both neighbours are available and help
         # disambiguate abbreviations introduced before their full explanation.
-        context = texts[max(0, index - 1):index] + texts[index + 1:index + 2]
+        candidate_context = texts[max(0, index - 1):index] + texts[index + 1:index + 2]
+        capacity = 6500 - len(piece.encode())
+        context: list[str] = []
+        for neighbour in candidate_context:
+            size = len(neighbour.encode())
+            if size <= capacity:
+                context.append(neighbour)
+                capacity -= size
+        material_references: list[str] = []
+        for page in pages:
+            size = len(page["text"].encode())
+            if size <= capacity and len(material_references) < 4:
+                material_references.append(page["text"])
+                capacity -= size
+                if page["id"] not in cited_page_ids:
+                    cited_page_ids.append(page["id"])
         body = {"phase": "prose", "text": piece, "context": context,
+                "material_references": material_references,
                 "target_language": target}
         result = await generate(body)
         paragraph = result.get("prose")
@@ -418,7 +446,9 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                     "context": first["context"],
                     "original_term": first["original_term"], "target_language": target,
                 })
-            except RuntimeError:
+            except (RuntimeError, ValueError) as error:
+                if not optional_definition_failure(error):
+                    raise
                 continue
             append_definition(first, result.get("term"), result.get("definition"))
         else:
@@ -429,7 +459,9 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                     "original_terms": [item["original_term"] for item in batch],
                     "target_language": target,
                 })
-            except RuntimeError:
+            except (RuntimeError, ValueError) as error:
+                if not optional_definition_failure(error):
+                    raise
                 for term_source in batch:
                     try:
                         fallback = await generate({
@@ -438,7 +470,9 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                             "original_term": term_source["original_term"],
                             "target_language": target,
                         })
-                    except RuntimeError:
+                    except (RuntimeError, ValueError) as fallback_error:
+                        if not optional_definition_failure(fallback_error):
+                            raise
                         continue
                     append_definition(
                         term_source, fallback.get("term"), fallback.get("definition"),
@@ -487,5 +521,5 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         "paragraph_summary": detailed_prose, "terms": definitions,
         "teaching_sections": teaching_sections,
         "evidence_segment_ids": [item["id"] for item in segments],
-        "asset_page_ids": [item["id"] for item in pages], "provider": provider,
+        "asset_page_ids": cited_page_ids, "provider": provider,
     }

@@ -54,6 +54,11 @@ def test_definition_requires_exact_source_and_bounded_context() -> None:
                             target_language="zh-CN")
     with pytest.raises(ValidationError):
         TeachingPartRequest(phase="prose", text="语" * 3000, target_language="zh-CN")
+    with pytest.raises(ValidationError):
+        TeachingPartRequest(
+            phase="prose", text="A latch.", material_references=["x" * 6500],
+            target_language="zh-CN",
+        )
     request = TeachingPartRequest(phase="prose", text="A latch.", target_language="zh-CN")
     assert valid_part({"prose": "锁存器", "original_terms": ["latch"]}, request)
     assert not valid_part({"prose": "锁存器", "original_terms": ["clock"]}, request)
@@ -221,6 +226,26 @@ async def test_adjacent_source_context_reaches_model_without_becoming_inventory(
     assert result is not None
     if phase == "prose":
         assert result.original_terms == ["FM"]
+
+
+@pytest.mark.asyncio
+async def test_material_reference_is_separate_from_lecture_source() -> None:
+    async def infer(
+        system: str, user: str, schema: dict[str, Any], **options: Any,
+    ) -> dict[str, Any]:
+        supplied = json.loads(user)
+        assert supplied["source"] == "The net connects cells."
+        assert supplied["material_references"] == ["A bus may connect several cells."]
+        assert "not lecturer speech" in system
+        return {"prose": "线网连接单元", "original_terms": ["net", "bus"]}
+
+    result = await generate_part(TeachingPartRequest(
+        phase="prose", text="The net connects cells.",
+        material_references=["A bus may connect several cells."],
+        target_language="zh-CN",
+    ), infer, "test", "cuda")
+    assert result is not None
+    assert result.original_terms == ["net"]
 
 
 @pytest.mark.asyncio
