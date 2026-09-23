@@ -1,0 +1,20 @@
+tools/production_browser_smoke.mjs
+  s_4d8bb530e409af::t_c8614585128662 30,144,180,187,190,203,253,304
+  s_4d8bb530e409af::t_03e5047a2c9d1b 122-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "09fb334de8cc61ccc70beb9d431f9419eab67fc0",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
