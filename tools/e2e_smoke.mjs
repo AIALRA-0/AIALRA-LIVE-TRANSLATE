@@ -466,6 +466,15 @@ events = await waitForEvents(
     items.some((item) => item.event_type === "session.summary.created"),
   600_000,
 );
+if (RETAINED_RECORDING) {
+  const summary = events.find((item) => item.event_type === "session.summary.created");
+  const keyPoints = summary?.payload?.result?.key_points;
+  if (!Array.isArray(keyPoints) || !keyPoints.some(
+    (point) => typeof point === "string" && point.trim(),
+  )) {
+    throw new Error("retained recording summary lacks a nonempty key point");
+  }
+}
 const card = events.find((item) => item.event_type === "explanation.card.created");
 const teaching = card?.payload?.result;
 if (!teaching?.teaching_sections || teaching.teaching_sections.version !== 1) {

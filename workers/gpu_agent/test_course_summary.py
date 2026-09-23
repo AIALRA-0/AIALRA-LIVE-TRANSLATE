@@ -163,6 +163,33 @@ async def test_long_course_reduces_utf8_bytes_without_dropping_chapters() -> Non
 
 
 @pytest.mark.asyncio
+async def test_single_source_checked_group_is_a_key_point_without_raw_transcript() -> None:
+    source_text = "Synthetic raw transcript phrasing that should not be repeated."
+    chapter = "Verified chapter summary with the source evidence preserved."
+    calls: list[dict[str, Any]] = []
+
+    async def synthesis(body: dict[str, Any]) -> dict[str, Any]:
+        calls.append(body)
+        return {"prose": "Synthetic course overview", "provider": "ollama:test@cuda"}
+
+    result = await compile_course({
+        "segments": [{"id": "p1", "text": source_text}],
+        "complete_groups": [{"coverage_contract": "all_sources_v1", "result": {
+            "paragraph_summary": chapter, "terms": [],
+            "evidence_segment_ids": ["p1"], "asset_page_ids": [],
+        }}],
+        "target_language": "zh-CN",
+    }, synthesis)
+
+    assert result["key_points"] == [chapter]
+    assert source_text not in result["key_points"][0]
+    assert calls == [{
+        "phase": "course", "text": chapter, "target_language": "zh-CN",
+    }]
+    assert result["evidence_segment_ids"] == ["p1"]
+
+
+@pytest.mark.asyncio
 async def test_verified_group_chapters_are_preserved_without_cloud_rewriting() -> None:
     phases: list[str] = []
 

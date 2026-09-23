@@ -156,7 +156,7 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
     # its full explanation and evidence instead of asking the cloud to rewrite
     # every chapter into a shorter text that cannot preserve all its details.
     # Only the cross-chapter overview needs a second synthesis pass.
-    chapters = notes if len(notes) > 1 else []
+    chapters = notes
     if len("\n\n".join(overview_notes).encode()) <= 3500:
         overview = await synthesize("\n\n".join(overview_notes))
     else:
