@@ -1,0 +1,30 @@
+workers/gpu_agent/teaching.py
+  s_4d8bb530e409af::t_b0f9d0bc7a3d95 16,444-453,486-487
+workers/gpu_agent/test_teaching.py
+  s_4d8bb530e409af::t_2b51d8361f24d9 456-479
+  s_5acd167c2115aa::t_1628d999cde0ed 455
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d343bb6a4acac080947bf1007325f48a22d3a297",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_5acd167c2115aa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03a21-3e91-7be2-8cf4-5616c2bcfc48",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
