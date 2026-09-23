@@ -190,6 +190,57 @@ async def test_verified_group_chapters_are_preserved_without_cloud_rewriting() -
 
 
 @pytest.mark.asyncio
+async def test_overview_uses_ordered_source_checked_main_points_and_keeps_full_chapters() -> None:
+    calls: list[dict[str, Any]] = []
+    generated_chapter = (
+        "承上启下：\n\n主要内容：\n- Synthetic conclusion two.\n\n"
+        "内容讲解：Synthetic explanation connects the stated condition to its result. "
+        "The result applies only within the described boundary.\n\n易错点：无"
+    )
+    full_first = ("Synthetic chapter one detail. " * 70).strip()
+    full_last = ("Synthetic chapter three detail. " * 70).strip()
+    point_one = "- Synthetic conclusion one."
+    point_two = "- Synthetic conclusion two."
+    point_three = "- Synthetic conclusion three."
+
+    async def synthesis(body: dict[str, Any]) -> dict[str, Any]:
+        calls.append(body)
+        if body["phase"] == "group":
+            return {"prose": generated_chapter, "provider": "kuafushe:test@cloud"}
+        return {"prose": "Synthetic course overview", "provider": "kuafushe:test@cloud"}
+
+    result = await compile_course({
+        "segments": [
+            {"id": "p0", "text": "Synthetic source zero."},
+            {"id": "p1", "text": "Synthetic source evidence. " * 12},
+            {"id": "p2", "text": "Synthetic source two."},
+        ],
+        "complete_groups": [
+            {"coverage_contract": "all_sources_v1", "result": {
+                "paragraph_summary": full_first, "terms": [],
+                "teaching_sections": {"main_content": point_one},
+                "evidence_segment_ids": ["p0"], "asset_page_ids": [],
+            }},
+            {"coverage_contract": "all_sources_v1", "result": {
+                "paragraph_summary": full_last, "terms": [],
+                "teaching_sections": {"main_content": point_three},
+                "evidence_segment_ids": ["p2"], "asset_page_ids": [],
+            }},
+        ],
+        "target_language": "zh-CN",
+    }, synthesis)
+
+    course_calls = [body for body in calls if body["phase"] == "course"]
+    assert [body["text"] for body in course_calls] == [
+        "\n\n".join([point_one, point_two, point_three]),
+    ]
+    assert not any(body["phase"] == "course_reduce" for body in calls)
+    assert result["key_points"] == [full_first, generated_chapter, full_last]
+    assert "Synthetic chapter one detail." not in course_calls[0]["text"]
+    assert "Synthetic chapter three detail." not in course_calls[0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_cloud_contract_retry_repeats_only_the_rejected_part() -> None:
     phases: list[str] = []
 

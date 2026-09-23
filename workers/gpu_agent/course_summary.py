@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from workers.gpu_agent.teaching import PartCaller, source_pieces, source_records, valid_provider
+from workers.gpu_agent.teaching import (
+    PartCaller,
+    parse_teaching_sections,
+    source_pieces,
+    source_records,
+    valid_provider,
+    valid_teaching_sections,
+)
 
 COMPILED_PROVIDER = "compiled:content-groups-v1@cpu"  # Historical result compatibility only.
 
@@ -80,26 +87,45 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
         reusable[indexes[0]] = result
 
     groups: list[dict[str, Any]] = []
+    overview_notes: list[str] = []
     cursor = 0
     while cursor < len(segments):
         if cursor in reusable:
             group = reusable[cursor]
+            sections = group.get("teaching_sections")
+            main_content = sections.get("main_content") if isinstance(sections, dict) else None
+            overview_note = (
+                main_content.strip()
+                if isinstance(main_content, str) and main_content.strip()
+                else group["paragraph_summary"].strip()
+            )
             cursor += len(group["evidence_segment_ids"])
         else:
             end = cursor + 1
             while end < len(segments) and end not in reusable and end - cursor < 20:
                 end += 1
             missing = segments[cursor:end]
+            generated: list[str] = []
+            concise: list[str] = []
+            for batch in note_batches([source["text"] for source in missing]):
+                prose = await synthesize(batch, "group")
+                generated.append(prose)
+                sections = parse_teaching_sections(prose)
+                if (not sections["legacy_input"] and valid_teaching_sections(
+                    sections, len(batch), model_input["target_language"],
+                )):
+                    concise.append(sections["main_content"].strip())
+                else:
+                    concise.append(prose)
             group = {
-                "paragraph_summary": "\n\n".join([
-                    await synthesize(batch, "group")
-                    for batch in note_batches([source["text"] for source in missing])
-                ]),
+                "paragraph_summary": "\n\n".join(generated),
                 "terms": [], "evidence_segment_ids": [source["id"] for source in missing],
                 "asset_page_ids": [],
             }
+            overview_note = "\n\n".join(concise)
             cursor = end
         groups.append(group)
+        overview_notes.append(overview_note)
 
     # The material library supplements a cited teaching group. Unused pages
     # are not a second lecture and must not become independent course chapters.
@@ -131,10 +157,10 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
     # every chapter into a shorter text that cannot preserve all its details.
     # Only the cross-chapter overview needs a second synthesis pass.
     chapters = notes if len(notes) > 1 else []
-    if len("\n\n".join(notes).encode()) <= 3500:
-        overview = await synthesize("\n\n".join(notes))
+    if len("\n\n".join(overview_notes).encode()) <= 3500:
+        overview = await synthesize("\n\n".join(overview_notes))
     else:
-        remaining = notes
+        remaining = overview_notes
         # Chinese character limits do not imply a shrinking UTF-8 byte budget.
         # Keep reducing the overview until it fits; each accepted pass must
         # strictly reduce bytes, so the bound derives from the initial chapter count.
