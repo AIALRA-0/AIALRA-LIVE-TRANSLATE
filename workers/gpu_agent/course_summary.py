@@ -7,11 +7,6 @@ from typing import Any
 from workers.gpu_agent.teaching import PartCaller, source_pieces, source_records, valid_provider
 
 COMPILED_PROVIDER = "compiled:content-groups-v1@cpu"  # Historical result compatibility only.
-# The cloud writing contract caps a chapter at 1,200 characters. Feeding it a
-# whole 3,500-byte note batch asks it to preserve more facts than can fit and
-# repeatedly produces rejected, truncated chapters. Keep each chapter's source
-# small; the separate reduce pass still combines the complete chapter list.
-COURSE_NOTE_BATCH_BYTES = 1700
 
 
 def note_batches(notes: list[str], capacity: int = 3500) -> list[str]:
@@ -131,13 +126,15 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
                     if ref not in indexed_terms[key][field]:
                         indexed_terms[key][field].append(ref)
     notes = [group["paragraph_summary"].strip() for group in groups]
-    batches = note_batches(notes, capacity=COURSE_NOTE_BATCH_BYTES)
-    if len(batches) == 1:
-        overview = await synthesize(batches[0])
-        chapters = notes if len(notes) > 1 else []
+    # A complete content-group note is already a source-checked chapter. Keep
+    # its full explanation and evidence instead of asking the cloud to rewrite
+    # every chapter into a shorter text that cannot preserve all its details.
+    # Only the cross-chapter overview needs a second synthesis pass.
+    chapters = notes if len(notes) > 1 else []
+    if len("\n\n".join(notes).encode()) <= 3500:
+        overview = await synthesize("\n\n".join(notes))
     else:
-        chapters = [await synthesize(batch) for batch in batches]
-        remaining = chapters
+        remaining = notes
         # Chinese character limits do not imply a shrinking UTF-8 byte budget.
         # Keep reducing the overview until it fits; each accepted pass must
         # strictly reduce bytes, so the bound derives from the initial chapter count.
