@@ -160,3 +160,48 @@ async def test_long_course_reduces_utf8_bytes_without_dropping_chapters() -> Non
     assert result["evidence_segment_ids"] == [item["id"] for item in segments]
     assert len(result["key_points"]) > 1
     assert result["overview"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_contract_retry_repeats_only_the_rejected_part() -> None:
+    phases: list[str] = []
+
+    async def synthesis(body: dict[str, Any]) -> dict[str, Any]:
+        phases.append(body["phase"])
+        if body["phase"] == "group" and phases.count("group") <= 2:
+            raise ValueError("cloud_teaching_contract_invalid")
+        return {"prose": "合格的讲解内容", "provider": "kuafushe:test@cloud"}
+
+    result = await compile_course({
+        "segments": [{"id": "p1", "text": "Synthetic lesson paragraph"}],
+        "target_language": "zh-CN",
+    }, synthesis)
+    assert phases == ["group", "group", "group", "course"]
+    assert result["evidence_segment_ids"] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_contract_retry_is_bounded_and_other_errors_fail_fast() -> None:
+    attempts = 0
+
+    async def rejected(_body: dict[str, Any]) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        raise ValueError("cloud_teaching_contract_invalid")
+
+    request = {"segments": [{"id": "p1", "text": "Synthetic lesson paragraph"}],
+               "target_language": "zh-CN"}
+    with pytest.raises(ValueError, match="cloud_teaching_contract_invalid"):
+        await compile_course(request, rejected)
+    assert attempts == 4
+
+    attempts = 0
+
+    async def other_error(_body: dict[str, Any]) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        raise ValueError("course_synthesis_capacity_exceeded")
+
+    with pytest.raises(ValueError, match="course_synthesis_capacity_exceeded"):
+        await compile_course(request, other_error)
+    assert attempts == 1

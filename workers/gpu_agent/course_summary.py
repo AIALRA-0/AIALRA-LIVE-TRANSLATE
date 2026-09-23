@@ -35,8 +35,19 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
 
     async def synthesize(text: str, phase: str = "course") -> str:
         nonlocal provider
-        result = await call({"phase": phase, "text": text,
-                             "target_language": model_input["target_language"]})
+        body = {"phase": phase, "text": text,
+                "target_language": model_input["target_language"]}
+        # Long courses contain many independent cloud parts. A rejected DS
+        # response should retry this bounded part, not discard earlier parts
+        # and start the entire course again. Each call already tries both DS
+        # routes; other failures remain visible to the normal job retry path.
+        for attempt in range(4):
+            try:
+                result = await call(body)
+                break
+            except ValueError as error:
+                if str(error) != "cloud_teaching_contract_invalid" or attempt == 3:
+                    raise
         observed, prose = result.get("provider"), result.get("prose")
         if (not valid_provider(observed) or (provider and provider != observed)
                 or not isinstance(prose, str) or not prose.strip()):
