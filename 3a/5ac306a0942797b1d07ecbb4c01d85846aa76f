@@ -1,0 +1,26 @@
+tools/diagnose_cloud_teaching.py
+  s_4d8bb530e409af::t_7c17cab927b17c 12,29-32,41-43,49-51
+  s_4d8bb530e409af::t_6a88b0cd12a3b2 18-28,33-40,44-48,52-63,68
+workers/gpu_agent/test_kuafushe.py
+  s_4d8bb530e409af::t_ca0a568f53e636 166-167
+docs/BROWSER_RELEASE_7653651.md
+  s_4d8bb530e409af::t_18cf9c240c02e7 3-4
+workers/gpu_agent/kuafushe.py
+  s_4d8bb530e409af::t_1ef7b05b100723 239-241
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3a5ac306a0942797b1d07ecbb4c01d85846aa76f",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
