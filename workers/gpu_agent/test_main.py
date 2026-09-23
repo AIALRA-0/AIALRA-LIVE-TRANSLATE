@@ -303,8 +303,82 @@ def test_latency_sensitive_model_jobs_have_independent_lanes() -> None:
     assert capabilities["asr"] == ("asr",)
     assert capabilities["translate"] == ("translate",)
     assert capabilities["explain"] == ("topic", "explain", "asset_parse", "course_qa")
-    assert capabilities["summary"] == ("summarize",)
-    assert set(capabilities["explain"]).isdisjoint(capabilities["summary"])
+    summary_lanes = [lane for lane in LANES if lane.capabilities == ("summarize",)]
+    assert len(summary_lanes) == 2
+    assert len({lane.worker_id for lane in summary_lanes}) == 2
+    assert set(capabilities["explain"]).isdisjoint(summary_lanes[0].capabilities)
+
+
+def test_summary_lanes_pick_up_jobs_concurrently(monkeypatch) -> None:
+    import workers.gpu_agent.main as gpu_main
+
+    summary_lanes = [lane for lane in LANES if lane.capabilities == ("summarize",)]
+    assert len(summary_lanes) == 2
+    executing_workers: set[str] = set()
+    both_executing = asyncio.Event()
+    claim_counts: dict[str, int] = {}
+
+    async def execute(
+        gateway: httpx.AsyncClient,
+        model: httpx.AsyncClient,
+        job: dict[str, object],
+        scheduler: GpuScheduler,
+        worker_id: str,
+        timings: dict[str, int] | None = None,
+        broker: object | None = None,
+    ) -> dict[str, object]:
+        executing_workers.add(worker_id)
+        if len(executing_workers) == 2:
+            both_executing.set()
+        await asyncio.wait_for(both_executing.wait(), timeout=2)
+        return {"provider": "test@cpu"}
+
+    async def report_stage(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def complete_job(*args: object, **kwargs: object) -> bool:
+        return True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/lease"):
+            worker_id = json.loads(request.content)["worker_id"]
+            claim_counts[worker_id] = claim_counts.get(worker_id, 0) + 1
+            if claim_counts[worker_id] > 1:
+                raise asyncio.CancelledError
+            return httpx.Response(200, json={
+                "job": {
+                    "id": f"job_for_{worker_id}",
+                    "job_type": "summarize",
+                    "input": {},
+                    "idempotency_key": f"key_for_{worker_id}",
+                },
+            })
+        raise AssertionError(f"Unexpected gateway request: {request.url.path}")
+
+    monkeypatch.setattr(gpu_main, "execute_job", execute)
+    if hasattr(gpu_main, "execute_admitted_job"):
+        monkeypatch.setattr(gpu_main, "execute_admitted_job", execute)
+    monkeypatch.setattr(gpu_main, "report_stage", report_stage)
+    monkeypatch.setattr(gpu_main, "complete_job", complete_job)
+
+    async def scenario() -> None:
+        active = {lane.suffix: None for lane in summary_lanes}
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as gateway:
+            async with httpx.AsyncClient() as model:
+                tasks = [
+                    asyncio.create_task(gpu_main.lane_loop(
+                        gateway, model, lane, active,
+                        GpuScheduler(asr_uses_gpu=False),
+                    ))
+                    for lane in summary_lanes
+                ]
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
+
+    asyncio.run(scenario())
+    assert executing_workers == {lane.worker_id for lane in summary_lanes}
+    assert set(claim_counts) == executing_workers
+    assert all(count == 2 for count in claim_counts.values())
 
 
 def test_topic_job_uses_background_endpoint_and_preserves_source_payload() -> None:

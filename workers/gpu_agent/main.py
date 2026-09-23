@@ -80,7 +80,10 @@ LANES = (
     # separate so a newly spoken topic or follow-up can be processed now.
     # Local inference still passes through GpuScheduler for VRAM admission.
     Lane("explain", ("topic", "explain", "asset_parse", "course_qa")),
+    # A second summary lease lets fresh lessons start during a long backfill;
+    # Core's atomic leases ensure both workers cannot claim the same job.
     Lane("summary", ("summarize",)),
+    Lane("summary-2", ("summarize",)),
 )
 
 
