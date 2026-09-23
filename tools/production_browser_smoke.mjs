@@ -27,6 +27,7 @@ let context;
 let apiContext;
 let blockedWriteRequests = 0;
 let watchdog;
+let step = "configuration";
 
 const metrics = {
   audio_duration_s: 0,
@@ -118,7 +119,9 @@ async function run() {
   const selectedSession = Array.isArray(sessions)
     ? sessions.find((item) => item && item.id === sessionId)
     : undefined;
-  assert(selectedSession?.state === "completed", failureCodes.course);
+  // A resumed course can retain a "recording" state after its lease expires;
+  // saved audio remains seekable and this probe sends no write requests.
+  assert(selectedSession && ["completed", "recording", "ready", "degraded", "failed"].includes(selectedSession.state), failureCodes.course);
 
   stage = failureCodes.audioIndex;
   const audioIndex = await readJson(await apiContext.get(`${origin}/api/v1/sessions/${sessionId}/audio/index`));
@@ -138,6 +141,7 @@ async function run() {
   metrics.content_range_present = 1;
 
   stage = failureCodes.browser;
+  step = "browser_launch";
   browser = await chromium.launch({
     channel: process.env.AIALRA_BROWSER_CHANNEL || "msedge",
     headless: true,
@@ -173,14 +177,17 @@ async function run() {
   });
 
   const page = await context.newPage();
+  step = "page_navigation";
   await page.goto(
     `${origin}/app/projects/${projectId}/sessions/${sessionId}/notes/transcript`,
     { waitUntil: "domcontentloaded" },
   );
   const slider = page.getByRole("slider", { name: "回放位置" });
   const audio = page.locator('audio[aria-label="课程录音"]');
+  step = "playback_controls";
   await slider.waitFor({ state: "visible" });
   await audio.waitFor({ state: "attached" });
+  step = "audio_metadata";
   await page.waitForFunction(() => {
     const media = document.querySelector('audio[aria-label="课程录音"]');
     return media instanceof HTMLAudioElement
@@ -193,6 +200,7 @@ async function run() {
   assert(Number.isFinite(sliderMaximum) && Math.abs(sliderMaximum - durationSeconds) <= 0.2, failureCodes.audioIndex);
 
   stage = failureCodes.seek;
+  step = "seek";
   const seekTo = async (targetSeconds) => {
     await slider.evaluate((element, target) => {
       const input = element;
@@ -242,6 +250,7 @@ async function run() {
   for (const target of [0, 15, 30]) await seekTo(target);
 
   stage = failureCodes.layout;
+  step = "layout";
   for (const width of [1440, 870, 390]) {
     const height = width === 390 ? 844 : 870;
     await page.setViewportSize({ width, height });
@@ -292,7 +301,7 @@ try {
   const failureCode = Number.isInteger(requestedCode) && requestedCode > 0
     ? requestedCode
     : stage;
-  process.stdout.write(`${JSON.stringify({ status: "FAIL", failure_code: failureCode })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "FAIL", failure_code: failureCode, failure_step: step })}\n`);
   process.exitCode = 1;
 } finally {
   await cleanup();
