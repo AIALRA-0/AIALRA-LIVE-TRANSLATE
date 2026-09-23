@@ -1,0 +1,24 @@
+workers/model_worker/test_teaching.py
+  s_4d8bb530e409af::t_2c7fb3f80cb6f0 90-92,112-114
+  s_4d8bb530e409af::t_d2d8afec3fd79e 85-86,95-99,108-109,119-120
+workers/gpu_agent/test_kuafushe.py
+  s_4d8bb530e409af::t_d2d8afec3fd79e 476-478
+workers/model_worker/teaching.py
+  s_4d8bb530e409af::t_d2d8afec3fd79e 179-180,347-349,360-361,374,457-459
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "de81d0ca13a4f0f5a14ee7cc7ff265f46b51794a",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
