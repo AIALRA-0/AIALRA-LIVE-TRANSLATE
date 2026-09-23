@@ -1,4 +1,4 @@
-"""A course summary preserves all source groups, including its middle."""
+"""A course summary preserves lecture groups without promoting unused materials."""
 
 from typing import Any
 
@@ -26,14 +26,39 @@ async def test_complete_summary_reuses_groups_and_backfills_only_uncovered_sourc
     source_calls = [body["text"] for body in calls if body["phase"] == "group"]
     assert 1 < len(source_calls) < 99
     assert "\n\n".join(source_calls) == "\n\n".join(
-        [item["text"] for item in segments[2:]] + ["Synthetic material"],
+        [item["text"] for item in segments[2:]],
     )
     assert any(body["phase"] == "course" for body in calls)
     assert any("Synthetic paragraph 49" in note for note in result["key_points"])
     assert any("Synthetic paragraph 99" in note for note in result["key_points"])
     assert result["evidence_segment_ids"] == [f"p{i}" for i in range(100)]
-    assert result["asset_page_ids"] == ["page"]
+    assert result["asset_page_ids"] == []
     assert result["provider"] == "ollama:test@cuda"
+
+
+@pytest.mark.asyncio
+async def test_only_material_cited_by_a_verified_group_reaches_course_summary() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def synthesis(body: dict[str, Any]) -> dict[str, Any]:
+        calls.append(body)
+        return {"prose": "课程要点", "provider": "kuafushe:synthetic@cloud"}
+
+    result = await compile_course({
+        "segments": [{"id": "p1", "text": "Lecture paragraph"}],
+        "asset_pages": [
+            {"id": "used", "text": "Relevant material"},
+            {"id": "unused", "text": "Unrelated appendix"},
+        ],
+        "complete_groups": [{"coverage_contract": "all_sources_v1", "result": {
+            "paragraph_summary": "Verified teaching note",
+            "terms": [], "evidence_segment_ids": ["p1"], "asset_page_ids": ["used"],
+        }}],
+        "target_language": "zh-CN",
+    }, synthesis)
+    assert [body["phase"] for body in calls] == ["course"]
+    assert calls[0]["text"] == "Verified teaching note"
+    assert result["asset_page_ids"] == ["used"]
 
 
 @pytest.mark.asyncio
@@ -113,3 +138,25 @@ async def test_summary_rejects_provider_switch_midcourse() -> None:
             "segments": [{"id": "p1", "text": "Synthetic lesson paragraph"}],
             "target_language": "zh-CN",
         }, synthesis)
+
+
+@pytest.mark.asyncio
+async def test_long_course_reduces_utf8_bytes_without_dropping_chapters() -> None:
+    phases: list[str] = []
+
+    async def synthesis(body: dict[str, Any]) -> dict[str, Any]:
+        phases.append(body["phase"])
+        text = "概念关系" * (200 if body["phase"] != "course_reduce" else 75)
+        return {"prose": text, "provider": "ollama:test@cuda"}
+
+    segments = [
+        {"id": f"p{index}", "text": f"Concept {index}: " + "connected facts. " * 18}
+        for index in range(283)
+    ]
+    result = await compile_course({
+        "segments": segments, "target_language": "zh-CN",
+    }, synthesis)
+    assert "course_reduce" in phases
+    assert result["evidence_segment_ids"] == [item["id"] for item in segments]
+    assert len(result["key_points"]) > 1
+    assert result["overview"]

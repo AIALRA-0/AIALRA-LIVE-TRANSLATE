@@ -326,22 +326,32 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                 context.append(neighbour)
                 capacity -= size
         material_references: list[str] = []
+        material_page_ids: list[str] = []
         for page in pages:
             size = len(page["text"].encode())
             if size <= capacity and len(material_references) < 4:
                 material_references.append(page["text"])
+                material_page_ids.append(page["id"])
                 capacity -= size
-                if page["id"] not in cited_page_ids:
-                    cited_page_ids.append(page["id"])
         body = {"phase": "prose", "text": piece, "context": context,
                 "material_references": material_references,
                 "target_language": target}
         result = await generate(body)
         paragraph = result.get("prose")
         terms = result.get("original_terms")
+        used_material = result.get("used_material_indices", [])
         if (not isinstance(paragraph, str) or not paragraph.strip()
                 or not isinstance(terms, list)):
             raise ValueError("teaching_part_invalid")
+        if (not isinstance(used_material, list)
+                or any(type(item) is not int or not 0 <= item < len(material_page_ids)
+                       for item in used_material)
+                or len(used_material) != len(set(used_material))):
+            raise ValueError("teaching_material_reference_invalid")
+        for material_index in used_material:
+            page_id = material_page_ids[material_index]
+            if page_id not in cited_page_ids:
+                cited_page_ids.append(page_id)
         prose.append(paragraph.strip())
         for term in terms:
             if not isinstance(term, str) or not contains_term(term, piece):

@@ -69,6 +69,27 @@ def test_definition_requires_exact_source_and_bounded_context() -> None:
     bound = bound_inventory(raw, request)
     assert bound == {"prose": "锁存器", "original_terms": ["latch"]}
     assert raw["original_terms"] == ["Latch", "latch", "memory bank"]
+    with_material = TeachingPartRequest(
+        phase="prose", text="A latch.", material_references=["Supplementary note"],
+        target_language="zh-CN",
+    )
+    assert not valid_part({"prose": "锁存器", "original_terms": []}, with_material)
+    assert not valid_part({"prose": "锁存器", "original_terms": [],
+                           "used_material_indices": [1]}, with_material)
+    assert valid_part({"prose": "锁存器", "original_terms": [],
+                       "used_material_indices": []}, with_material)
+
+
+def test_course_reduction_requires_a_real_byte_shrink() -> None:
+    request = TeachingPartRequest(
+        phase="course_reduce", text="Synthetic chapter notes", target_language="zh-CN",
+    )
+    assert valid_part({
+        "prose": "故障模型限定可检查的对象；测试向量激励电路并观察输出；"
+                 "通过测试不等于排除全部物理缺陷。",
+        "original_terms": [],
+    }, request)
+    assert not valid_part({"prose": "概念关系" * 130, "original_terms": []}, request)
 
 
 def test_batched_definitions_preserve_source_order_and_full_contract() -> None:
@@ -237,7 +258,9 @@ async def test_material_reference_is_separate_from_lecture_source() -> None:
         assert supplied["source"] == "The net connects cells."
         assert supplied["material_references"] == ["A bus may connect several cells."]
         assert "not lecturer speech" in system
-        return {"prose": "线网连接单元", "original_terms": ["net", "bus"]}
+        assert "used_material_indices" in schema["required"]
+        return {"prose": "线网连接单元", "original_terms": ["net", "bus"],
+                "used_material_indices": [0]}
 
     result = await generate_part(TeachingPartRequest(
         phase="prose", text="The net connects cells.",
@@ -246,6 +269,7 @@ async def test_material_reference_is_separate_from_lecture_source() -> None:
     ), infer, "test", "cuda")
     assert result is not None
     assert result.original_terms == ["net"]
+    assert result.used_material_indices == [0]
 
 
 @pytest.mark.asyncio

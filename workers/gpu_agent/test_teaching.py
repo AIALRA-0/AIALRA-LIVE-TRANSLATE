@@ -218,7 +218,8 @@ async def test_card_covers_all_sources_and_defines_repeated_term_only_once() -> 
         if body["phase"] == "group":
             return {"provider": provider, "prose": body["text"]}
         if body["phase"] == "prose":
-            return {"provider": provider, "prose": body["text"], "original_terms": ["latch"]}
+            return {"provider": provider, "prose": body["text"],
+                    "original_terms": ["latch"], "used_material_indices": [0]}
         return {"provider": provider, "term": "锁存器",
                 "definition": COMPLETE_DEFINITION}
 
@@ -402,11 +403,14 @@ async def test_page_supplies_context_without_extra_prose_call() -> None:
         if body["phase"] == "group":
             return {"provider": "ollama:synthetic@cuda", "prose": "组合后的完整说明"}
         return {"provider": "ollama:synthetic@cuda", "prose": "分块说明",
-                "original_terms": []}
+                "original_terms": [], "used_material_indices": [0]}
 
     result = await assemble_explanation({
         "segments": [{"id": "a", "text": "First premise."}],
-        "asset_pages": [{"id": "p", "text": "Supporting page."}],
+        "asset_pages": [
+            {"id": "p", "text": "Supporting page."},
+            {"id": "unrelated", "text": "Unrelated note."},
+        ],
         "target_language": "zh-CN",
     }, call)
     assert phases == ["prose"]
@@ -434,6 +438,7 @@ async def test_optional_cloud_glossary_failure_keeps_verified_teaching() -> None
             "provider": "kuafushe:synthetic@cloud",
             "prose": "主要内容\n- 说明连接关系。\n\n内容讲解\n材料说明了连接路径。\n\n易错点",
             "original_terms": ["net"] if "net" in body["text"] else ["bus"],
+            "used_material_indices": [0],
         }
 
     result = await assemble_explanation({

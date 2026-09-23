@@ -57,6 +57,7 @@ async def diagnose(model_input: dict[str, Any]) -> None:
             "status": "accepted",
             "summary_characters": len(result["paragraph_summary"]),
             "term_count": len(result["terms"]),
+            "cited_material_count": len(result["asset_page_ids"]),
         }))
 
 

@@ -90,17 +90,9 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
             cursor = end
         groups.append(group)
 
+    # The material library supplements a cited teaching group. Unused pages
+    # are not a second lecture and must not become independent course chapters.
     covered_pages = {ref for group in groups for ref in group["asset_page_ids"]}
-    for page in pages:
-        if page["id"] in covered_pages:
-            continue
-        group = {
-            "paragraph_summary": "\n\n".join([
-                await synthesize(batch, "group") for batch in note_batches([page["text"]])
-            ]),
-            "terms": [], "asset_page_ids": [page["id"]], "evidence_segment_ids": [],
-        }
-        groups.append(group)
     expected_ids = [source["id"] for source in segments]
     if [ref for group in groups for ref in group["evidence_segment_ids"]] != expected_ids:
         raise ValueError("summary_source_coverage_invalid")
@@ -130,11 +122,17 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
     else:
         chapters = [await synthesize(batch) for batch in batches]
         remaining = chapters
-        for _ in range(4):
+        # Chinese character limits do not imply a shrinking UTF-8 byte budget.
+        # Keep reducing the overview until it fits; each accepted pass must
+        # strictly reduce bytes, so the bound derives from the initial chapter count.
+        for _ in range(len(chapters) + 1):
             if len("\n\n".join(remaining).encode()) <= 3500:
                 break
-            next_level = [await synthesize(batch) for batch in note_batches(remaining)]
-            if len(next_level) >= len(remaining):
+            next_level = [
+                await synthesize(batch, "course_reduce")
+                for batch in note_batches(remaining)
+            ]
+            if len("\n\n".join(next_level).encode()) >= len("\n\n".join(remaining).encode()):
                 raise ValueError("course_synthesis_capacity_exceeded")
             remaining = next_level
         else:
@@ -144,6 +142,6 @@ async def compile_course(model_input: dict[str, Any], call: PartCaller) -> dict[
         "overview": overview,
         "key_points": chapters, "terminology": terms, "open_questions": [],
         "evidence_segment_ids": expected_ids,
-        "asset_page_ids": [source["id"] for source in pages],
+        "asset_page_ids": [source["id"] for source in pages if source["id"] in covered_pages],
         "provider": provider,
     }

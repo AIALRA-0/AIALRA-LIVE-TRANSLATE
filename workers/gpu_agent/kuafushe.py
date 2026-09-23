@@ -335,4 +335,6 @@ def normalize_section_envelope(
     return {
         "prose": prose,
         **({"original_terms": value["original_terms"]} if "original_terms" in value else {}),
+        **({"used_material_indices": value["used_material_indices"]}
+           if "used_material_indices" in value else {}),
     }

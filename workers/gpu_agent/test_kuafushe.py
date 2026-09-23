@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from workers.gpu_agent.course_summary import compile_course
-from workers.gpu_agent.kuafushe import KuafuTextClient, Route
+from workers.gpu_agent.kuafushe import KuafuTextClient, Route, normalize_section_envelope
 from workers.gpu_agent.teaching import (
     _complete_misconception_roles,
     assemble_explanation,
@@ -25,6 +25,16 @@ def fixture_routes() -> tuple[Route, Route]:
         Route("synthetic-one", "https://api.kuafushe.cc/v1", "test-ds"),
         Route("synthetic-two", "https://api.kuafushe.cc/v1", "test-ds"),
     )
+
+
+def test_section_envelope_keeps_actual_material_use() -> None:
+    value = {
+        "承上启下": "", "主要内容": ["一项结论"], "内容讲解": "完整讲解",
+        "易错点": "", "original_terms": [], "used_material_indices": [0],
+    }
+    normalized = normalize_section_envelope(value, {"properties": {"prose": {}}})
+    assert normalized["used_material_indices"] == [0]
+    assert "内容讲解" in normalized["prose"]
 
 
 @pytest.mark.asyncio
@@ -291,6 +301,30 @@ async def test_live_synthetic_teaching_flow_when_requested() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_synthetic_material_is_cited_only_when_used() -> None:
+    if os.getenv("AIALRA_RUN_LIVE_PROVIDER_TEST") != "1":
+        pytest.skip("live provider probe requires explicit opt-in")
+    source = (
+        "The signal SEL determines which input reaches the output of a two-input selector. "
+        "A reference sheet gives the mapping for this course example. Compare the two "
+        "SEL settings; the spoken passage does not state which input each value selects."
+    )
+    reference = (
+        "For this course example only, SEL=0 selects input A and SEL=1 selects input B. "
+        "This convention is not asserted for every selector."
+    )
+    async with httpx.AsyncClient() as http:
+        cloud = KuafuTextClient(http)
+        assert cloud.available
+        result = await cloud.teaching_part({
+            "phase": "prose", "text": source,
+            "material_references": [reference], "target_language": "zh-CN",
+        })
+    assert result["used_material_indices"] == [0]
+    assert "A" in result["prose"] and "B" in result["prose"]
+
+
+@pytest.mark.asyncio
 async def test_live_synthetic_course_summary_when_requested() -> None:
     if os.getenv("AIALRA_RUN_LIVE_PROVIDER_TEST") != "1":
         pytest.skip("live provider probe requires explicit opt-in")
@@ -317,6 +351,31 @@ async def test_live_synthetic_course_summary_when_requested() -> None:
     assert result["provider"].startswith("kuafushe:")
     assert result["evidence_segment_ids"] == ["synthetic-p1"]
     assert result["overview"].strip()
+
+
+@pytest.mark.asyncio
+async def test_live_course_reduction_fits_byte_budget_when_requested() -> None:
+    if os.getenv("AIALRA_RUN_LIVE_PROVIDER_TEST") != "1":
+        pytest.skip("live provider probe requires explicit opt-in")
+    notes = "\n\n".join([
+        "A stuck-at fault model assumes a signal remains zero or one; test vectors can "
+        "expose only faults represented by the model.",
+        "An observed output mismatch can identify a modeled fault, but a passing vector "
+        "does not prove that no physical defect exists.",
+        "Coverage depends on the selected fault list, the generated vector set, and "
+        "whether the response was actually observed.",
+        "A simulation can check the logical expectation before a hardware test, yet "
+        "simulation speed does not measure physical chip operating speed.",
+    ])
+    async with httpx.AsyncClient() as http:
+        cloud = KuafuTextClient(http)
+        assert cloud.available
+        result = await cloud.teaching_part({
+            "phase": "course_reduce", "text": notes, "target_language": "zh-CN",
+        })
+    assert len(result["prose"].encode()) <= 1600
+    assert len(result["prose"]) <= 500
+    assert not repetition_collapse(result["prose"])
 
 
 @pytest.mark.asyncio
