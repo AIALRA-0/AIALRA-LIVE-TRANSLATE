@@ -1026,6 +1026,21 @@ fn apply_summary_result(
         .flatten()
         .filter_map(|item| item.get("id").and_then(Value::as_str))
         .collect::<std::collections::HashSet<_>>();
+    let cited_group_pages = job
+        .input
+        .get("complete_groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|group| group["coverage_contract"] == "all_sources_v1")
+        .flat_map(|group| {
+            group["result"]["asset_page_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect::<HashSet<_>>();
     if summary
         .evidence_segment_ids
         .iter()
@@ -1046,12 +1061,20 @@ fn apply_summary_result(
             .map(String::as_str)
             .collect::<HashSet<_>>()
             != allowed_segments
+            || summary.asset_page_ids.len()
+                != summary
+                    .asset_page_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>()
+                    .len()
+            || !cited_group_pages.is_subset(&allowed_pages)
             || summary
                 .asset_page_ids
                 .iter()
                 .map(String::as_str)
                 .collect::<HashSet<_>>()
-                != allowed_pages)
+                != cited_group_pages)
     {
         return Err(ApiError::bad_request(
             "summary source coverage is incomplete",
@@ -2258,7 +2281,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_retains_every_paragraph_and_page_and_rejects_missing_coverage() {
+    fn summary_retains_every_paragraph_and_only_cites_pages_used_by_complete_groups() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::open(temp.path()).unwrap();
         state
@@ -2296,12 +2319,90 @@ mod tests {
         assert_eq!(job.input["summary_contract"], "complete_groups_v1");
         let mut result = json!({"overview": "Complete course", "key_points": [], "terminology": [],
             "open_questions": [], "evidence_segment_ids": (0..100).map(|i| format!("p{i}")).collect::<Vec<_>>(),
-            "asset_page_ids": (0..30).map(|i| format!("page{i}")).collect::<Vec<_>>(),
+            "asset_page_ids": [],
             "provider": "compiled:content-groups-v1@cpu"});
         let all_ids = result["evidence_segment_ids"].clone();
         result["evidence_segment_ids"] = json!(["p0"]);
         assert!(super::apply_summary_result(&state, &job, &result, 1).is_err());
         result["evidence_segment_ids"] = all_ids;
+        result["asset_page_ids"] = json!(["page0"]);
+        assert!(super::apply_summary_result(&state, &job, &result, 1).is_err());
+        result["asset_page_ids"] = json!([]);
+        super::apply_summary_result(&state, &job, &result, 1).unwrap();
+    }
+
+    #[test]
+    fn summary_page_references_match_the_union_cited_by_complete_groups() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "summary-page-citations".to_owned(),
+                title: "Synthetic summary".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        state
+            .emit(
+                "summary-page-citations",
+                "test",
+                "paragraph.finalized",
+                1,
+                "test",
+                None,
+                json!({"paragraph_id": "p1", "text": "Synthetic paragraph"}),
+            )
+            .unwrap();
+        for (index, page_id) in ["page-used", "page-unused"].into_iter().enumerate() {
+            state
+                .emit(
+                    "summary-page-citations",
+                    "test",
+                    "asset.page.extracted",
+                    index as u64 + 2,
+                    "test",
+                    None,
+                    json!({"page_id": page_id, "text": "Synthetic material"}),
+                )
+                .unwrap();
+        }
+        state
+            .emit(
+                "summary-page-citations",
+                "test",
+                "explanation.card.created",
+                4,
+                "test",
+                None,
+                json!({"coverage_contract": "all_sources_v1", "result": {
+                    "paragraph_summary": "Synthetic explanation",
+                    "terms": [],
+                    "evidence_segment_ids": ["p1"],
+                    "asset_page_ids": ["page-used"]
+                }}),
+            )
+            .unwrap();
+
+        let job = enqueue_summary(&state, "summary-page-citations", "stop").unwrap();
+        assert_eq!(job.input["asset_pages"].as_array().unwrap().len(), 2);
+        assert_eq!(job.input["complete_groups"].as_array().unwrap().len(), 1);
+
+        let mut result = json!({"overview": "Complete course", "key_points": [], "terminology": [],
+            "open_questions": [], "evidence_segment_ids": ["p1"],
+            "asset_page_ids": ["page-used"],
+            "provider": "compiled:content-groups-v1@cpu"});
+        result["asset_page_ids"] = json!(["page-unknown"]);
+        assert!(super::apply_summary_result(&state, &job, &result, 1).is_err());
+        result["asset_page_ids"] = json!(["page-unused"]);
+        assert!(super::apply_summary_result(&state, &job, &result, 1).is_err());
+        result["asset_page_ids"] = json!(["page-used", "page-used"]);
+        assert!(super::apply_summary_result(&state, &job, &result, 1).is_err());
+        result["asset_page_ids"] = json!(["page-used"]);
         super::apply_summary_result(&state, &job, &result, 1).unwrap();
     }
 
