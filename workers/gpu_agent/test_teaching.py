@@ -453,6 +453,31 @@ async def test_optional_cloud_glossary_failure_keeps_verified_teaching() -> None
 
 
 @pytest.mark.asyncio
+async def test_cloud_glossary_caps_optional_batches_without_per_term_retry() -> None:
+    phases: list[str] = []
+
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        phases.append(body["phase"])
+        if body["phase"] == "definitions":
+            raise ValueError("cloud_teaching_contract_invalid")
+        assert body["phase"] == "prose"
+        return {
+            "provider": "kuafushe:synthetic@cloud",
+            "prose": "主要内容\n- 解释连接。\n\n内容讲解\n这些名称指向不同连接。\n\n易错点：无",
+            "original_terms": ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"],
+            "used_material_indices": [],
+        }
+
+    result = await assemble_explanation({
+        "segments": [{"id": "segment", "text": "alpha beta gamma delta epsilon zeta"}],
+        "target_language": "zh-CN",
+    }, call)
+    assert phases == ["prose", "definitions", "definitions"]
+    assert result["terms"] == []
+    assert result["evidence_segment_ids"] == ["segment"]
+
+
+@pytest.mark.asyncio
 async def test_two_complete_drafts_above_old_byte_limit_are_still_synthesized() -> None:
     phases: list[str] = []
     synthesis_bytes = 0

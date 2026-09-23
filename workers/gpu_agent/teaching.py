@@ -13,6 +13,7 @@ from workers.model_worker.terminology import matching_technical_terms
 PartCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 MAX_GROUP_TERMS = 8
 MAX_DEFINITION_BATCH = 2
+MAX_CLOUD_DEFINITION_TERMS = 4
 MAX_SOURCE_CHUNK_BYTES = 2800
 MAX_SYNTHESIS_INPUT_BYTES = 6200
 
@@ -440,6 +441,16 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
         else:
             unresolved.append(term_source)
 
+    # A cloud glossary is supplementary to a complete, checked explanation.
+    # On real retained courses the old batch -> per-term retry tree could spend
+    # tens of minutes on terms after the prose was already ready. Keep reviewed
+    # entries and make at most two bounded cloud batches for the most relevant
+    # source-attested terms; omit malformed optional entries instead of retrying
+    # the same failing terms one by one.
+    cloud_glossary = provider.startswith("kuafushe:")
+    if cloud_glossary:
+        unresolved = unresolved[:MAX_CLOUD_DEFINITION_TERMS]
+
     while unresolved:
         first = unresolved.pop(0)
         batch = [first]
@@ -472,6 +483,8 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
             except (RuntimeError, ValueError) as error:
                 if not optional_definition_failure(error):
                     raise
+                if cloud_glossary:
+                    continue
                 for term_source in batch:
                     try:
                         fallback = await generate({
