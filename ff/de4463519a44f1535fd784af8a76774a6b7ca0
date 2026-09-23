@@ -1,0 +1,31 @@
+workers/gpu_agent/course_summary.py
+  s_4d8bb530e409af::t_8e3ae3a9cc6d71 7-14,90,95-101,108-119,121,125,128,160-161,163
+workers/gpu_agent/test_course_summary.py
+  s_4d8bb530e409af::t_c274642b3c6117 200-201
+  s_4d8bb530e409af::t_9291435311dbed 193-199,202-242
+  s_f4bc084e1b5e1b::t_941852b3b56ba0 192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ffde4463519a44f1535fd784af8a76774a6b7ca0",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_f4bc084e1b5e1b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05e85-d752-7582-abf7-4d4f5901369e",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
