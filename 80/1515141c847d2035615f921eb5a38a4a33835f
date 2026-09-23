@@ -1,0 +1,30 @@
+crates/core-server/src/course_content.rs
+  s_4d8bb530e409af::t_7e1576146a9e26 735-742,1459-1462
+  s_4d8bb530e409af::t_6faf744a1dbdc6 697,733-734,746-760
+  s_4d8bb530e409af::t_1eb992ce73b96b 1431,1437-1438,1445-1458,1463-1467
+  s_9f7652456e8616::t_dd0aba82f82e61 1468
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "801515141c847d2035615f921eb5a38a4a33835f",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_9f7652456e8616": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03a0f-6460-7b73-bec4-9acbdcd78a39",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
