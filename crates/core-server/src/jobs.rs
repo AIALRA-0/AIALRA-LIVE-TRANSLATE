@@ -840,6 +840,11 @@ fn apply_explanation_result(
         .flatten()
         .filter_map(|item| item.get("id").and_then(Value::as_str))
         .collect::<std::collections::HashSet<_>>();
+    let cited_pages = explanation
+        .asset_page_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     if explanation
         .evidence_segment_ids
         .iter()
@@ -860,12 +865,7 @@ fn apply_explanation_result(
             .map(String::as_str)
             .collect::<HashSet<_>>()
             != allowed_segments
-            || explanation
-                .asset_page_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<HashSet<_>>()
-                != allowed_pages)
+            || cited_pages.len() != explanation.asset_page_ids.len())
     {
         return Err(ApiError::bad_request(
             "explanation source coverage is incomplete",
@@ -2244,6 +2244,54 @@ mod tests {
             super::require_teaching_provider(&state, &job, "kuafushe:deepseek-chat@cloud",)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn explanation_cites_only_material_actually_used_by_the_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "explanation-materials".into(),
+                title: "Synthetic session".into(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                privacy_mode: "local_only".into(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        let job = state
+            .store
+            .enqueue_model_job(&NewModelJob {
+                id: "explanation-materials-job".into(),
+                session_id: "explanation-materials".into(),
+                job_type: "explain".into(),
+                priority: 30,
+                input: json!({
+                    "coverage_contract": "all_sources_v1",
+                    "segments": [{"id": "p1", "text": "Synthetic course concept"}],
+                    "asset_pages": [{"id": "page-used"}, {"id": "page-unused"}],
+                    "target_language": "zh-CN"
+                }),
+                input_object_hash: None,
+                idempotency_key: "explanation-materials-job".into(),
+            })
+            .unwrap();
+        let mut result = json!({
+            "paragraph_summary": "这个概念说明输入如何改变输出，并指出适用条件来自课程证据",
+            "terms": [],
+            "evidence_segment_ids": ["p1"],
+            "asset_page_ids": ["page-used"],
+            "provider": "ollama:test@cuda"
+        });
+        result["asset_page_ids"] = json!(["page-unknown"]);
+        assert!(super::apply_explanation_result(&state, &job, &result, 1).is_err());
+        result["asset_page_ids"] = json!(["page-used", "page-used"]);
+        assert!(super::apply_explanation_result(&state, &job, &result, 1).is_err());
+        result["asset_page_ids"] = json!(["page-used"]);
+        super::apply_explanation_result(&state, &job, &result, 1).unwrap();
     }
 
     #[test]

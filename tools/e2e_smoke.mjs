@@ -45,6 +45,11 @@ async function waitForEvents(sessionId, predicate, timeoutMs = 300_000) {
   while (Date.now() - startedAt < timeoutMs) {
     const events = await checked(fetch(`${API}/sessions/${sessionId}/events`));
     if (predicate(events)) return events;
+    const failed = events.find((item) => item.event_type === "model.job.failed");
+    if (failed) {
+      const kind = String(failed.payload?.error_kind || "unknown").replace(/[^a-z0-9_-]/gi, "");
+      throw new Error(`terminal model job failed (${kind})`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 2_000));
   }
   throw new Error(`model events did not satisfy the condition within ${timeoutMs} ms`);
