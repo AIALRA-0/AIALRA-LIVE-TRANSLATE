@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -29,6 +30,38 @@ class Route:
     base_url: str
     model: str
     transport: str = "responses"
+
+
+def valid_question_answer_format(answer: str, language: str) -> bool:
+    text = answer.strip()
+    if not text or len(text) > 1200:
+        return False
+    labels = "直接回答|依据|适用边界|Direct answer|Evidence|Limits"
+    paragraphs = [
+        part.strip()
+        for part in re.split(
+            rf"\n\s*\n|\n(?=(?:{labels})[：:])", text, flags=re.IGNORECASE,
+        )
+        if part.strip()
+    ]
+    expected = (
+        ("直接回答", "依据", "适用边界")
+        if language.casefold().startswith("zh")
+        else ("Direct answer", "Evidence", "Limits")
+    )
+    if len(paragraphs) != len(expected):
+        return False
+    for paragraph, expected_label in zip(paragraphs, expected, strict=True):
+        match = re.fullmatch(
+            rf"({labels})[：:]\s*([\s\S]*)", paragraph, flags=re.IGNORECASE,
+        )
+        if (
+            match is None
+            or match.group(1).casefold() != expected_label.casefold()
+            or not match.group(2).strip()
+        ):
+            return False
+    return True
 
 
 def configured_routes() -> tuple[Route, ...]:
@@ -239,14 +272,34 @@ class KuafuTextClient:
                             "prose": {**schema["properties"]["prose"], "maxLength": 1200},
                         },
                     }
-                repair_instruction += (
-                    " The four teaching headings are mandatory. In misconceptions, "
-                    "use all four labelled roles with source-supported content. If any "
-                    "role lacks evidence, write exactly 易错点：无 (or Misconceptions: None) "
-                    "instead. Never write a bare warning or partial role. "
-                    "The complete prose, including all headings and sections, must be "
-                    "at most 1,200 Unicode characters."
-                )
+                    repair_instruction += (
+                        " For this repair only, replace the earlier four-heading layout with "
+                        "exactly five CourseOS sections. Make the response concise and "
+                        "source-faithful. Preserve all consequential source "
+                        "facts, relationships, quantities, conditions, negations, uncertainty, "
+                        "and limits; remove repetition without changing meaning, and add no "
+                        "unsupported claims. In prose, use exactly these five standalone "
+                        "CourseOS headings in this order: "
+                        "承上启下、主要内容、专业术语、内容讲解、易错点. "
+                        "Keep each section compact. Under 专业术语, list only source-exact "
+                        "concepts "
+                        "also returned in original_terms; if there are none, write 专业术语：无. "
+                        "Include an 易错点 only when the source supports every role; use all four "
+                        "bold labels 错误理解、错因、正确判断、核对方法 in that order. Otherwise "
+                        "write exactly 易错点：无. Keep the complete prose, including headings, "
+                        "at most 850 Unicode characters and 2,550 UTF-8 bytes. Return the same "
+                        "required JSON fields and keep the headings inside prose."
+                    )
+                    options["retry_max_tokens"] = 700
+                else:
+                    repair_instruction += (
+                        " The four teaching headings are mandatory. In misconceptions, "
+                        "use all four labelled roles with source-supported content. If any "
+                        "role lacks evidence, write exactly 易错点：无 (or Misconceptions: None) "
+                        "instead. Never write a bare warning or partial role. "
+                        "The complete prose, including all headings and sections, must be "
+                        "at most 1,200 Unicode characters."
+                    )
             elif request.phase == "course_reduce":
                 repair_instruction += (
                     " Compress only the supplied ordered notes. Preserve their core "
@@ -322,8 +375,28 @@ class KuafuTextClient:
                 and isinstance(cited, list)
                 and all(isinstance(ref, str) and ref in allowed for ref in cited)
                 and bool(cited) == sufficient
+                and (
+                    valid_question_answer_format(value["answer"], language)
+                    if sufficient
+                    else len(value["answer"].strip()) <= 400
+                )
             )
 
+        labels = (
+            "直接回答、依据、适用边界"
+            if language.casefold().startswith("zh")
+            else "Direct answer, Evidence, Limits"
+        )
+        repair_instruction = (
+            "Repair the answer format without changing the evidence decision or inventing "
+            "facts or citations. When sufficient_evidence is true, answer in exactly three "
+            f"plain-text paragraphs with these labels in this exact order: {labels}. "
+            "Each paragraph must start with its literal label followed by a colon (： or :) "
+            "and nonempty text; do not bold, bullet, or otherwise wrap the labels in Markdown. "
+            "Keep the complete answer at or below 1,200 Unicode characters. When "
+            "sufficient_evidence is false, keep a brief plain-text explanation of at most "
+            "400 Unicode characters and cite no IDs."
+        )
         value = await self.infer_json(
             system,
             json.dumps(
@@ -337,6 +410,7 @@ class KuafuTextClient:
             schema,
             max_tokens=900,
             accept=valid,
+            repair_instruction=repair_instruction,
         )
         if value is None:
             raise ValueError("cloud_question_contract_invalid")

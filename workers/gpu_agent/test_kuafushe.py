@@ -9,7 +9,12 @@ import httpx
 import pytest
 
 from workers.gpu_agent.course_summary import compile_course
-from workers.gpu_agent.kuafushe import KuafuTextClient, Route, normalize_section_envelope
+from workers.gpu_agent.kuafushe import (
+    KuafuTextClient,
+    Route,
+    normalize_section_envelope,
+    valid_question_answer_format,
+)
 from workers.gpu_agent.teaching import (
     _complete_misconception_roles,
     assemble_explanation,
@@ -65,6 +70,151 @@ def test_section_envelope_keeps_actual_material_use() -> None:
     normalized = normalize_section_envelope(value, {"properties": {"prose": {}}})
     assert normalized["used_material_indices"] == [0]
     assert "内容讲解" in normalized["prose"]
+
+
+def test_question_answer_format_matches_answer_body_labels_and_limits() -> None:
+    chinese = "直接回答：结论成立\n依据：课程片段给出相应条件\n适用边界：结论只覆盖该条件"
+    english = (
+        "Direct answer: Supported\n\n"
+        "Evidence: The excerpt states the condition.\n\n"
+        "Limits: This applies to that condition."
+    )
+    assert valid_question_answer_format(chinese, "zh-CN")
+    assert valid_question_answer_format(english, "en-US")
+    assert not valid_question_answer_format("只有一个普通回答", "zh-CN")
+    assert not valid_question_answer_format(
+        "**直接回答**：结论成立\n依据：课程给出条件\n适用边界：仅限该条件", "zh-CN",
+    )
+    assert not valid_question_answer_format(
+        "依据：课程给出条件\n直接回答：结论成立\n适用边界：仅限该条件", "zh-CN",
+    )
+    assert not valid_question_answer_format(
+        "直接回答：结论成立\n依据：课程给出条件\n适用边界：" + "界" * 1200,
+        "zh-CN",
+    )
+
+
+@pytest.mark.parametrize(
+    ("language", "malformed", "structured", "repair_labels"),
+    (
+        (
+            "zh-CN",
+            "课程材料给出了结论，但这里没有分节标签。",
+            "直接回答：测试结论受故障模型范围限制\n"
+            "依据：片段说明测试向量只检测模型列出的故障\n"
+            "适用边界：通过测试不能排除模型外的物理缺陷",
+            "直接回答、依据、适用边界",
+        ),
+        (
+            "en-US",
+            "The course passage supports a conclusion but has no section labels.",
+            "Direct answer: The conclusion is limited by the fault model.\n"
+            "Evidence: The excerpt says test vectors check listed faults.\n"
+            "Limits: Passing tests cannot rule out physical defects outside the model.",
+            "Direct answer, Evidence, Limits",
+        ),
+    ),
+)
+@pytest.mark.parametrize("retry_transport", ("responses", "chat"))
+@pytest.mark.asyncio
+async def test_question_answer_repairs_malformed_sufficient_response_on_backup(
+    language: str,
+    malformed: str,
+    structured: str,
+    repair_labels: str,
+    retry_transport: str,
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        instructions, _tokens = route_request_details(request)
+        token = request.headers["authorization"].split()[-1]
+        seen.append((token, instructions))
+        content = json.dumps({
+            "answer": malformed if token == "synthetic-one" else structured,
+            "sufficient_evidence": True,
+            "evidence_segment_ids": ["p1"],
+        }, ensure_ascii=False)
+        if request.url.path.endswith("/responses"):
+            return httpx.Response(200, json={"output_text": content})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await KuafuTextClient(
+            http, fixture_routes(backup_transport=retry_transport),
+        ).answer_question({
+            "question": "What does the course establish?",
+            "segments": [{
+                "id": "p1", "text": "Synthetic evidence supports the stated conclusion.",
+            }],
+            "target_language": language,
+        })
+
+    assert result["answer"] == structured
+    assert result["sufficient_evidence"] is True
+    assert result["evidence_segment_ids"] == ["p1"]
+    assert [token for token, _ in seen] == ["synthetic-one", "synthetic-two"]
+    assert "Repair the answer format" not in seen[0][1]
+    assert "Repair the answer format" in seen[1][1]
+    assert repair_labels in seen[1][1]
+
+
+@pytest.mark.asyncio
+async def test_insufficient_question_evidence_stays_brief_and_uncited() -> None:
+    answer = "课程片段没有说明该映射，因此无法确认。"
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"].split()[-1])
+        return httpx.Response(200, json={"output_text": json.dumps({
+            "answer": answer,
+            "sufficient_evidence": False,
+            "evidence_segment_ids": [],
+        }, ensure_ascii=False)})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await KuafuTextClient(http, fixture_routes()).answer_question({
+            "question": "Which input does the signal select?",
+            "segments": [{"id": "p1", "text": "The excerpt does not state the mapping."}],
+            "target_language": "zh-CN",
+        })
+
+    assert result["answer"] == answer
+    assert result["sufficient_evidence"] is False
+    assert result["evidence_segment_ids"] == []
+    assert seen == ["synthetic-one"]
+
+
+@pytest.mark.asyncio
+async def test_overlong_insufficient_question_answer_retries_brief_without_citations() -> None:
+    answer = "课程片段没有说明该映射，因此无法确认。"
+    overlong = answer * 50
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        instructions, _tokens = route_request_details(request)
+        token = request.headers["authorization"].split()[-1]
+        seen.append((token, instructions))
+        content = json.dumps({
+            "answer": overlong if token == "synthetic-one" else answer,
+            "sufficient_evidence": False,
+            "evidence_segment_ids": [],
+        }, ensure_ascii=False)
+        return httpx.Response(200, json={"output_text": content})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await KuafuTextClient(http, fixture_routes()).answer_question({
+            "question": "Which input does the signal select?",
+            "segments": [{"id": "p1", "text": "The excerpt does not state the mapping."}],
+            "target_language": "zh-CN",
+        })
+
+    assert len(overlong) > 400
+    assert result["answer"] == answer
+    assert result["sufficient_evidence"] is False
+    assert result["evidence_segment_ids"] == []
+    assert [token for token, _ in seen] == ["synthetic-one", "synthetic-two"]
+    assert "400 Unicode characters" in seen[1][1]
 
 
 @pytest.mark.asyncio
@@ -291,6 +441,72 @@ async def test_overlong_complete_card_switches_to_backup() -> None:
         })
     assert result["prose"] == generated_prose(short_card)
     assert seen == ["synthetic-one", "synthetic-two"]
+
+
+@pytest.mark.parametrize("retry_transport", ("responses", "chat"))
+@pytest.mark.asyncio
+async def test_prose_overlength_repair_uses_compact_courseos_prompt_and_token_cap(
+    retry_transport: str,
+) -> None:
+    source = (
+        "A fault model lists the faults that test vectors can expose. "
+        "A passing test does not prove that no physical defects exist. "
+    )
+    source = (source * (2958 // len(source) + 1))[:2958]
+    overlong = "课" * 1745
+    concise = (
+        "承上启下：测试结论受故障模型的覆盖范围约束\n"
+        "主要内容：\n- 测试向量只能检查故障模型中列出的故障\n"
+        "专业术语：故障模型、测试向量\n"
+        "内容讲解：故障模型限定可检验的故障；测试向量把输入模式施加到电路，并将观测输出与预期输出比较。"
+        "输出不一致可提示模型内存在相应故障；测试通过只说明这些向量没有发现模型内故障，"
+        "不能证明模型外不存在物理缺陷。结论仍受故障清单、向量覆盖和输出观察条件限制\n"
+        "易错点：无"
+    )
+    repair_markers = (
+        "For this repair only, replace the earlier four-heading layout with exactly "
+        "five CourseOS sections.",
+        "CourseOS headings in this order: 承上启下、主要内容、专业术语、内容讲解、易错点.",
+        "错误理解、错因、正确判断、核对方法",
+        "850 Unicode characters and 2,550 UTF-8 bytes",
+    )
+    seen: list[tuple[str, str, int, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        instructions, tokens = route_request_details(request)
+        user_payload = (
+            body["input"]
+            if request.url.path.endswith("/responses")
+            else body["messages"][1]["content"]
+        )
+        sent_source = json.loads(user_payload)["source"]
+        token = request.headers["authorization"].split()[-1]
+        seen.append((token, instructions, tokens, sent_source))
+        content = json.dumps({
+            "prose": overlong if token == "synthetic-one" else concise,
+            "original_terms": ["fault model", "test vector"],
+        }, ensure_ascii=False)
+        if request.url.path.endswith("/responses"):
+            return httpx.Response(200, json={"output_text": content})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await KuafuTextClient(
+            http, fixture_routes(backup_transport=retry_transport),
+        ).teaching_part({
+            "phase": "prose", "text": source, "target_language": "zh-CN",
+        })
+
+    assert len(source.encode()) == 2958
+    assert len(overlong) == 1745
+    assert len(concise) <= 850 and len(concise.encode()) <= 2550
+    assert result["prose"] == generated_prose(concise)
+    assert [token for token, _, _, _ in seen] == ["synthetic-one", "synthetic-two"]
+    assert [tokens for _, _, tokens, _ in seen] == [1000, 700]
+    assert [sent_source for _, _, _, sent_source in seen] == [source, source]
+    assert "Repair an overlong response" not in seen[0][1]
+    assert all(marker in seen[1][1] for marker in repair_markers)
 
 
 @pytest.mark.parametrize("retry_transport", ("responses", "chat"))
