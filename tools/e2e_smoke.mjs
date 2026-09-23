@@ -9,6 +9,7 @@ const API = process.env.AIALRA_API_URL || "http://127.0.0.1:8787/api/v1";
 const WS_BASE = process.env.AIALRA_WS_BASE || API.replace(/^http/, "ws").replace(/\/api\/v1$/, "");
 const CLI_ARGS = process.argv.slice(2);
 const RETAINED_RECORDING = CLI_ARGS.includes("--retained-recording");
+const RETAINED_SECONDS = Number(process.env.AIALRA_RETAINED_SECONDS || 20);
 const PREPARE_ONLY = CLI_ARGS.includes("--prepare-only");
 const POSITIONAL_ARGS = CLI_ARGS.filter((argument) => !argument.startsWith("--"));
 const UNKNOWN_OPTIONS = CLI_ARGS.filter((argument) => argument.startsWith("--") &&
@@ -17,6 +18,7 @@ if (CLI_ARGS.includes("--help")) {
   process.stdout.write(
     "Usage: node tools/e2e_smoke.mjs [fixture.pcm] | --retained-recording [--prepare-only]\n" +
     "--retained-recording loads a consented, completed local-only recording window in memory\n" +
+    "AIALRA_RETAINED_SECONDS optionally selects a 20–180 second replay window (default 20)\n" +
     "--prepare-only validates and describes the selected audio without calling services\n" +
     "The E2E replay requires AIALRA_TEST_CLOUD_TEXT=true; the server policy is restricted to text\n",
   );
@@ -28,6 +30,9 @@ if (UNKNOWN_OPTIONS.length > 0 || POSITIONAL_ARGS.length > 1 ||
 }
 if (RETAINED_RECORDING && !PREPARE_ONLY && process.env.AIALRA_TEST_CLOUD_TEXT !== "true") {
   throw new Error("retained recording E2E requires explicit server-side cloud text opt-in");
+}
+if (RETAINED_RECORDING && (!Number.isInteger(RETAINED_SECONDS) || RETAINED_SECONDS < 20 || RETAINED_SECONDS > 180)) {
+  throw new Error("AIALRA_RETAINED_SECONDS must be an integer from 20 through 180");
 }
 const FIXTURE = POSITIONAL_ARGS[0] || "data/test-fixtures/pipeline-lecture.pcm";
 const TEST_SUBJECT = process.env.AIALRA_TEST_SUBJECT || "";
@@ -90,9 +95,9 @@ async function loadRetainedRecording() {
         AND s.privacy_mode = 'local_only'
         AND s.state = 'completed'
       GROUP BY s.id
-      HAVING COUNT(*) >= 20
+      HAVING COUNT(*) >= ?
       ORDER BY chunk_count DESC
-    `).all();
+    `).all(RETAINED_SECONDS);
 
     for (const candidate of candidates) {
       const chunks = database.prepare(`
@@ -145,7 +150,8 @@ async function loadRetainedRecording() {
       stableEventCount = stableTimes.length;
       const testedStarts = new Set();
       for (const event of nearestEvents) {
-        const start = Math.max(0, Math.min(chunks.length - 20, event.center - 10));
+        const start = Math.max(0, Math.min(chunks.length - RETAINED_SECONDS,
+          event.center - Math.floor(RETAINED_SECONDS / 2)));
         if (testedStarts.has(start)) continue;
         testedStarts.add(start);
         selectedWindowStart = start;
@@ -161,9 +167,9 @@ async function loadRetainedRecording() {
     throw new Error("no eligible completed, consented local-only recording with stable ASR timing was found");
   }
 
-  // The closest stable ASR timestamp is centered in a 20-second window.
-  const windowCandidates = sourceChunks.slice(selectedWindowStart, selectedWindowStart + 20);
-  if (windowCandidates.length !== 20) throw new Error("retained recording window is not contiguous");
+  // Center the selected window on an existing stable ASR event.
+  const windowCandidates = sourceChunks.slice(selectedWindowStart, selectedWindowStart + RETAINED_SECONDS);
+  if (windowCandidates.length !== RETAINED_SECONDS) throw new Error("retained recording window is not contiguous");
 
   const buffers = [];
   let hasSignal = false;
@@ -195,7 +201,7 @@ async function loadRetainedRecording() {
     pcm: Buffer.concat(buffers),
     metadata: {
       source: "retained_recording_memory",
-      duration_seconds: 20,
+      duration_seconds: RETAINED_SECONDS,
       sample_rate_hz: 16_000,
       channels: 1,
       encoding: "pcm_s16le",
@@ -248,7 +254,15 @@ async function sendPcm(sessionId, leaseToken, pcm, onAcknowledgement) {
     );
     const acknowledgements = new Set();
     const acknowledgementCommitIds = new Set();
-    const timer = setTimeout(() => reject(new Error("audio ACK timeout")), 60_000);
+    let timer;
+    const armAcknowledgementTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        socket.close();
+        reject(new Error("audio ACK timeout"));
+      }, 60_000);
+    };
+    armAcknowledgementTimeout();
     socket.onopen = () => {
       void (async () => {
         for (const { frame } of chunks) {
@@ -258,11 +272,19 @@ async function sendPcm(sessionId, leaseToken, pcm, onAcknowledgement) {
         }
       })();
     };
-    socket.onerror = () => reject(new Error("audio WebSocket failed"));
+    socket.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error("audio WebSocket failed"));
+    };
     socket.onmessage = (message) => {
       const response = JSON.parse(String(message.data));
-      if (response.type === "audio.error") reject(new Error("audio endpoint rejected frame"));
+      if (response.type === "audio.error") {
+        clearTimeout(timer);
+        socket.close();
+        reject(new Error("audio endpoint rejected frame"));
+      }
       if (response.type !== "audio.ack") return;
+      armAcknowledgementTimeout();
       acknowledgements.add(response.sequence);
       if (typeof response.commit_id === "string" && response.commit_id.length > 0) {
         acknowledgementCommitIds.add(response.sequence);
@@ -347,6 +369,10 @@ function startLeaseRenewal(projectId, sessionId, deviceId, leaseToken) {
 async function runE2e(pcmInput) {
 const startedAt = Date.now();
 let project;
+let session;
+let lease;
+let stopLeaseRenewal;
+let recordingStopped = false;
 let result;
 let archived = false;
 try {
@@ -358,7 +384,7 @@ project = await checked(
   }),
 );
 const deviceId = "smoke-device-0001";
-const session = await checked(fetch(`${API}/projects/${project.id}/sessions`, {
+session = await checked(fetch(`${API}/projects/${project.id}/sessions`, {
   method: "POST", headers: { "content-type": "application/json" },
   body: JSON.stringify({
     title: RETAINED_RECORDING ? "保留录音回放验证" : "端到端合成课程验证",
@@ -374,10 +400,10 @@ if (TEST_CLOUD_TEXT) {
   }));
   if (!policy.cloud_enabled || !policy.route_available) throw new Error("cloud text policy did not become active");
 }
-const lease = await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
+lease = await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }),
 }));
-const stopLeaseRenewal = startLeaseRenewal(project.id, session.id, deviceId, lease.lease_token);
+stopLeaseRenewal = startLeaseRenewal(project.id, session.id, deviceId, lease.lease_token);
 const contention = await fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/acquire`, {
   method: "POST",
   headers: { "content-type": "application/json" },
@@ -403,6 +429,7 @@ const stopRecording = async () => {
   await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId, lease_token: lease.lease_token }),
   }));
+  recordingStopped = true;
 };
 // A short retained sample can have interim text but no sealed segment until
 // stop flushes the ASR window. Do not wait for a finalized segment first.
@@ -486,6 +513,8 @@ result = {
       acknowledgement_commit_ids_valid: acknowledgements.commitIdsValid,
       audio_chunks: count("audio.chunk.received"),
       stable_segments: count("segment.finalized"),
+      finalized_paragraphs: count("paragraph.finalized"),
+      content_groups: count("content.group.created"),
       stable_translations: count("translation.finalized"),
       extracted_pages: count("asset.page.extracted"),
       explanation_cards: count("explanation.card.created"),
@@ -500,6 +529,13 @@ result = {
       ...(pcmInput.metadata ? { audio_input: pcmInput.metadata } : {}),
     };
 } finally {
+  if (lease && !recordingStopped) {
+    if (stopLeaseRenewal) await stopLeaseRenewal().catch(() => undefined);
+    await checked(fetch(`${API}/projects/${project.id}/sessions/${session.id}/recording/stop`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device_id: "smoke-device-0001", lease_token: lease.lease_token }),
+    })).catch(() => undefined);
+  }
   if (project?.id) {
     const archiveRequest = checked(fetch(`${API}/projects/${project.id}/placement`, {
       method: "PATCH",
