@@ -83,7 +83,10 @@ pub fn enqueue_pending(state: &AppState, session_id: &str, force: bool) -> Resul
         .filter_map(|s| s["id"].as_str())
         .collect::<Vec<_>>();
     let key = format!("topic:{session_id}:{force}:{capacity}:{}", ids.join(":"));
-    if state.store.get_model_job_by_key(&key)?.is_some() {
+    if let Some(existing) = state.store.get_model_job_by_key(&key)? {
+        if existing.job_type == "topic" && existing.status == "failed" {
+            return state.store.requeue_failed_topic_by_key(&key);
+        }
         return Ok(false);
     }
     if !force && !capacity {
@@ -395,6 +398,70 @@ mod tests {
                 .queued,
             2
         );
+    }
+
+    #[test]
+    fn failed_topic_window_retries_in_place_and_queued_or_completed_jobs_stay_idempotent() {
+        let (_temp, state) = setup();
+        assert!(enqueue_pending(&state, "session_topic_test", true).unwrap());
+
+        let key = format!(
+            "topic:session_topic_test:true:false:{}",
+            (0..12)
+                .map(|index| format!("para-{index}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        );
+        let original = state.store.get_model_job_by_key(&key).unwrap().unwrap();
+        let leased = state
+            .store
+            .lease_model_job("topic-worker", &["topic".into()], 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(leased.id, original.id);
+        assert_eq!(
+            state
+                .store
+                .retry_or_fail_model_job(&leased.id, "topic-worker", "model_http_error", false, 1)
+                .unwrap()
+                .as_deref(),
+            Some("failed")
+        );
+
+        assert!(enqueue_pending(&state, "session_topic_test", true).unwrap());
+        let retried = state.store.get_model_job_by_key(&key).unwrap().unwrap();
+        assert_eq!(retried.id, original.id);
+        assert_eq!(retried.input, original.input);
+        assert_eq!(retried.status, "queued");
+        assert_eq!(retried.attempts, 0);
+        assert_eq!(retried.last_error_kind, None);
+        assert!(!enqueue_pending(&state, "session_topic_test", true).unwrap());
+        assert_eq!(state.store.model_queue_counts(None).unwrap().queued, 1);
+
+        let leased = state
+            .store
+            .lease_model_job("topic-worker", &["topic".into()], 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!(leased.id, original.id);
+        let result = json!({"boundaries": [], "provider": "ollama:synthetic@cuda"});
+        assert!(
+            state
+                .store
+                .complete_model_job(&leased.id, "topic-worker", &result)
+                .unwrap()
+        );
+        assert!(!enqueue_pending(&state, "session_topic_test", true).unwrap());
+        let completed = state.store.get_model_job_by_key(&key).unwrap().unwrap();
+        assert_eq!(completed.id, original.id);
+        assert_eq!(completed.status, "completed");
+        let counts = state
+            .store
+            .model_queue_counts(Some("session_topic_test"))
+            .unwrap();
+        assert_eq!(counts.queued, 0);
+        assert_eq!(counts.completed, 1);
+        assert_eq!(counts.failed, 0);
     }
 
     #[test]

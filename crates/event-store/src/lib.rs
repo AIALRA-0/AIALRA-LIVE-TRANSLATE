@@ -1894,6 +1894,18 @@ impl EventStore {
         self.get_model_job_by_key(key)
     }
 
+    /// Reopen one failed topic window in place. The status predicate makes
+    /// concurrent ensures idempotent and leaves queued, leased, and completed
+    /// jobs untouched.
+    pub fn requeue_failed_topic_by_key(&self, key: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "UPDATE model_jobs SET status = 'queued', attempts = 0, available_at = ?2, lease_owner = NULL, lease_expires_at = NULL, last_error_kind = NULL, updated_at = ?2, completed_at = NULL WHERE idempotency_key = ?1 AND job_type = 'topic' AND status = 'failed'",
+            params![key, now],
+        )? == 1)
+    }
+
     pub fn requeue_failed_course_question_by_key(
         &self,
         key: &str,
