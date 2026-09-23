@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+import traceback
 from typing import Any
 
 import httpx
@@ -105,15 +106,34 @@ async def diagnose(model_input: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    if os.getenv("AIALRA_RUN_LIVE_PROVIDER_TEST") != "1":
+    coverage_only = os.getenv("AIALRA_DIAGNOSE_COVERAGE_ONLY") == "1"
+    if not coverage_only and os.getenv("AIALRA_RUN_LIVE_PROVIDER_TEST") != "1":
         return 2
     try:
         model_input = json.load(sys.stdin)
         if not isinstance(model_input, dict):
             return 2
-        asyncio.run(diagnose(model_input))
-    except Exception:
+        if coverage_only:
+            async def fixed_part(_body: dict[str, Any]) -> dict[str, Any]:
+                return {"prose": "合成的课程摘要。", "provider": "kuafushe:diagnostic@cloud"}
+
+            result = asyncio.run(compile_course(model_input, fixed_part))
+            _emit({"record_type": "coverage_only", "covered_segment_count":
+                   len(result["evidence_segment_ids"]), "chapter_count": len(result["key_points"])})
+        else:
+            asyncio.run(diagnose(model_input))
+    except Exception as error:
         # Exceptions may contain provider content, request details, or secrets.
+        known = {
+            "cloud_teaching_contract_invalid", "course_synthesis_invalid",
+            "summary_source_coverage_invalid", "course_synthesis_capacity_exceeded",
+        }
+        _emit({"record_type": "diagnostic_failed", "error_class": type(error).__name__,
+               "error_kind": str(error) if isinstance(error, ValueError) and str(error) in known
+               else "unclassified", "failure_location": [
+                   f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}"
+                   for frame in traceback.extract_tb(error.__traceback__)[-3:]
+               ]})
         return 1
     return 0
 
