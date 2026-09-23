@@ -206,7 +206,7 @@ class KuafuTextClient:
             def checked(value: dict[str, Any]) -> bool:
                 if not accept(value):
                     return False
-                if request.phase != "prose":
+                if request.phase not in {"prose", "group"}:
                     return True
                 prose = value.get("prose")
                 if not isinstance(prose, str):
@@ -216,22 +216,24 @@ class KuafuTextClient:
                     if request.target_language.casefold().startswith("zh")
                     else prose
                 )
-                return valid_summary(
+                sections = parse_teaching_sections(normalized)
+                return not sections["legacy_input"] and valid_summary(
                     normalized, len(request.text), request.target_language,
                 ) and valid_teaching_sections(
-                    parse_teaching_sections(normalized),
+                    sections,
                     len(request.text),
                     request.target_language,
                 )
 
-            if request.phase == "prose":
-                schema = {
-                    **schema,
-                    "properties": {
-                        **schema["properties"],
-                        "prose": {**schema["properties"]["prose"], "maxLength": 1200},
-                    },
-                }
+            if request.phase in {"prose", "group"}:
+                if request.phase == "prose":
+                    schema = {
+                        **schema,
+                        "properties": {
+                            **schema["properties"],
+                            "prose": {**schema["properties"]["prose"], "maxLength": 1200},
+                        },
+                    }
                 repair_instruction += (
                     " The four teaching headings are mandatory. In misconceptions, "
                     "use all four labelled roles with source-supported content, or leave "

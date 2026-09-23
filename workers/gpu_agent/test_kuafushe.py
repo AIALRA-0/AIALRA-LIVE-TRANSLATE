@@ -237,6 +237,37 @@ async def test_overlong_complete_card_switches_to_backup() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unstructured_group_synthesis_switches_to_backup() -> None:
+    seen: list[str] = []
+    source = "A fault model limits a test vector's conclusions. " * 7
+    structured = (
+        "承上启下：\n主要内容：\n- 测试结论只覆盖所选故障模型\n"
+        "内容讲解：故障模型规定了测试向量尝试发现的故障；观察结果只能支持"
+        "所覆盖模型范围内的判断；通过测试并不能证明所有物理缺陷都不存在；"
+        "若要扩大判断范围，需要明确新增故障类别并为这些类别补充相应的测试向量。\n易错点：无"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.headers["authorization"].split()[-1]
+        seen.append(token)
+        prose = (
+            "故障模型限定了测试向量可以检查的故障；测试通过只说明选定向量没有暴露"
+            "所列故障；它不能证明电路不存在其他物理缺陷；判断必须核对模型与覆盖范围。"
+            if token == "synthetic-one" else structured
+        )
+        return httpx.Response(200, json={"output_text": json.dumps({
+            "prose": prose,
+        }, ensure_ascii=False)})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await KuafuTextClient(http, fixture_routes()).teaching_part({
+            "phase": "group", "text": source, "target_language": "zh-CN",
+        })
+    assert result["prose"] == generated_prose(structured)
+    assert seen == ["synthetic-one", "synthetic-two"]
+
+
+@pytest.mark.asyncio
 async def test_live_ds_routes_independently_when_explicitly_requested() -> None:
     if os.getenv("AIALRA_RUN_LIVE_PROVIDER_TEST") != "1":
         pytest.skip("live provider probe requires explicit opt-in")
