@@ -236,8 +236,9 @@ class KuafuTextClient:
                     }
                 repair_instruction += (
                     " The four teaching headings are mandatory. In misconceptions, "
-                    "use all four labelled roles with source-supported content, or leave "
-                    "the section empty. A bare warning or partial role is invalid. "
+                    "use all four labelled roles with source-supported content. If any "
+                    "role lacks evidence, write exactly 易错点：无 (or Misconceptions: None) "
+                    "instead. Never write a bare warning or partial role. "
                     "The complete prose, including all headings and sections, must be "
                     "at most 1,200 Unicode characters."
                 )

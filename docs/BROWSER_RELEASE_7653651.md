@@ -1,7 +1,7 @@
 # Browser verification: release 7653651
 
-Date: 2026-09-22  
-Target: `http://127.0.0.1:18787`  
+Date: 2026-09-22
+Target: `http://127.0.0.1:18787`
 Method: Playwright with headless Chromium and an isolated trusted test identity. API health returned 200 and its build/version metadata contained `7653651`.
 
 ## Results

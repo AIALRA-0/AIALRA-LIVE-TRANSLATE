@@ -163,6 +163,8 @@ async def test_incomplete_teaching_sections_switch_to_backup() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         token = request.headers["authorization"].split()[-1]
         seen.append(token)
+        if token == "synthetic-two":
+            assert "易错点：无" in json.loads(request.content)["instructions"]
         end = "注意不要误解" if token == "synthetic-one" else "无"
         prose = (
             "承上启下：\n主要内容：\n- 故障模型限定测试对象\n"
