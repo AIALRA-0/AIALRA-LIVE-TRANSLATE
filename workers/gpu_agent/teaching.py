@@ -502,15 +502,14 @@ async def assemble_explanation(model_input: dict[str, Any], call: PartCaller) ->
                     )
                 continue
             generated = result.get("definitions")
-            if not isinstance(generated, list) or len(generated) != len(batch):
+            if not isinstance(generated, list) or len(generated) > len(batch):
                 continue
-            for term_source, item in zip(batch, generated, strict=True):
-                if (
-                    not isinstance(item, dict)
-                    or item.get("original_term") != term_source["original_term"]
-                ):
-                    continue
-                append_definition(term_source, item.get("term"), item.get("definition"))
+            indexed = {item.get("original_term"): item for item in generated
+                       if isinstance(item, dict)}
+            for term_source in batch:
+                item = indexed.get(term_source["original_term"])
+                if item is not None:
+                    append_definition(term_source, item.get("term"), item.get("definition"))
     detailed_prose = "\n\n".join(prose)
     # The model endpoint accepts up to 6,500 source/context bytes.  The old
     # 3,500-byte guard skipped synthesis for two ordinary complete drafts,

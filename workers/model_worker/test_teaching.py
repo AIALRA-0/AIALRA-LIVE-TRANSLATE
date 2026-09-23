@@ -132,6 +132,16 @@ def test_batched_definitions_preserve_source_order_and_full_contract() -> None:
         {"original_term": "latch", "term": "锁存器（latch）", "definition": complete},
     ]}, request)
 
+    raw = {"definitions": [
+        {"original_term": "latch", "term": "锁存器（latch）", "definition": complete},
+        {"original_term": "clock", "term": "时钟（clock）", "definition": "过短"},
+    ]}
+    partial = bound_inventory(raw, request)
+    assert len(raw["definitions"]) == 2
+    assert [item["original_term"] for item in partial["definitions"]] == ["latch"]
+    assert valid_part(partial, request)
+    assert not valid_part({"definitions": []}, request)
+
 
 def test_definition_rejects_glossary_essay_over_240_characters() -> None:
     request = TeachingPartRequest(

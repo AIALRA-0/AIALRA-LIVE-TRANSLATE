@@ -132,15 +132,19 @@ def valid_part(payload: dict[str, Any], request: TeachingPartRequest) -> bool:
         definitions = payload.get("definitions")
         return (
             isinstance(definitions, list)
-            and len(definitions) == len(request.original_terms)
+            and 1 <= len(definitions) <= len(request.original_terms)
+            and [item.get("original_term") for item in definitions if isinstance(item, dict)]
+            == [term for term in request.original_terms if any(
+                isinstance(item, dict) and item.get("original_term") == term
+                for item in definitions
+            )]
             and all(
                 isinstance(item, dict)
-                and item.get("original_term") == original
                 and isinstance(item.get("term"), str)
                 and bool(item["term"].strip())
                 and isinstance(item.get("definition"), str)
                 and valid_definition(item["definition"], request.target_language)
-                for item, original in zip(definitions, request.original_terms, strict=True)
+                for item in definitions
             )
         )
     if request.phase != "definition":
@@ -205,6 +209,21 @@ def bound_inventory(raw: dict[str, Any], request: TeachingPartRequest) -> dict[s
         # also prevents the model from running past its token limit on a field
         # that would be discarded anyway.
         return {**raw, "original_terms": []}
+    if request.phase == "definitions" and isinstance(raw.get("definitions"), list):
+        # One malformed optional glossary item must not discard the valid item
+        # in the same batch. Retain only source-matched, complete definitions;
+        # the final card still cites the exact source paragraph for each one.
+        candidates = raw["definitions"]
+        verified = []
+        for original in request.original_terms:
+            item = next((entry for entry in candidates if isinstance(entry, dict)
+                         and entry.get("original_term") == original), None)
+            if (item is not None and isinstance(item.get("term"), str)
+                    and item["term"].strip()
+                    and isinstance(item.get("definition"), str)
+                    and valid_definition(item["definition"], request.target_language)):
+                verified.append(item)
+        return {**raw, "definitions": verified}
     if request.phase != "prose" or not isinstance(raw.get("original_terms"), list):
         return raw
     terms: list[str] = []

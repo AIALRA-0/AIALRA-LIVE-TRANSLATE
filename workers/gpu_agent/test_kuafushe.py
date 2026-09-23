@@ -199,6 +199,32 @@ async def test_incomplete_teaching_sections_switch_to_backup() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cloud_definition_batch_keeps_valid_item_without_retrying_bad_one() -> None:
+    complete = (
+        "这是一个技术概念；它用于解释同步电路中的作用；"
+        "具体机制由输入上下文确定；使用时必须保留适用条件、限制和相近概念的区别"
+    )
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"].split()[-1])
+        return httpx.Response(200, json={"output_text": json.dumps({"definitions": [
+            {"original_term": "latch", "term": "锁存器（latch）", "definition": complete},
+            {"original_term": "clock", "term": "时钟（clock）", "definition": "过短"},
+        ]}, ensure_ascii=False)})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        cloud = KuafuTextClient(http, fixture_routes())
+        result = await cloud.teaching_part({
+            "phase": "definitions", "text": "A latch is controlled by a clock.",
+            "original_terms": ["latch", "clock"], "target_language": "zh-CN",
+        })
+    assert seen == ["synthetic-one"]
+    assert len(result["definitions"]) == 1
+    assert result["definitions"][0]["original_term"] == "latch"
+
+
+@pytest.mark.asyncio
 async def test_overlong_complete_card_switches_to_backup() -> None:
     bridge = "".join(chr(0x4E00 + index) for index in range(430))
     conclusions = "".join(chr(0x5200 + index) for index in range(700))

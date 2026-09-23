@@ -478,6 +478,25 @@ async def test_cloud_glossary_caps_optional_batches_without_per_term_retry() -> 
 
 
 @pytest.mark.asyncio
+async def test_partial_cloud_definition_batch_keeps_only_verified_term() -> None:
+    async def call(body: dict[str, Any]) -> dict[str, Any]:
+        if body["phase"] == "prose":
+            return {"provider": "kuafushe:synthetic@cloud", "prose": "完整解释",
+                    "original_terms": ["alpha", "beta"]}
+        assert body["phase"] == "definitions"
+        return {"provider": "kuafushe:synthetic@cloud", "definitions": [{
+            "original_term": "alpha", "term": "Alpha", "definition": COMPLETE_DEFINITION,
+        }]}
+
+    result = await assemble_explanation({
+        "segments": [{"id": "segment", "text": "alpha and beta are compared."}],
+        "target_language": "zh-CN",
+    }, call)
+    assert [item["term"] for item in result["terms"]] == ["Alpha"]
+    assert result["terms"][0]["evidence_segment_ids"] == ["segment"]
+
+
+@pytest.mark.asyncio
 async def test_two_complete_drafts_above_old_byte_limit_are_still_synthesized() -> None:
     phases: list[str] = []
     synthesis_bytes = 0
