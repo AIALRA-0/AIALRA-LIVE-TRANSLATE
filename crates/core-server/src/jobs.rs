@@ -16,7 +16,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -1004,6 +1004,18 @@ fn apply_summary_result(
     result: &Value,
     elapsed_ms: u64,
 ) -> Result<(), ApiError> {
+    if !summary_job_snapshot_is_current(state, job)? {
+        let events = state.store.list_events(&job.session_id)?;
+        let run = latest_recording_run(&events);
+        if job.input["recording_run"].as_str().unwrap_or("legacy") == run {
+            let snapshot = summary_snapshot(&events);
+            let snapshot_key = summary_snapshot_idempotency_key(&job.session_id, &run, &snapshot)?;
+            if !summary_exists_for_snapshot(state, &events, &run, &snapshot_key)? {
+                enqueue_summary(state, &job.session_id, "snapshot_superseded")?;
+            }
+        }
+        return Ok(());
+    }
     let summary: SummaryResponse = serde_json::from_value(result.clone())?;
     let compiled = job.input["summary_contract"] == "complete_groups_v1"
         && summary.provider == "compiled:content-groups-v1@cpu";
@@ -1319,53 +1331,196 @@ pub fn finish_session_after_stop(state: &AppState, session_id: &str) -> Result<(
     finish_session_if_drained(state, session_id)
 }
 
-pub fn enqueue_summary(
-    state: &AppState,
-    session_id: &str,
-    trigger: &str,
-) -> Result<aialra_event_store::ModelJobRecord, ApiError> {
-    let session = state
-        .store
-        .get_session(session_id)?
-        .ok_or_else(|| ApiError::not_found("session not found"))?;
-    let events = state.store.list_events(session_id)?;
-    let run = latest_recording_run(&events);
-    if has_summary_for_run(&events, &run) {
-        return Err(ApiError::conflict("session summary already exists"));
+struct SummarySnapshot {
+    segments: Vec<Value>,
+    pages: Vec<Value>,
+    complete_groups: Vec<Value>,
+    group_ids: Vec<String>,
+}
+
+fn summary_card_has_visible_content(result: &Value) -> bool {
+    let summary = result["paragraph_summary"]
+        .as_str()
+        .or_else(|| result["summary"].as_str())
+        .is_some_and(|text| !text.trim().is_empty());
+    let sections = &result["teaching_sections"];
+    let text_sections = ["chapter_bridge", "main_content", "content_explanation"]
+        .iter()
+        .any(|field| {
+            sections[*field]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty())
+        });
+    let terms = sections["professional_terms"]
+        .as_array()
+        .or_else(|| result["terms"].as_array())
+        .or_else(|| result["rare_terms"].as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item["term"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty())
+                    || item["explanation"]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+                    || item["one_line"]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+            })
+        });
+    let misconceptions = match &sections["misconceptions"] {
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| item.as_str().is_some_and(|text| !text.trim().is_empty())),
+        _ => false,
+    };
+    summary || text_sections || terms || misconceptions
+}
+
+fn summary_group_provider_is_complete(provider: &str) -> bool {
+    let (prefix, suffix) = if provider.starts_with("kuafushe:") {
+        ("kuafushe:", "@cloud")
+    } else if provider.starts_with("ollama:") {
+        ("ollama:", "@cuda")
+    } else {
+        return false;
+    };
+    let Some(model) = provider
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(suffix))
+    else {
+        return false;
+    };
+    !model.is_empty()
+        && model.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'/' | b'+' | b'-')
+        })
+}
+
+fn summary_group_is_reusable(
+    result: &Value,
+    source_positions: &HashMap<String, usize>,
+    page_ids: &HashSet<String>,
+) -> bool {
+    if !result["paragraph_summary"]
+        .as_str()
+        .is_some_and(|summary| !summary.trim().is_empty())
+        || !result["provider"]
+            .as_str()
+            .is_some_and(summary_group_provider_is_complete)
+    {
+        return false;
     }
+    let Some(raw_evidence) = result["evidence_segment_ids"].as_array() else {
+        return false;
+    };
+    if raw_evidence.is_empty() {
+        return false;
+    }
+    let Some(positions) = raw_evidence
+        .iter()
+        .map(|id| id.as_str().and_then(|id| source_positions.get(id).copied()))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if positions.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return false;
+    }
+
+    let Some(raw_pages) = result["asset_page_ids"].as_array() else {
+        return false;
+    };
+    let Some(cited_pages) = raw_pages
+        .iter()
+        .map(Value::as_str)
+        .map(|id| id.map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let cited_page_set = cited_pages
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if cited_page_set.len() != cited_pages.len()
+        || cited_pages.iter().any(|id| !page_ids.contains(id))
+    {
+        return false;
+    }
+
+    let evidence = raw_evidence
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    result["terms"].as_array().is_some_and(|terms| {
+        terms.iter().all(|term| {
+            let term_evidence_valid = term
+                .get("evidence_segment_ids")
+                .and_then(Value::as_array)
+                .is_none_or(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .all(|id| evidence.contains(id))
+                        && ids.iter().all(Value::is_string)
+                });
+            let term_pages_valid = term
+                .get("asset_page_ids")
+                .and_then(Value::as_array)
+                .is_none_or(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .all(|id| cited_page_set.contains(id))
+                        && ids.iter().all(Value::is_string)
+                });
+            term_evidence_valid && term_pages_valid
+        })
+    })
+}
+
+fn summary_snapshot(events: &[aialra_event_protocol::EventEnvelope]) -> SummarySnapshot {
     let has_paragraphs = events
         .iter()
         .any(|event| event.event_type == "paragraph.finalized");
-    let all_segments = events
+    let source_type = if has_paragraphs {
+        "paragraph.finalized"
+    } else {
+        "segment.finalized"
+    };
+    let source_id_field = if has_paragraphs {
+        "paragraph_id"
+    } else {
+        "segment_id"
+    };
+    let segments = events
         .iter()
+        .filter(|event| event.event_type == source_type)
         .filter_map(|event| {
-            if event.event_type
-                != if has_paragraphs {
-                    "paragraph.finalized"
-                } else {
-                    "segment.finalized"
-                }
-            {
-                return None;
-            }
             Some(json!({
-                "id": event.payload.get(if has_paragraphs { "paragraph_id" } else { "segment_id" })?.as_str()?,
+                "id": event.payload.get(source_id_field)?.as_str()?,
                 "text": event.payload.get("text")?.as_str()?,
             }))
         })
         .collect::<Vec<_>>();
-    let segments = all_segments;
-    if segments.is_empty() {
-        return Err(ApiError::bad_request(
-            "stable transcript is required before summary",
-        ));
-    }
-    let all_pages = events
+    let source_ids = segments
         .iter()
+        .filter_map(|segment| segment["id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let source_positions = source_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let source_id_set = source_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let no_visible_source_ids = HashSet::<&str>::new();
+    let pages = events
+        .iter()
+        .filter(|event| event.event_type == "asset.page.extracted")
         .filter_map(|event| {
-            if event.event_type != "asset.page.extracted" {
-                return None;
-            }
             let text = event.payload.get("text")?.as_str()?;
             if text.trim().is_empty() {
                 return None;
@@ -1377,41 +1532,187 @@ pub fn enqueue_summary(
             }))
         })
         .collect::<Vec<_>>();
-    let pages = all_pages;
-    let complete_group_events = events
+    let page_ids = pages
+        .iter()
+        .filter_map(|page| page["id"].as_str().map(str::to_owned))
+        .collect::<HashSet<_>>();
+
+    let uses_internal_fragments = events.iter().any(|event| {
+        event.event_type == "segment.finalized"
+            && event.payload["display_mode"] == "internal_fragment"
+    });
+    let visible_source_ids = if has_paragraphs || !uses_internal_fragments {
+        &source_id_set
+    } else {
+        &no_visible_source_ids
+    };
+    let mut latest_card_by_source = HashMap::<String, String>::new();
+    let mut visible_cards = Vec::new();
+    for event in events
         .iter()
         .filter(|event| event.event_type == "explanation.card.created")
-        .filter(|event| event.payload["coverage_contract"] == "all_sources_v1")
-        .collect::<Vec<_>>();
-    let complete_groups = complete_group_events
-        .iter()
-        .map(|event| json!({"coverage_contract": "all_sources_v1", "result": event.payload["result"]}))
-        .collect::<Vec<_>>();
+    {
+        let result = &event.payload["result"];
+        let evidence = result["evidence_segment_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if evidence.is_empty()
+            || !evidence
+                .iter()
+                .any(|id| visible_source_ids.contains(id.as_str()))
+            || !summary_card_has_visible_content(result)
+        {
+            continue;
+        }
+        let card_id = event
+            .payload
+            .get("card_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| event.event_id.to_string());
+        for id in &evidence {
+            if visible_source_ids.contains(id.as_str()) {
+                latest_card_by_source.insert(id.clone(), card_id.clone());
+            }
+        }
+        visible_cards.push((event, evidence, card_id));
+    }
+
+    let mut complete_groups = Vec::new();
+    let mut group_ids = Vec::new();
+    for (event, evidence, card_id) in visible_cards {
+        let is_latest_visible = evidence.iter().any(|id| {
+            visible_source_ids.contains(id.as_str())
+                && latest_card_by_source.get(id) == Some(&card_id)
+        });
+        let result = &event.payload["result"];
+        if !is_latest_visible
+            || event.payload["coverage_contract"] != "all_sources_v1"
+            || !summary_group_is_reusable(result, &source_positions, &page_ids)
+        {
+            continue;
+        }
+        complete_groups.push(json!({
+            "coverage_contract": "all_sources_v1",
+            "result": result,
+        }));
+        group_ids.push(event.event_id.to_string());
+    }
+
+    SummarySnapshot {
+        segments,
+        pages,
+        complete_groups,
+        group_ids,
+    }
+}
+
+fn summary_snapshot_idempotency_key(
+    session_id: &str,
+    run: &str,
+    snapshot: &SummarySnapshot,
+) -> Result<String, ApiError> {
+    let snapshot_key = serde_json::to_vec(&(
+        snapshot.segments.as_slice(),
+        snapshot.pages.as_slice(),
+        snapshot.group_ids.as_slice(),
+    ))?;
+    Ok(format!(
+        "summarize:{session_id}:{run}:{}",
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, &snapshot_key).simple()
+    ))
+}
+
+fn summary_job_snapshot_is_current(
+    state: &AppState,
+    job: &aialra_event_store::ModelJobRecord,
+) -> Result<bool, ApiError> {
+    if job.input["summary_contract"] != "complete_groups_v1" {
+        return Ok(true);
+    }
+    let events = state.store.list_events(&job.session_id)?;
+    let run = latest_recording_run(&events);
+    if job.input["recording_run"].as_str().unwrap_or("legacy") != run {
+        return Ok(false);
+    }
+    let snapshot = summary_snapshot(&events);
+    Ok(job.idempotency_key == summary_snapshot_idempotency_key(&job.session_id, &run, &snapshot)?)
+}
+
+fn summary_exists_for_snapshot(
+    state: &AppState,
+    events: &[aialra_event_protocol::EventEnvelope],
+    run: &str,
+    snapshot_key: &str,
+) -> Result<bool, ApiError> {
+    for event in events.iter().filter(|event| {
+        event.event_type == "session.summary.created"
+            && event
+                .payload
+                .get("recording_run")
+                .and_then(Value::as_str)
+                .unwrap_or("legacy")
+                == run
+    }) {
+        let Some(job) = state.store.get_model_job(&event.correlation_id)? else {
+            // Older summaries without a persisted source job cannot be proven to
+            // belong to another snapshot, so keep their existing duplicate guard.
+            return Ok(true);
+        };
+        if job.idempotency_key == snapshot_key {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn enqueue_summary(
+    state: &AppState,
+    session_id: &str,
+    trigger: &str,
+) -> Result<aialra_event_store::ModelJobRecord, ApiError> {
+    let session = state
+        .store
+        .get_session(session_id)?
+        .ok_or_else(|| ApiError::not_found("session not found"))?;
+    let events = state.store.list_events(session_id)?;
+    let run = latest_recording_run(&events);
+    let snapshot = summary_snapshot(&events);
+    let segments = &snapshot.segments;
+    if segments.is_empty() {
+        return Err(ApiError::bad_request(
+            "stable transcript is required before summary",
+        ));
+    }
     // A retry after teaching cards arrive must use their current snapshot.
     // Include source text and pages too: a correction or confirmed upload
     // must not replay a failed job with stale evidence.
-    let group_ids = complete_group_events
-        .iter()
-        .map(|event| event.event_id.to_string())
-        .collect::<Vec<_>>();
-    let snapshot_key = serde_json::to_vec(&(segments.as_slice(), pages.as_slice(), group_ids))?;
-    let idempotency_key = format!(
-        "summarize:{session_id}:{run}:{}",
-        Uuid::new_v5(&Uuid::NAMESPACE_OID, &snapshot_key).simple()
-    );
-    if let Some(existing) = state.store.get_model_job_by_key(&idempotency_key)?
-        && existing.status == "failed"
-    {
-        state
-            .store
-            .requeue_failed_summary_by_key(&idempotency_key)?;
+    let idempotency_key = summary_snapshot_idempotency_key(session_id, &run, &snapshot)?;
+    if summary_exists_for_snapshot(state, &events, &run, &idempotency_key)? {
+        return Err(ApiError::conflict("session summary already exists"));
+    }
+    if let Some(existing) = state.store.get_model_job_by_key(&idempotency_key)? {
+        match existing.status.as_str() {
+            "completed" => return Err(ApiError::conflict("session summary already exists")),
+            "failed" => {
+                state
+                    .store
+                    .requeue_failed_summary_by_key(&idempotency_key)?;
+            }
+            _ => {}
+        }
     }
     let record = state.enqueue_job(NewModelJob {
         id: format!("job_{}", Uuid::now_v7().simple()),
         session_id: session_id.to_owned(),
         job_type: "summarize".to_owned(),
         priority: 20,
-        input: json!({"summary_contract": "complete_groups_v1", "segments": segments, "asset_pages": pages, "complete_groups": complete_groups, "target_language": session.target_language, "trigger": trigger, "recording_run": run}),
+        input: json!({"summary_contract": "complete_groups_v1", "segments": snapshot.segments, "asset_pages": snapshot.pages, "complete_groups": snapshot.complete_groups, "target_language": session.target_language, "trigger": trigger, "recording_run": run}),
         input_object_hash: None,
         idempotency_key,
     })?;
@@ -2429,6 +2730,7 @@ mod tests {
                 None,
                 json!({"coverage_contract": "all_sources_v1", "result": {
                     "paragraph_summary": "Synthetic explanation",
+                    "provider": "ollama:synthetic@cuda",
                     "terms": [],
                     "evidence_segment_ids": ["p1"],
                     "asset_page_ids": ["page-used"]
@@ -2452,6 +2754,225 @@ mod tests {
         assert!(super::apply_summary_result(&state, &job, &result, 1).is_err());
         result["asset_page_ids"] = json!(["page-used"]);
         super::apply_summary_result(&state, &job, &result, 1).unwrap();
+    }
+
+    #[test]
+    fn summary_snapshot_uses_latest_visible_v1_groups_and_backfills_all_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "summary-latest-groups".to_owned(),
+                title: "Synthetic course".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for index in 0..5 {
+            state
+                .emit(
+                    "summary-latest-groups",
+                    "test",
+                    "paragraph.finalized",
+                    index,
+                    "test",
+                    None,
+                    json!({"paragraph_id": format!("p{index}"), "text": format!("Synthetic paragraph {index}")}),
+                )
+                .unwrap();
+        }
+        let emit_card =
+            |sequence: u64, card_id: &str, summary: &str, provider: &str, evidence: Vec<String>| {
+                state.emit(
+                    "summary-latest-groups",
+                    "test",
+                    "explanation.card.created",
+                    sequence,
+                    card_id,
+                    None,
+                    json!({
+                        "card_id": card_id,
+                        "coverage_contract": "all_sources_v1",
+                        "result": {
+                            "paragraph_summary": summary,
+                            "provider": provider,
+                            "terms": [],
+                            "evidence_segment_ids": evidence,
+                            "asset_page_ids": []
+                        }
+                    }),
+                )
+            };
+        emit_card(
+            10,
+            "old-broad-card",
+            "Stale broad explanation",
+            "ollama:legacy@cuda",
+            (0..4).map(|index| format!("p{index}")).collect(),
+        )
+        .unwrap();
+        emit_card(
+            11,
+            "new-cloud-card",
+            "Current cloud explanation",
+            "kuafushe:current@cloud",
+            vec!["p0".to_owned(), "p1".to_owned()],
+        )
+        .unwrap();
+        emit_card(
+            12,
+            "new-local-card",
+            "Current local explanation",
+            "ollama:current@cuda",
+            vec!["p2".to_owned(), "p3".to_owned()],
+        )
+        .unwrap();
+
+        let job = enqueue_summary(&state, "summary-latest-groups", "stop").unwrap();
+        let groups = job.input["complete_groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group["result"]["paragraph_summary"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Current cloud explanation", "Current local explanation"]
+        );
+        assert_eq!(job.input["segments"].as_array().unwrap().len(), 5);
+        assert_eq!(job.input["segments"][4]["id"].as_str(), Some("p4"));
+    }
+
+    #[test]
+    fn newer_summary_snapshot_supersedes_completed_and_leased_summaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        state
+            .store
+            .create_session(&NewSession {
+                id: "summary-snapshot-supersedes".to_owned(),
+                title: "Synthetic course".to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+                privacy_mode: "local_only".to_owned(),
+                consent_confirmed: true,
+                demo_mode: false,
+            })
+            .unwrap();
+        for index in 0..2 {
+            state
+                .emit(
+                    "summary-snapshot-supersedes",
+                    "test",
+                    "paragraph.finalized",
+                    index,
+                    "test",
+                    None,
+                    json!({"paragraph_id": format!("p{index}"), "text": format!("Synthetic paragraph {index}")}),
+                )
+                .unwrap();
+        }
+        let sources = json!(["p0", "p1"]);
+        let summary_result = |overview: &str| {
+            json!({
+                "overview": overview,
+                "key_points": [],
+                "terminology": [],
+                "open_questions": [],
+                "evidence_segment_ids": sources,
+                "asset_page_ids": [],
+                "provider": "compiled:content-groups-v1@cpu"
+            })
+        };
+
+        let first = enqueue_summary(&state, "summary-snapshot-supersedes", "stop").unwrap();
+        super::apply_summary_result(&state, &first, &summary_result("Initial snapshot"), 1)
+            .unwrap();
+
+        let emit_card = |sequence: u64, card_id: &str, summary: &str, provider: &str| {
+            state.emit(
+                "summary-snapshot-supersedes",
+                "test",
+                "explanation.card.created",
+                sequence,
+                card_id,
+                None,
+                json!({
+                    "card_id": card_id,
+                    "coverage_contract": "all_sources_v1",
+                    "result": {
+                        "paragraph_summary": summary,
+                        "provider": provider,
+                        "terms": [],
+                        "evidence_segment_ids": ["p0", "p1"],
+                        "asset_page_ids": []
+                    }
+                }),
+            )
+        };
+        emit_card(
+            10,
+            "first-current-card",
+            "First current group",
+            "ollama:local@cuda",
+        )
+        .unwrap();
+        let leased_snapshot =
+            enqueue_summary(&state, "summary-snapshot-supersedes", "manual").unwrap();
+        let leased = state
+            .store
+            .lease_model_job_for(
+                "summary-worker",
+                &["summarize".to_owned()],
+                60,
+                Some(&leased_snapshot.id),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(leased.status, "leased");
+
+        emit_card(
+            11,
+            "latest-current-card",
+            "Latest current group",
+            "kuafushe:cloud@cloud",
+        )
+        .unwrap();
+        super::apply_summary_result(&state, &leased, &summary_result("Stale leased snapshot"), 1)
+            .unwrap();
+        let latest = enqueue_summary(&state, "summary-snapshot-supersedes", "manual").unwrap();
+        assert_ne!(latest.id, leased_snapshot.id);
+        assert_eq!(
+            enqueue_summary(&state, "summary-snapshot-supersedes", "manual")
+                .unwrap()
+                .id,
+            latest.id
+        );
+
+        super::apply_summary_result(&state, &latest, &summary_result("Latest snapshot"), 1)
+            .unwrap();
+
+        let summaries = state
+            .store
+            .list_events("summary-snapshot-supersedes")
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "session.summary.created")
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(
+            summaries[0].payload["result"]["overview"],
+            "Initial snapshot"
+        );
+        assert_eq!(
+            summaries[1].payload["result"]["overview"],
+            "Latest snapshot"
+        );
+        assert_eq!(summaries[1].correlation_id, latest.id);
+        assert!(enqueue_summary(&state, "summary-snapshot-supersedes", "manual").is_err());
     }
 
     #[test]
@@ -2503,7 +3024,7 @@ mod tests {
                 "test",
                 None,
                 json!({"coverage_contract": "all_sources_v1", "result": {
-                    "paragraph_summary": "Synthetic explanation", "terms": [],
+                    "paragraph_summary": "Synthetic explanation", "provider": "ollama:synthetic@cuda", "terms": [],
                     "evidence_segment_ids": ["p1"], "asset_page_ids": []
                 }}),
             )
@@ -2629,7 +3150,7 @@ mod tests {
                 "test",
                 None,
                 json!({"coverage_contract": "all_sources_v1", "result": {
-                    "paragraph_summary": "First idea", "terms": [], "evidence_segment_ids": ["p1"],
+                    "paragraph_summary": "First idea", "provider": "ollama:synthetic@cuda", "terms": [], "evidence_segment_ids": ["p1"],
                     "asset_page_ids": []
                 }}),
             )
@@ -2654,7 +3175,7 @@ mod tests {
                 "test",
                 None,
                 json!({"coverage_contract": "all_sources_v1", "result": {
-                    "paragraph_summary": "Second idea", "terms": [], "evidence_segment_ids": ["p2"],
+                    "paragraph_summary": "Second idea", "provider": "ollama:synthetic@cuda", "terms": [], "evidence_segment_ids": ["p2"],
                     "asset_page_ids": []
                 }}),
             )

@@ -424,7 +424,11 @@ fn enqueue_with_evidence(
         job_type: "explain".to_owned(),
         // Historical card repair runs behind live teaching and summaries so
         // a backlog never delays the next actual classroom explanation.
-        priority: if trigger == QUALITY_REPAIR_TRIGGER { 10 } else { 30 },
+        priority: if trigger == QUALITY_REPAIR_TRIGGER {
+            10
+        } else {
+            30
+        },
         input: explanation_input(segments, pages, &session.target_language, trigger, deferred),
         input_object_hash: None,
         idempotency_key: format!("explain:{session_id}:{trigger}:{evidence_key}"),
