@@ -99,6 +99,7 @@ class KuafuTextClient:
         max_tokens: int,
         accept: Callable[[dict[str, Any]], bool],
         repair_instruction: str = "",
+        retry_max_tokens: int | None = None,
         **_ignored: Any,
     ) -> dict[str, Any] | None:
         if not self.available:
@@ -108,6 +109,10 @@ class KuafuTextClient:
         for offset in range(len(self.routes)):
             index = (self.preferred + offset) % len(self.routes)
             route = self.routes[index]
+            route_max_tokens = (
+                min(max_tokens, retry_max_tokens)
+                if offset == 1 and retry_max_tokens is not None else max_tokens
+            )
             try:
                 responses_api = route.transport == "responses"
                 body = (
@@ -118,7 +123,7 @@ class KuafuTextClient:
                         "stream": False,
                         "reasoning": {"effort": "none"},
                         "temperature": 0,
-                        "max_output_tokens": max_tokens,
+                        "max_output_tokens": route_max_tokens,
                         "text": {
                             "format": {
                                 "type": "json_schema",
@@ -138,7 +143,7 @@ class KuafuTextClient:
                             {"role": "user", "content": user},
                         ],
                         "response_format": {"type": "json_object"},
-                        "max_tokens": max_tokens,
+                        "max_tokens": route_max_tokens,
                     }
                 )
                 response = await self.client.post(
@@ -252,6 +257,7 @@ class KuafuTextClient:
                     "Return only the required JSON object with the single field prose; "
                     "put only the compact overview in that field."
                 )
+                options["retry_max_tokens"] = 600
             return await self.infer_json(
                 system,
                 user,

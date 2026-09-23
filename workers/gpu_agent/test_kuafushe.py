@@ -21,10 +21,12 @@ from workers.model_worker.teaching import repetition_collapse
 from workers.model_worker.teaching_format import generated_prose
 
 
-def fixture_routes() -> tuple[Route, Route]:
+def fixture_routes(
+    *, primary_transport: str = "responses", backup_transport: str = "responses",
+) -> tuple[Route, Route]:
     return (
-        Route("synthetic-one", "https://api.kuafushe.cc/v1", "test-ds"),
-        Route("synthetic-two", "https://api.kuafushe.cc/v1", "test-ds"),
+        Route("synthetic-one", "https://api.kuafushe.cc/v1", "test-ds", primary_transport),
+        Route("synthetic-two", "https://api.kuafushe.cc/v1", "test-ds", backup_transport),
     )
 
 
@@ -35,6 +37,24 @@ COURSE_REDUCE_REPAIR_MARKERS = (
     "at most 500 Unicode characters and 1,500 UTF-8 bytes",
     "single field prose",
 )
+
+
+def route_request_details(request: httpx.Request) -> tuple[str, int]:
+    body = json.loads(request.content)
+    if request.url.path.endswith("/responses"):
+        instructions, tokens = body["instructions"], body["max_output_tokens"]
+    else:
+        instructions, tokens = body["messages"][0]["content"], body["max_tokens"]
+    assert isinstance(instructions, str)
+    assert isinstance(tokens, int)
+    return instructions, tokens
+
+
+def course_reduce_response(request: httpx.Request, prose: str) -> httpx.Response:
+    content = json.dumps({"prose": prose}, ensure_ascii=False)
+    if request.url.path.endswith("/responses"):
+        return httpx.Response(200, json={"output_text": content})
+    return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
 
 def test_section_envelope_keeps_actual_material_use() -> None:
@@ -273,8 +293,9 @@ async def test_overlong_complete_card_switches_to_backup() -> None:
     assert seen == ["synthetic-one", "synthetic-two"]
 
 
+@pytest.mark.parametrize("retry_transport", ("responses", "chat"))
 @pytest.mark.asyncio
-async def test_course_reduce_repairs_overlong_primary_on_backup() -> None:
+async def test_course_reduce_repairs_overlong_primary_on_backup(retry_transport: str) -> None:
     notes = (
         "The fault model bounds the faults covered by tests. A passing test cannot rule out "
         "defects outside that model. " * 40
@@ -285,19 +306,18 @@ async def test_course_reduce_repairs_overlong_primary_on_backup() -> None:
         "可支持对相应故障的判断；通过测试只表示这些向量未发现模型内故障，不能证明"
         "模型外的物理缺陷不存在。结论还受故障清单、向量覆盖与输出观察条件限制。"
     )
-    seen: list[tuple[str, str]] = []
+    seen: list[tuple[str, str, int]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         token = request.headers["authorization"].split()[-1]
-        body = json.loads(request.content)
-        seen.append((token, body["instructions"]))
+        instructions, tokens = route_request_details(request)
+        seen.append((token, instructions, tokens))
         prose = overlong if token == "synthetic-one" else accepted
-        return httpx.Response(200, json={
-            "output_text": json.dumps({"prose": prose}, ensure_ascii=False),
-        })
+        return course_reduce_response(request, prose)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        result = await KuafuTextClient(http, fixture_routes()).teaching_part({
+        routes = fixture_routes(backup_transport=retry_transport)
+        result = await KuafuTextClient(http, routes).teaching_part({
             "phase": "course_reduce", "text": notes, "target_language": "zh-CN",
         })
 
@@ -305,32 +325,35 @@ async def test_course_reduce_repairs_overlong_primary_on_backup() -> None:
     assert len(overlong) == 1425
     assert len(accepted) <= 500 and len(accepted.encode()) <= 1500
     assert result["prose"] == generated_prose(accepted)
-    assert [token for token, _ in seen] == ["synthetic-one", "synthetic-two"]
+    assert [token for token, _, _ in seen] == ["synthetic-one", "synthetic-two"]
+    assert [tokens for _, _, tokens in seen] == [900, 600]
     assert all(marker not in seen[0][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
     assert all(marker in seen[1][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
 
 
+@pytest.mark.parametrize("retry_transport", ("responses", "chat"))
 @pytest.mark.asyncio
-async def test_course_reduce_appends_repair_after_preferred_route_transport_error() -> None:
+async def test_course_reduce_appends_repair_after_preferred_route_transport_error(
+    retry_transport: str,
+) -> None:
     notes = (
         "The selected fault model bounds test coverage; passing results cannot rule out "
         "unmodeled defects. " * 50
     )[:3259]
-    overlong = "".join(chr(0x4E00 + index) for index in range(1399))
-    seen: list[tuple[str, str]] = []
+    overlong = "".join(chr(0x4E00 + index) for index in range(1011))
+    seen: list[tuple[str, str, int]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         token = request.headers["authorization"].split()[-1]
-        body = json.loads(request.content)
-        seen.append((token, body["instructions"]))
+        instructions, tokens = route_request_details(request)
+        seen.append((token, instructions, tokens))
         if token == "synthetic-two":
             raise httpx.ConnectError("synthetic route unavailable", request=request)
-        return httpx.Response(200, json={
-            "output_text": json.dumps({"prose": overlong}, ensure_ascii=False),
-        })
+        return course_reduce_response(request, overlong)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        cloud = KuafuTextClient(http, fixture_routes())
+        routes = fixture_routes(primary_transport=retry_transport)
+        cloud = KuafuTextClient(http, routes)
         cloud.preferred = 1
         with pytest.raises(ValueError, match="cloud_teaching_contract_invalid"):
             await cloud.teaching_part({
@@ -338,8 +361,9 @@ async def test_course_reduce_appends_repair_after_preferred_route_transport_erro
             })
 
     assert len(notes.encode()) == 3259
-    assert len(overlong) == 1399
-    assert [token for token, _ in seen] == ["synthetic-two", "synthetic-one"]
+    assert len(overlong) == 1011
+    assert [token for token, _, _ in seen] == ["synthetic-two", "synthetic-one"]
+    assert [tokens for _, _, tokens in seen] == [900, 600]
     assert all(marker not in seen[0][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
     assert all(marker in seen[1][1] for marker in COURSE_REDUCE_REPAIR_MARKERS)
     assert cloud.last_failures == ["transport_error", "contract_rejected"]
