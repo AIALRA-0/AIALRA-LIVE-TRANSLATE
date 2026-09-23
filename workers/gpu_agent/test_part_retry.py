@@ -37,14 +37,14 @@ def test_one_local_503_part_response_is_retryable_without_exposing_its_body() ->
     )) == "model_http_error"
 
 
-def test_explanation_retries_one_busy_part_in_the_same_job() -> None:
+def test_explanation_retries_two_transient_parts_in_the_same_job() -> None:
     async def scenario() -> tuple[dict[str, object], list[str]]:
         phases: list[str] = []
 
         def infer(request: httpx.Request) -> httpx.Response:
             phase = json.loads(request.content)["phase"]
             phases.append(phase)
-            if len(phases) == 1:
+            if len(phases) <= 2:
                 return httpx.Response(503, json={"detail": "model_worker_busy"})
             return httpx.Response(200, json={
                 "prose": "锁存器保持数据。", "original_terms": [],
@@ -63,5 +63,5 @@ def test_explanation_retries_one_busy_part_in_the_same_job() -> None:
         return result, phases
 
     result, phases = asyncio.run(scenario())
-    assert phases == ["prose", "prose"]
+    assert phases == ["prose", "prose", "prose"]
     assert result["evidence_segment_ids"] == ["first"]

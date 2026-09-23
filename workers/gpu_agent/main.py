@@ -619,12 +619,12 @@ async def execute_job(
             # Retry a transient local refusal at this part, while retaining the
             # earlier successful parts in memory, instead of restarting the
             # entire course after one busy/contract response.
-            for attempt in range(2):
+            for attempt in range(3):
                 part_response = await scheduler.run_llm(lambda: model_post(
                     model, f"{MODEL_WORKER_URL}/v1/explain/part", json=body, timeout=180,
                 ))
-                if attempt == 0 and retryable_teaching_part_response(part_response):
-                    await asyncio.sleep(2)
+                if attempt < 2 and retryable_teaching_part_response(part_response):
+                    await asyncio.sleep(2 ** (attempt + 1))
                     continue
                 break
             if part_response.status_code >= 400:
