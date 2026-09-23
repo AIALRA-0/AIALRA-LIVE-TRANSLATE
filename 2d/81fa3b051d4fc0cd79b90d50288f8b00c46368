@@ -1,0 +1,33 @@
+Cargo.toml
+  s_4d8bb530e409af::t_cced3f111ebb3b 36
+crates/core-server/src/main.rs
+  s_4d8bb530e409af::t_0ada640985722f 29-32,305-312
+  s_4d8bb530e409af::t_cced3f111ebb3b 25,277,295-298
+  s_71db67cf8751ad::t_cb55ab1b9fe1c0 86,224,299-304,313-314
+Cargo.lock
+  s_4d8bb530e409af::t_1e806b25b16e79 5-10,108-119,302-318,343-351,432-441,937-946,1484-1489,1724
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2d81fa3b051d4fc0cd79b90d50288f8b00c46368",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_71db67cf8751ad": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cd4d-9767-7400-affa-5e2753d39249",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
