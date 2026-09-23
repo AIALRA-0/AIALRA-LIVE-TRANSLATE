@@ -1,0 +1,38 @@
+apps/web/src/styles.css
+  s_4d8bb530e409af::t_10b37f11be07c2 294
+  s_4d8bb530e409af::t_bc8c85c6d4b583 293,295-301
+apps/web/src/TeachingSectionsView.test.tsx
+  s_4d8bb530e409af::t_c50b696eb021bb 3,19-24
+  s_4d8bb530e409af::t_cefd0d010d29e6 28
+  s_4d8bb530e409af::t_10b37f11be07c2 10-18
+  s_4d8bb530e409af::t_65d1f27a44024e 1-2,4-9,25-27,29
+apps/web/src/App.tsx
+  s_4d8bb530e409af::t_10b37f11be07c2 1,807-808,815-816
+  s_4d8bb530e409af::t_8d217eaeaff613 811-814
+  s_4d8bb530e409af::t_03b513bb725f36 820
+  s_89e5e786328d1e::t_5e201632c94c2f 810,817-819,821-828
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2a244073e0a17b110bde655977260b312e6e95f8",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    },
+    "s_89e5e786328d1e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cc43-9659-7451-b9ee-e766bd8c0d9f",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
