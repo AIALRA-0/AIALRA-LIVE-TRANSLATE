@@ -240,6 +240,26 @@ async def test_part_generation_is_bounded_and_retains_source() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prose_inventory_keeps_only_the_four_prioritized_source_terms() -> None:
+    source = "A latch, flip-flop, register, clock, result and write back appear here."
+
+    async def infer(
+        system: str, user: str, schema: dict[str, Any], **options: Any,
+    ) -> dict[str, Any]:
+        assert schema["properties"]["original_terms"]["maxItems"] == 4
+        assert "dictionary translation of an ordinary word" in system
+        return {"prose": "锁存器和触发器按时钟保持数据", "original_terms": [
+            "latch", "flip-flop", "register", "clock", "result", "write back",
+        ]}
+
+    result = await generate_part(TeachingPartRequest(
+        phase="prose", text=source, target_language="zh-CN",
+    ), infer, "test", "cuda")
+    assert result is not None
+    assert result.original_terms == ["latch", "flip-flop", "register", "clock"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prose", "definition"])
 async def test_adjacent_source_context_reaches_model_without_becoming_inventory(
     phase: Literal["prose", "definition"],

@@ -70,6 +70,11 @@ class TeachingPartResponse(BaseModel):
 
 JsonGenerator = Callable[..., Awaitable[dict[str, Any] | None]]
 
+# A course card is a teaching aid, not an index of every noun in the transcript.
+# Limit optional model-selected terms per bounded source chunk; a group can still
+# collect distinct concepts from later chunks before its existing group limit.
+MAX_PROSE_TERMS = 4
+
 _SPEECH_ACT_SUMMARY = re.compile(
     r"(?:当我在讲解|你会看到我所说|老师说|讲者提到|本段(?:话|内容)讲了|"
     r"好的[，,]|哦[，,]?好的|让我们(?:来)?看)"
@@ -209,6 +214,8 @@ def bound_inventory(raw: dict[str, Any], request: TeachingPartRequest) -> dict[s
         surface = source_surface(term, request.text)
         if surface is not None and surface.casefold() not in {t.casefold() for t in terms}:
             terms.append(surface)
+        if len(terms) == MAX_PROSE_TERMS:
+            break
     return {**raw, "original_terms": terms}
 
 
@@ -273,9 +280,14 @@ async def generate_part(
             "Explain this complete source passage to a beginner in coherent prose. The source "
             "may contain one or more adjacent paragraphs from the same teaching unit. Keep "
             "all of its information rather than merely naming its topic. Preserve its examples "
-            "and caveats. Do not add unsourced mechanisms or numerical values. Inventory the "
-            "distinct professional concepts and abbreviations that actually occur in source, "
-            "including secondary terms, but not ordinary verbs or whole sentences. Copy each "
+            "and caveats. Do not add unsourced mechanisms or numerical values. Select at most "
+            "four essential professional concepts or established abbreviations actually "
+            "present in this source chunk, ordered by importance to understanding its "
+            "mechanism. An item belongs in the glossary only if a beginner needs a technical "
+            "definition to understand it; a dictionary translation of an ordinary word is "
+            "not useful. Exclude generic nouns, ordinary verbs, loose compositional phrases, "
+            "and incidental secondary words. Return fewer terms or none when appropriate. "
+            "Copy each "
             "original term exactly as it occurs in source. Exclude names of people, speakers, "
             "institutions, locations and course titles; a proper name is not a technical term. "
             "Naming hints disambiguate a few "
@@ -328,6 +340,7 @@ async def generate_part(
         }}
         if request.phase == "prose":
             properties["original_terms"] = {"type": "array", "uniqueItems": True,
+                                            "maxItems": MAX_PROSE_TERMS,
                                             "items": {"type": "string", "minLength": 1,
                                                       "maxLength": 160}}
             if request.material_references:
