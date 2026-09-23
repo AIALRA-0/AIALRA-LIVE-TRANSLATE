@@ -138,7 +138,11 @@ async function run() {
   metrics.content_range_present = 1;
 
   stage = failureCodes.browser;
-  browser = await chromium.launch({ headless: true, timeout: OPERATION_TIMEOUT_MS });
+  browser = await chromium.launch({
+    channel: process.env.AIALRA_BROWSER_CHANNEL || "msedge",
+    headless: true,
+    timeout: OPERATION_TIMEOUT_MS,
+  });
   context = await browser.newContext({
     extraHTTPHeaders: headers,
     viewport: { width: 1440, height: 870 },
