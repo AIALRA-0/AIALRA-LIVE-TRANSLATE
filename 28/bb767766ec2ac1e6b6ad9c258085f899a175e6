@@ -1,0 +1,23 @@
+tools/e2e_smoke.mjs
+  s_4d8bb530e409af::t_d125c15a62b9e5 48-52
+crates/core-server/src/jobs.rs
+  s_4d8bb530e409af::t_35932756bcf676 843-847,868
+  s_4d8bb530e409af::t_b4d648ffc9ff4e 2250-2296
+  s_4d8bb530e409af::t_e7e8f3f775cded 2249
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "28bb767766ec2ac1e6b6ad9c258085f899a175e6",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
