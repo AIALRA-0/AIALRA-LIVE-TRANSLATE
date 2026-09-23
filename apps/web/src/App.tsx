@@ -1653,13 +1653,22 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     event === "model.job.failed" && RETRYABLE_EXPLANATION_ERROR_KINDS.has(errorKind));
   const retryExplanations = async () => {
     setRetryingExplanation(true);
+    let retried: number | null = null;
     try {
       const retryResult = await api.retryExplanations(project.id, initial.id);
+      retried = retryResult.retried;
       const topicResult = await api.ensureTopics(project.id, initial.id);
-      const count = retryResult.retried + topicResult.retried + topicResult.repaired;
+      const count = retried + topicResult.retried + topicResult.repaired;
       setNotice(count ? `已重新排队 ${count} 项讲解；录音内容保持不变` : "当前没有可重试的讲解任务");
     } catch {
-      setNotice("讲解重新排队失败，请稍后重试；已保存的录音不受影响");
+      if (retried === null) {
+        setNotice("讲解重新排队失败，请稍后重试；已保存的录音不受影响");
+      } else {
+        const retryNotice = retried > 0
+          ? `已重新排队 ${retried} 项讲解`
+          : "讲解重试请求已完成，当前没有可重试的讲解任务";
+        setNotice(`${retryNotice}；内容组质量修复请求失败，请稍后重试；录音内容保持不变`);
+      }
     } finally {
       setRetryingExplanation(false);
     }
