@@ -694,6 +694,7 @@ pub async fn session_audio_segment(
     State(state): State<AppState>,
     Path(session): Path<String>,
     Query(query): Query<PlaybackSegmentQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let (entries, pcm_size) = playback_chunks(&state, &session)?;
     let start_ms = query.start_ms.unwrap_or(0);
@@ -729,10 +730,34 @@ pub async fn session_audio_segment(
         return Err(ApiError::bad_request("这段录音未能完整读取"));
     }
     let wav = pcm_wav(&pcm);
-    let mut response = Response::new(Body::from(wav));
+    let total = wav.len() as u64;
+    let (range_start, range_end, partial) = playback_range(headers.get(header::RANGE), total)?;
+    let mut response = Response::new(Body::from(
+        wav[range_start as usize..=range_end as usize].to_vec(),
+    ));
+    *response.status_mut() = if partial {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/wav"));
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&(range_end - range_start + 1).to_string())
+            .map_err(|_| ApiError::bad_request("音频定位范围无效"))?,
+    );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if partial {
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {range_start}-{range_end}/{total}"))
+                .map_err(|_| ApiError::bad_request("音频定位范围无效"))?,
+        );
+    }
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -1403,16 +1428,43 @@ mod tests {
                 start_ms: Some(100),
                 duration_ms: Some(100),
             }),
+            HeaderMap::new(),
         )
         .await
         .unwrap();
         assert_eq!(segment.status(), StatusCode::OK);
         assert_eq!(segment.headers()[header::CONTENT_TYPE], "audio/wav");
+        assert_eq!(segment.headers()[header::CONTENT_LENGTH], "3244");
+        assert_eq!(segment.headers()[header::ACCEPT_RANGES], "bytes");
         let segment_body = axum::body::to_bytes(segment.into_body(), 4_000)
             .await
             .unwrap();
         assert_eq!(segment_body.len(), 3_244);
         assert!(segment_body[44..].iter().all(|byte| *byte == 2));
+
+        let mut segment_headers = HeaderMap::new();
+        segment_headers.insert(header::RANGE, HeaderValue::from_static("bytes=44-47"));
+        let ranged_segment = session_audio_segment(
+            State(state.clone()),
+            Path("session_content_test".into()),
+            Query(PlaybackSegmentQuery {
+                start_ms: Some(100),
+                duration_ms: Some(100),
+            }),
+            segment_headers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ranged_segment.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            ranged_segment.headers()[header::CONTENT_RANGE],
+            "bytes 44-47/3244"
+        );
+        assert_eq!(ranged_segment.headers()[header::CONTENT_LENGTH], "4");
+        let ranged_body = axum::body::to_bytes(ranged_segment.into_body(), 16)
+            .await
+            .unwrap();
+        assert_eq!(&ranged_body[..], &[2, 2, 2, 2]);
 
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, HeaderValue::from_static("bytes=3240-3247"));
