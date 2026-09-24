@@ -1,0 +1,33 @@
+apps/web/src/App.tsx
+  s_7e23799dc317a2::t_aa764766e533e3 11,1023-1024,1716,1740,1753,1756,1759,1761-1763,1821,1868,1896
+apps/web/src/LiveReading.tsx
+  s_7e23799dc317a2::t_f52bb25411ca61 1-102
+apps/web/src/SessionPlayer.tsx
+  s_7e23799dc317a2::t_95ff12c5f17709 22,27-28,107,187-188,217,219-220,222
+apps/web/src/liveReadingModel.test.ts
+  s_7e23799dc317a2::t_5a1a1d7d8b827c 1-29
+apps/web/src/liveReadingModel.ts
+  s_7e23799dc317a2::t_62be2c2282ca65 1-29
+apps/web/src/styles.css
+  s_7e23799dc317a2::t_a78dc9d9178476 626-710
+apps/web/tests/live_recording_smoke.mjs
+  s_7e23799dc317a2::t_9d8726a7c002ad 1-103
+apps/web/tests/live_ui_smoke.mjs
+  s_7e23799dc317a2::t_b74d8d6b3c8dce 1-102
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a849ff910ce14e66ae1fdf9f0d0233d5e279df96",
+  "prompts": {},
+  "sessions": {
+    "s_7e23799dc317a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ad52-c35f-7882-a496-5c0fabb841af",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
