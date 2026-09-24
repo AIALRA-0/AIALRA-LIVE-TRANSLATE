@@ -1,0 +1,10 @@
+-- Idempotency is scoped to the authenticated owner; purging a project removes its keys.
+CREATE TABLE project_creation_requests (
+    owner_subject TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    response_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(owner_subject, request_id)
+);

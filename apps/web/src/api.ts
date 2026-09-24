@@ -115,9 +115,9 @@ export const api = {
   })),
   listSessions: () => checked<Session[]>(fetch("/api/v1/sessions")),
   listProjects: () => checked<Project[]>(fetch("/api/v1/projects")),
-  createProject: (title: string) => checked<Project>(fetch("/api/v1/projects", {
+  createProject: (title: string, idempotencyKey: string) => checked<Project>(fetch("/api/v1/projects", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
     body: JSON.stringify({ title, source_language: "en", target_language: "zh-CN" }),
   })),
   updateProject: (projectId: string, input: { title?: string; source_language?: string; target_language?: string }) => checked<Project>(fetch(`/api/v1/projects/${projectId}`, {

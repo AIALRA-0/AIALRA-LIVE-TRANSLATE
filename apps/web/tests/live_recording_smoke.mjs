@@ -79,7 +79,9 @@ try {
   const player = page.locator(".live-player");
   await player.getByRole("button", { name: "后退 30 秒" }).waitFor({ timeout: 20000 });
   await player.locator("audio").evaluate((audio) => { window.__mediaEvents = []; for (const type of ["loadstart", "loadedmetadata", "loadeddata", "canplay", "seeking", "seeked", "play", "playing", "waiting", "stalled", "error"]) audio.addEventListener(type, () => window.__mediaEvents.push(type)); });
-  await player.getByRole("slider", { name: "回放位置" }).fill("6");
+  const slider = player.getByRole("slider", { name: "回放位置" });
+  const maximum = Number(await slider.getAttribute("max"));
+  await slider.fill(String(Math.floor(Math.min(6, Math.max(0.1, maximum * 0.7)) * 10) / 10));
   await player.getByRole("button", { name: "后退 30 秒" }).click();
   assert.ok(Number(await player.getByRole("slider", { name: "回放位置" }).inputValue()) < 1, "back 30 returns to start");
   await player.getByRole("button", { name: "播放课程" }).click();

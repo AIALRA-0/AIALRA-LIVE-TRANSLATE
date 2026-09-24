@@ -6,8 +6,8 @@ use crate::identity::{CurrentUser, valid_identifier};
 use crate::jobs::finish_session_after_stop;
 use aialra_core_domain::SessionState;
 use aialra_event_store::{
-    LeaseAcquireOutcome, NewProject, NewSession, ProjectRecord, ProjectUpdateRecord,
-    RecordingLeaseRecord, SessionRecord,
+    LeaseAcquireOutcome, NewProject, NewSession, ProjectCreationOutcome, ProjectRecord,
+    ProjectUpdateRecord, RecordingLeaseRecord, SessionRecord,
 };
 use async_stream::stream;
 use axum::Json;
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::convert::Infallible;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const LEASE_SECONDS: i64 = 45;
@@ -106,32 +106,87 @@ pub async fn list_projects(
 pub async fn create_project(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     Json(request): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectRecord>, ApiError> {
-    validate_title(&request.title)?;
+    let total_started = Instant::now();
+    let validation_started = Instant::now();
+    let request_id = parse_idempotency_key(&headers)?;
+    let title = request.title.trim().to_owned();
+    validate_title(&title)?;
     validate_language_pair(&request.source_language, &request.target_language)?;
-    let record = state.store.create_project(&NewProject {
-        id: format!("project_{}", Uuid::now_v7().simple()),
-        owner_subject: user.0.clone(),
-        title: request.title.trim().to_owned(),
-        source_language: request.source_language,
-        target_language: request.target_language,
-    })?;
-    state.record_project_update(
-        &record.id,
-        None,
-        "project.created",
-        json!({"project": record}),
+    let request_hash = hex::encode(Sha256::digest(serde_json::to_vec(&(
+        &title,
+        &request.source_language,
+        &request.target_language,
+    ))?));
+    let validation_us = validation_started.elapsed().as_micros() as u64;
+
+    let store_started = Instant::now();
+    let outcome = state.store.create_project_request(
+        &NewProject {
+            id: format!("project_{}", Uuid::now_v7().simple()),
+            owner_subject: user.0.clone(),
+            title,
+            source_language: request.source_language,
+            target_language: request.target_language,
+        },
+        request_id.as_deref(),
+        &request_hash,
+        crate::readweave::configured(),
     )?;
-    state.record_workspace_update(
-        &user.0,
-        "workspace.project.created",
-        json!({"project": record}),
-    )?;
-    if crate::readweave::configured() {
-        state.record_project_update(&record.id, None, "readweave.egress.authorized", json!({"scope": ["stable_transcript", "translation", "explanation", "asset_index"], "raw_audio": false, "raw_assets": false}))?;
-    }
+    let store_us = store_started.elapsed().as_micros() as u64;
+
+    let (record, replayed, publish_us) = match outcome {
+        ProjectCreationOutcome::KeyConflict => {
+            return Err(ApiError::conflict_with_code(
+                "Idempotency-Key was already used with a different project request",
+                "idempotency_key_conflict",
+            ));
+        }
+        ProjectCreationOutcome::Replayed { project } => (project, true, 0),
+        ProjectCreationOutcome::Created {
+            project,
+            project_update,
+            workspace_update,
+            readweave_update,
+        } => {
+            let publish_started = Instant::now();
+            let _ = state.project_updates.send(project_update);
+            let _ = state.workspace_updates.send(workspace_update);
+            if let Some(update) = readweave_update {
+                let _ = state.project_updates.send(update);
+            }
+            (project, false, publish_started.elapsed().as_micros() as u64)
+        }
+    };
+    tracing::info!(
+        validation_us,
+        store_us,
+        publish_us,
+        total_us = total_started.elapsed().as_micros() as u64,
+        replayed,
+        "project creation timing"
+    );
     Ok(Json(record))
+}
+
+fn parse_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let mut values = headers.get_all("Idempotency-Key").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ApiError::bad_request(
+            "Idempotency-Key must contain one UUID",
+        ));
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::bad_request("Idempotency-Key must be a UUID"))?;
+    let request_id = Uuid::parse_str(value)
+        .map_err(|_| ApiError::bad_request("Idempotency-Key must be a UUID"))?;
+    Ok(Some(request_id.to_string()))
 }
 
 pub async fn get_project(
@@ -1037,6 +1092,173 @@ fn default_target_language() -> String {
 mod tests {
     use super::*;
     use aialra_event_store::{NewModelJob, NewSession, WorkerHeartbeat};
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+
+    async fn submit_project(
+        state: AppState,
+        owner: &str,
+        request_id: &str,
+        title: &str,
+    ) -> Result<Json<ProjectRecord>, ApiError> {
+        let mut headers = HeaderMap::new();
+        headers.insert("Idempotency-Key", request_id.parse().unwrap());
+        create_project(
+            State(state),
+            Extension(CurrentUser(owner.to_owned())),
+            headers,
+            Json(CreateProjectRequest {
+                title: title.to_owned(),
+                source_language: "en".to_owned(),
+                target_language: "zh-CN".to_owned(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn project_creation_replays_same_key_without_duplicate_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        let request_id = Uuid::now_v7().to_string();
+
+        let Json(first) =
+            submit_project(state.clone(), "owner-a", &request_id, "Synthetic project")
+                .await
+                .unwrap();
+        let Json(replay) = submit_project(
+            state.clone(),
+            "owner-a",
+            &request_id,
+            "  Synthetic project  ",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.id, replay.id);
+        assert_eq!(state.store.list_projects("owner-a").unwrap().len(), 1);
+        let project_updates = state
+            .store
+            .list_project_updates_after(&first.id, 0)
+            .unwrap();
+        assert_eq!(
+            project_updates
+                .iter()
+                .filter(|update| update.update_type == "project.created")
+                .count(),
+            1
+        );
+        let workspace_updates = state
+            .store
+            .list_workspace_updates_after("owner-a", 0)
+            .unwrap();
+        assert_eq!(
+            workspace_updates
+                .iter()
+                .filter(|update| update.update_type == "workspace.project.created")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn project_creation_keys_allow_distinct_requests_and_are_owner_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        let shared_request_id = Uuid::now_v7().to_string();
+        let second_request_id = Uuid::now_v7().to_string();
+
+        let Json(owner_first) = submit_project(
+            state.clone(),
+            "owner-a",
+            &shared_request_id,
+            "Owner A project",
+        )
+        .await
+        .unwrap();
+        let Json(owner_second) = submit_project(
+            state.clone(),
+            "owner-a",
+            &second_request_id,
+            "Owner A second project",
+        )
+        .await
+        .unwrap();
+        let Json(other_owner) = submit_project(
+            state.clone(),
+            "owner-b",
+            &shared_request_id,
+            "Owner B project",
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(owner_first.id, owner_second.id);
+        assert_ne!(owner_first.id, other_owner.id);
+        assert_eq!(owner_first.owner_subject, "owner-a");
+        assert_eq!(other_owner.owner_subject, "owner-b");
+        assert_eq!(state.store.list_projects("owner-a").unwrap().len(), 2);
+        assert_eq!(state.store.list_projects("owner-b").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn project_creation_rejects_same_key_with_different_request_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        let request_id = Uuid::now_v7().to_string();
+
+        let Json(original) =
+            submit_project(state.clone(), "owner-a", &request_id, "Original project")
+                .await
+                .unwrap();
+        assert_eq!(original.title, "Original project");
+        let conflict = submit_project(state.clone(), "owner-a", &request_id, "Different project")
+            .await
+            .unwrap_err()
+            .into_response();
+        assert_eq!(conflict.status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(state.store.list_projects("owner-a").unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_project_creation_replays_one_committed_result() {
+        const CALLS: usize = 12;
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::open(temp.path()).unwrap();
+        let request_id = Uuid::now_v7().to_string();
+        let barrier = Arc::new(tokio::sync::Barrier::new(CALLS));
+        let mut tasks = Vec::with_capacity(CALLS);
+
+        for _ in 0..CALLS {
+            let state = state.clone();
+            let request_id = request_id.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                submit_project(state, "owner-a", &request_id, "Concurrent project")
+                    .await
+                    .unwrap()
+                    .0
+            }));
+        }
+
+        let mut ids = Vec::with_capacity(CALLS);
+        for task in tasks {
+            ids.push(task.await.unwrap().id);
+        }
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        assert_eq!(state.store.list_projects("owner-a").unwrap().len(), 1);
+        assert_eq!(
+            state
+                .store
+                .list_project_updates_after(&ids[0], 0)
+                .unwrap()
+                .iter()
+                .filter(|update| update.update_type == "project.created")
+                .count(),
+            1
+        );
+    }
 
     #[tokio::test]
     async fn historical_topic_backfill_is_owner_scoped_and_idempotent() {

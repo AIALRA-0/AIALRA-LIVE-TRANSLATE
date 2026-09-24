@@ -27,7 +27,7 @@ const events = [
   event("translation.finalized", 7, { paragraph_id: "p3", source_text: "A fault model defines which failures matter.", text: "故障模型定义哪些故障需要关注。", provider: "synthetic" }),
   event("explanation.card.created", 8, { card_id: "card1", result: {
     evidence_segment_ids: ["p3"], teaching_sections: {
-      content_explanation: "它约束测试需要覆盖的故障范围。",
+      content_explanation: "**故障模型**约束测试需要覆盖的故障范围。\n\n- 覆盖故障\n- 避免遗漏",
     }, provider: "synthetic",
   } }),
 ];
@@ -63,22 +63,32 @@ try {
     await live.waitFor({ timeout: 10000 });
     const cards = live.getByTestId("live-caption");
     await cards.first().waitFor();
-    await cards.first().getByText("故障模型定义哪些故障需要关注。").waitFor();
+    await cards.first().getByText("测试检查电路是否发生故障。").waitFor();
     const firstText = await cards.first().textContent();
-    const chineseFirst = firstText.indexOf("故障模型定义") < firstText.indexOf("A fault model");
-    const teaching = await live.locator(".live-teaching").count();
+    const chineseFirst = firstText.indexOf("测试检查") < firstText.indexOf("A test checks");
+    const chronological = await cards.nth(2).getByText("故障模型定义哪些故障需要关注。").count() === 1;
+    const teaching = await live.locator(".live-understanding").count();
     const stale = await live.locator(".live-uncertainty").count();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
     const screenshot = path.join(tmpdir(), `aialra-live-phase2p-${width}.png`);
     await page.screenshot({ path: screenshot });
-    if ((await cards.count()) !== 3 || !chineseFirst || teaching !== 1 || stale !== 1 || overflow || errors.length) {
-      throw new Error(JSON.stringify({ width, cards: await cards.count(), firstText, chineseFirst, teaching, stale, overflow, errors }));
+    if ((await cards.count()) !== 3 || !chineseFirst || !chronological || teaching !== 1 || stale !== 1 || overflow || errors.length) {
+      throw new Error(JSON.stringify({ width, cards: await cards.count(), firstText, chineseFirst, chronological, teaching, stale, overflow, errors }));
     }
+    await live.locator(".live-reading-settings summary").click();
+    await live.getByLabel("中文字号").selectOption("24");
+    await live.getByLabel("英文粗细").selectOption("600");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await live.locator(".live-reading-settings summary").click();
+    if (await live.getByLabel("中文字号").inputValue() !== "24" || await live.getByLabel("英文粗细").inputValue() !== "600") throw new Error("reading settings did not persist");
     await live.getByRole("button", { name: /待核实/ }).click();
     await live.locator(".live-uncertainty").waitFor();
     await live.getByRole("button", { name: "返回最新" }).click();
-    await live.locator(".live-teaching summary").click();
-    if (!(await live.getByText("它约束测试需要覆盖的故障范围。").isVisible())) throw new Error("teaching did not open");
+    await cards.nth(2).getByRole("button", { name: /查看讲解/ }).click();
+    await live.locator(".live-understanding strong").filter({ hasText: "当前理解" }).waitFor({ state: "visible" });
+    if (!(await live.locator(".content-markdown strong").filter({ hasText: "故障模型" }).isVisible())) throw new Error("markdown bold not rendered");
+    if (!(await live.locator(".content-markdown li").count())) throw new Error("markdown list not rendered");
+    if (width === 390) await live.getByRole("button", { name: "关闭", exact: true }).click();
     await page.goto(`${baseUrl}/app/projects/${project.id}/sessions/${session.id}/notes/transcript`, { waitUntil: "domcontentloaded" });
     await page.locator(".document-panel").waitFor();
     await page.getByRole("button", { name: "返回听课" }).click();
@@ -86,7 +96,7 @@ try {
     activeEvents = events.filter((item) => item.event_type !== "explanation.card.created");
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByTestId("live-reading").waitFor();
-    if (await page.locator(".live-teaching").count()) throw new Error("zero teaching leaves a visible panel");
+    if (await page.locator(".live-understanding").count()) throw new Error("zero teaching leaves a visible panel");
     session.state = "completed";
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator(".document-panel").waitFor();

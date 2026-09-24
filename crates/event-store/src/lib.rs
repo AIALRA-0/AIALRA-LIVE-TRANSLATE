@@ -25,6 +25,8 @@ const WORKSPACE_TRASH_MIGRATION: &str =
     include_str!("../migrations/0009_workspace_trash.migration");
 const EXPLANATION_MODEL_MIGRATION: &str =
     include_str!("../migrations/0010_explanation_model.migration");
+const PROJECT_CREATION_IDEMPOTENCY_MIGRATION: &str =
+    include_str!("../migrations/0011_project_creation_idempotency.migration");
 
 // The duplicate-event check reads the immutable identity and lineage fields
 // together so a retransmission can be compared without silently widening its
@@ -185,6 +187,22 @@ impl EventStore {
             )?;
             transaction.commit()?;
         }
+        let project_creation_idempotency_applied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 11)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !project_creation_idempotency_applied {
+            let transaction = connection.unchecked_transaction()?;
+            transaction
+                .execute_batch(PROJECT_CREATION_IDEMPOTENCY_MIGRATION)
+                .context("apply project creation idempotency migration")?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (11, ?1)",
+                [Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -304,6 +322,112 @@ impl EventStore {
         drop(connection);
         self.get_project(&project.id)?
             .context("project disappeared after creation")
+    }
+
+    /// Creates a project and its initial durable updates atomically, replaying a keyed request
+    /// only for the same owner and normalized request body.
+    pub fn create_project_request(
+        &self,
+        project: &NewProject,
+        request_id: Option<&str>,
+        request_hash: &str,
+        include_readweave_update: bool,
+    ) -> Result<ProjectCreationOutcome> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if let Some(request_id) = request_id {
+            let existing = transaction
+                .query_row(
+                    "SELECT request_hash, response_json FROM project_creation_requests WHERE owner_subject = ?1 AND request_id = ?2",
+                    params![project.owner_subject, request_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some((existing_hash, response_json)) = existing {
+                let outcome = if existing_hash == request_hash {
+                    ProjectCreationOutcome::Replayed {
+                        project: serde_json::from_str(&response_json)
+                            .context("decode stored project creation response")?,
+                    }
+                } else {
+                    ProjectCreationOutcome::KeyConflict
+                };
+                drop(transaction);
+                drop(connection);
+                return Ok(outcome);
+            }
+        }
+
+        let now = Utc::now();
+        transaction.execute(
+            "INSERT INTO projects(id, owner_subject, title, source_language, target_language, version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
+            params![project.id, project.owner_subject, project.title, project.source_language, project.target_language, now.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO workspace_project_placements(project_id, updated_at) VALUES (?1, ?2)",
+            params![project.id, now.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO project_ai_policies(project_id, local_explanation_model, updated_at) VALUES (?1, 'qwen3.5:9b', ?2)",
+            params![project.id, now.to_rfc3339()],
+        )?;
+
+        let record = ProjectRecord {
+            id: project.id.clone(),
+            owner_subject: project.owner_subject.clone(),
+            title: project.title.clone(),
+            source_language: project.source_language.clone(),
+            target_language: project.target_language.clone(),
+            version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        let project_payload = serde_json::json!({"project": record});
+        let project_update = insert_project_update_tx(
+            &transaction,
+            &project.id,
+            "project.created",
+            &project_payload,
+        )?;
+        let workspace_update = insert_workspace_update_tx(
+            &transaction,
+            &project.owner_subject,
+            "workspace.project.created",
+            &project_payload,
+        )?;
+        let readweave_update = if include_readweave_update {
+            Some(insert_project_update_tx(
+                &transaction,
+                &project.id,
+                "readweave.egress.authorized",
+                &serde_json::json!({"scope": ["stable_transcript", "translation", "explanation", "asset_index"], "raw_audio": false, "raw_assets": false}),
+            )?)
+        } else {
+            None
+        };
+
+        if let Some(request_id) = request_id {
+            transaction.execute(
+                "INSERT INTO project_creation_requests(owner_subject, request_id, request_hash, project_id, response_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    project.owner_subject,
+                    request_id,
+                    request_hash,
+                    project.id,
+                    serde_json::to_string(&record)?,
+                    now.to_rfc3339(),
+                ],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(ProjectCreationOutcome::Created {
+            project: record,
+            project_update,
+            workspace_update,
+            readweave_update,
+        })
     }
 
     pub fn get_project(&self, project_id: &str) -> Result<Option<ProjectRecord>> {
@@ -2503,6 +2627,47 @@ impl EventStore {
     }
 }
 
+fn insert_project_update_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    update_type: &str,
+    payload: &Value,
+) -> Result<ProjectUpdateRecord> {
+    let created_at = Utc::now();
+    transaction.execute(
+        "INSERT INTO project_updates(project_id, session_id, update_type, payload_json, created_at) VALUES (?1, NULL, ?2, ?3, ?4)",
+        params![project_id, update_type, serde_json::to_string(payload)?, created_at.to_rfc3339()],
+    )?;
+    Ok(ProjectUpdateRecord {
+        cursor: transaction.last_insert_rowid(),
+        project_id: project_id.to_owned(),
+        session_id: None,
+        update_type: update_type.to_owned(),
+        payload: payload.clone(),
+        created_at,
+    })
+}
+
+fn insert_workspace_update_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    owner_subject: &str,
+    update_type: &str,
+    payload: &Value,
+) -> Result<WorkspaceUpdateRecord> {
+    let created_at = Utc::now();
+    transaction.execute(
+        "INSERT INTO workspace_updates(owner_subject, update_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![owner_subject, update_type, serde_json::to_string(payload)?, created_at.to_rfc3339()],
+    )?;
+    Ok(WorkspaceUpdateRecord {
+        cursor: transaction.last_insert_rowid(),
+        owner_subject: owner_subject.to_owned(),
+        update_type: update_type.to_owned(),
+        payload: payload.clone(),
+        created_at,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct NewSession {
     pub id: String,
@@ -2535,6 +2700,20 @@ pub struct NewProject {
     pub title: String,
     pub source_language: String,
     pub target_language: String,
+}
+
+#[derive(Debug)]
+pub enum ProjectCreationOutcome {
+    Created {
+        project: ProjectRecord,
+        project_update: ProjectUpdateRecord,
+        workspace_update: WorkspaceUpdateRecord,
+        readweave_update: Option<ProjectUpdateRecord>,
+    },
+    Replayed {
+        project: ProjectRecord,
+    },
+    KeyConflict,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

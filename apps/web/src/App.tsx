@@ -9,6 +9,8 @@ import { UserNotes } from "./UserNotes";
 import { CourseQuestions } from "./CourseQuestions";
 import { SessionPlayer } from "./SessionPlayer";
 import { LiveReading } from "./LiveReading";
+import { ContentMarkdown } from "./ContentMarkdown";
+import { safeSourceUrl } from "./contentMarkdownFormat";
 import { CourseOutline } from "./CourseOutline";
 import { CloudTextPolicy } from "./CloudTextPolicy";
 import { focusedParagraphId, insightForParagraph, mainDocumentItems } from "./documentLayout";
@@ -207,7 +209,7 @@ type ContextMenuState =
   | { kind: "workspace"; x: number; y: number; target: WorkspaceContextTarget }
   | { kind: "trash"; x: number; y: number; item: WorkspaceTrashItem };
 
-function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, onToggleTheme, onSelectProject, onSelectSession, onCreateFolder, onCreateProject, onUpdateFolder, onPlaceProject, onUpdateProject, onUpdateSession, onMoveWorkspace, onTrash, onRestoreTrash, onPurgeTrash, onOpenSettings }: {
+export function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, onToggleTheme, onSelectProject, onSelectSession, onCreateFolder, onCreateProject, onUpdateFolder, onPlaceProject, onUpdateProject, onUpdateSession, onMoveWorkspace, onTrash, onRestoreTrash, onPurgeTrash, onOpenSettings }: {
   snapshot: WorkspaceSnapshot;
   activeProjectId: string | null;
   activeSessionId: string | null;
@@ -216,7 +218,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   onSelectProject: (project: Project) => void;
   onSelectSession: (project: Project, session: Session) => void;
   onCreateFolder: (title: string, parentId: string | null) => Promise<void>;
-  onCreateProject: (title: string, folderId: string | null) => Promise<void>;
+  onCreateProject: (title: string, folderId: string | null, idempotencyKey: string, submittedAt: number) => Promise<void>;
   onUpdateFolder: (folder: WorkspaceFolder, title: string, parentId: string | null, archived: boolean, sortOrder?: number) => Promise<void>;
   onPlaceProject: (project: Project, folderId: string | null, archived: boolean, sortOrder?: number) => Promise<void>;
   onUpdateProject: (project: Project, input: { title?: string; source_language?: string; target_language?: string }) => Promise<void>;
@@ -245,6 +247,10 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     setCollapsedProjects((current) => { const next = new Set(current); if (expanded) next.add(projectId); else next.delete(projectId); return next; });
   };
   const [dialog, setDialog] = useState<WorkspaceDialogState | null>(null);
+  const [projectCreationPending, setProjectCreationPending] = useState(false);
+  const projectCreationPendingRef = useRef(false);
+  const projectCreationIntentKeyRef = useRef<string | null>(null);
+  const projectCreationAttemptRef = useRef<{ title: string; folderId: string | null; key: string } | null>(null);
   const [dialogTitle, setDialogTitle] = useState("");
   const [dialogParentId, setDialogParentId] = useState<string>("");
   const [dialogSourceLanguage, setDialogSourceLanguage] = useState("en");
@@ -415,6 +421,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
   }
 
   function openDialog(next: WorkspaceDialogState, parentOverride?: string | null): void {
+    if (projectCreationPending) return;
     setContextMenu(null);
     setDialog(next);
     setDialogTitle(next.action === "rename-session" ? next.session.title : "folder" in next ? next.folder.title : "project" in next ? next.project.title : "");
@@ -433,8 +440,32 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     event.preventDefault();
     if (!dialog) return;
     const title = dialogTitle.trim();
+    if (dialog.action === "create-project") {
+      if (!title || projectCreationPendingRef.current) return;
+      projectCreationPendingRef.current = true;
+      setProjectCreationPending(true);
+      const folderId = dialogParentId || null;
+      const submittedAt = performance.now();
+      const previousAttempt = projectCreationAttemptRef.current;
+      const key = previousAttempt && (previousAttempt.title !== title || previousAttempt.folderId !== folderId)
+        ? crypto.randomUUID()
+        : projectCreationIntentKeyRef.current ?? crypto.randomUUID();
+      projectCreationIntentKeyRef.current = key;
+      projectCreationAttemptRef.current = { title, folderId, key };
+      try {
+        await onCreateProject(title, folderId, key, submittedAt);
+        setDialog(null);
+        projectCreationIntentKeyRef.current = null;
+        projectCreationAttemptRef.current = null;
+      } catch {
+        // Keep the dialog and key so an unchanged retry reuses the same intent.
+      } finally {
+        projectCreationPendingRef.current = false;
+        setProjectCreationPending(false);
+      }
+      return;
+    }
     if (dialog.action === "create-folder" && title) await onCreateFolder(title, dialogParentId || null);
-    if (dialog.action === "create-project" && title) await onCreateProject(title, dialogParentId || null);
     if (dialog.action === "rename-folder" && title) await onUpdateFolder(dialog.folder, title, dialog.folder.parent_id, false);
     if (dialog.action === "move-folder") await onUpdateFolder(dialog.folder, dialog.folder.title, dialogParentId || null, false);
     if (dialog.action === "rename-project" && title) await onUpdateProject(dialog.project, { title });
@@ -649,7 +680,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
       return <div className="workspace-context-menu" role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>
         <strong className="context-menu-heading">工作区根目录</strong>
         <button role="menuitem" onClick={() => openDialog({ action: "create-folder" }, null)}>新建文件夹</button>
-        <button role="menuitem" onClick={() => openDialog({ action: "create-project" }, null)}>新建项目</button>
+        <button role="menuitem" onClick={() => { projectCreationIntentKeyRef.current = crypto.randomUUID(); projectCreationAttemptRef.current = null; openDialog({ action: "create-project" }, null); }}>新建项目</button>
         <button role="menuitem" onClick={() => { setContextMenu(null); onOpenSettings(); }}>设置与运行状态</button>
       </div>;
     }
@@ -660,7 +691,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     const blockedReason = trashBlockReason(target);
     return <div className="workspace-context-menu" role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>
       <button role="menuitem" onClick={() => openTarget(target)}>打开</button>
-      {folder && <><button role="menuitem" onClick={() => { setSelectedFolderId(folder.id); openDialog({ action: "create-folder" }, folder.id); }}>在此新建子文件夹</button><button role="menuitem" onClick={() => { setSelectedFolderId(folder.id); openDialog({ action: "create-project" }, folder.id); }}>在此新建项目</button><button role="menuitem" onClick={() => openDialog({ action: "rename-folder", folder })}>重命名</button><button role="menuitem" onClick={() => openDialog({ action: "move-folder", folder })}>移动</button></>}
+      {folder && <><button role="menuitem" onClick={() => { setSelectedFolderId(folder.id); openDialog({ action: "create-folder" }, folder.id); }}>在此新建子文件夹</button><button role="menuitem" onClick={() => { projectCreationIntentKeyRef.current = crypto.randomUUID(); projectCreationAttemptRef.current = null; setSelectedFolderId(folder.id); openDialog({ action: "create-project" }, folder.id); }}>在此新建项目</button><button role="menuitem" onClick={() => openDialog({ action: "rename-folder", folder })}>重命名</button><button role="menuitem" onClick={() => openDialog({ action: "move-folder", folder })}>移动</button></>}
       {project && <><button role="menuitem" onClick={() => openDialog({ action: "rename-project", project })}>重命名</button><button role="menuitem" onClick={() => openDialog({ action: "project-language", project })}>语言默认值</button><button role="menuitem" onClick={() => openDialog({ action: "move-project", project })}>移动</button></>}
       {session && sessionProject && <button role="menuitem" onClick={() => openDialog({ action: "rename-session", project: sessionProject, session })}>重命名</button>}
       <button className="danger-menu-item" role="menuitem" disabled={Boolean(blockedReason)} title={blockedReason ?? "移入回收站"} onClick={() => moveTargetToTrash(target)}>移入回收站</button>
@@ -672,7 +703,7 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
     <aside className={`workspace-sidebar ${mobileOpen ? "mobile-open" : ""}`} aria-label="课程工作区">
       <div className="workspace-brand"><span>A</span><div><strong>AIALRA</strong><small>课程工作区</small></div><button className="theme-toggle" aria-label={`切换到${theme === "light" ? "黑色" : "白色"}模式`} onClick={onToggleTheme}>{theme === "light" ? "◐ 黑色" : "◑ 白色"}</button><button className="mobile-tree-toggle" aria-expanded={mobileOpen} onClick={() => setMobileOpen((current) => !current)}>{mobileOpen ? "关闭课程树" : "打开课程树"}</button></div>
       <nav className="workspace-tree">
-        <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-label="新建项目" onClick={() => openDialog({ action: "create-project" }, null)}>新建项目</button><button aria-label="打开设置和运行状态" onClick={onOpenSettings}>设置</button></div></div>
+        <div className="tree-heading"><span>我的课程</span><div className="tree-heading-actions"><button aria-label="新建项目" onClick={() => { projectCreationIntentKeyRef.current = crypto.randomUUID(); projectCreationAttemptRef.current = null; openDialog({ action: "create-project" }, null); }}>新建项目</button><button aria-label="打开设置和运行状态" onClick={onOpenSettings}>设置</button></div></div>
         {dragging && <div className="drag-status" role="status" aria-live="polite"><strong>正在移动：{targetTitle(dragging)}</strong><span>{dropTarget ? `松开放入“${dropTargetTitle(dropTarget)}”` : "将光标移到高亮位置，再松开鼠标"}</span></div>}
         <ul className={currentDropIntent({ entityType: "root" }) ? "workspace-root-drop drop-target drop-root" : "workspace-root-drop"} onContextMenu={(event) => showContextMenu(event, { entityType: "root" })}>
           {snapshot.folders.filter((folder) => !folder.archived_at && folder.parent_id === null).map((folder) => renderFolder(folder, 0))}
@@ -689,13 +720,13 @@ function WorkspaceSidebar({ snapshot, activeProjectId, activeSessionId, theme, o
           {trashItems.length > 0 && <button type="button" className="trash-purge-all" onClick={() => void purgeAllTrash()}>清空回收站</button>}
         </div>}
       </section>
-      {dialog && <div className="workspace-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialog(null); }}><dialog className="workspace-dialog" open aria-modal="true" aria-labelledby="workspace-dialog-title" onCancel={() => setDialog(null)}>
+      {dialog && <div className="workspace-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (!projectCreationPendingRef.current && event.target === event.currentTarget) { projectCreationIntentKeyRef.current = null; projectCreationAttemptRef.current = null; setDialog(null); } }}><dialog className="workspace-dialog" open aria-modal="true" aria-labelledby="workspace-dialog-title" onCancel={(event) => { if (projectCreationPendingRef.current) event.preventDefault(); else { projectCreationIntentKeyRef.current = null; projectCreationAttemptRef.current = null; setDialog(null); } }}>
         <form method="dialog" onSubmit={(event) => void submitDialog(event)}>
-          <header><div><p>工作区操作</p><h2 id="workspace-dialog-title">{dialogTitleText}</h2></div><button type="button" aria-label="关闭" onClick={() => setDialog(null)}>×</button></header>
-          {dialogNeedsTitle && <label>名称<input autoFocus value={dialogTitle} placeholder="请输入清晰的名称" onChange={(event) => setDialogTitle(event.target.value)} required /></label>}
-          {dialogNeedsParent && <label>位置<select value={dialogParentId} onChange={(event) => setDialogParentId(event.target.value)}><option value="">工作区根目录</option>{snapshot.folders.filter((item) => !item.archived_at && !("folder" in dialog && (item.id === dialog.folder.id || isDescendant(item.id, dialog.folder.id)))).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>}
+          <header><div><p>工作区操作</p><h2 id="workspace-dialog-title">{dialogTitleText}</h2></div><button type="button" aria-label="关闭" disabled={projectCreationPending} onClick={() => { projectCreationIntentKeyRef.current = null; projectCreationAttemptRef.current = null; setDialog(null); }}>×</button></header>
+          {dialogNeedsTitle && <label>名称<input autoFocus value={dialogTitle} placeholder="请输入清晰的名称" onChange={(event) => setDialogTitle(event.target.value)} required disabled={dialog.action === "create-project" && projectCreationPending} /></label>}
+          {dialogNeedsParent && <label>位置<select value={dialogParentId} onChange={(event) => setDialogParentId(event.target.value)} disabled={dialog.action === "create-project" && projectCreationPending}><option value="">工作区根目录</option>{snapshot.folders.filter((item) => !item.archived_at && !("folder" in dialog && (item.id === dialog.folder.id || isDescendant(item.id, dialog.folder.id)))).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>}
           {dialog.action === "project-language" && <div className="language-settings-grid"><label>默认讲授语言<select value={dialogSourceLanguage} onChange={(event) => setDialogSourceLanguage(event.target.value)}>{SOURCE_LANGUAGE_OPTIONS.map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select></label><label>默认翻译语言<select value={dialogTargetLanguage} onChange={(event) => setDialogTargetLanguage(event.target.value)}>{TARGET_LANGUAGE_OPTIONS.map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select></label><p>只影响以后新建的课程，已有课程保持原语言。</p></div>}
-          <footer><button type="button" className="secondary-button" onClick={() => setDialog(null)}>取消</button><button type="submit" className="primary-button" disabled={Boolean(dialogNeedsTitle && !dialogTitle.trim())}>保存</button></footer>
+          <footer>{projectCreationPending && dialog.action === "create-project" && <span role="status" aria-live="polite">正在创建项目…</span>}<button type="button" className="secondary-button" disabled={projectCreationPending} onClick={() => { projectCreationIntentKeyRef.current = null; projectCreationAttemptRef.current = null; setDialog(null); }}>取消</button><button type="submit" className="primary-button" disabled={Boolean(dialogNeedsTitle && !dialogTitle.trim()) || (dialog.action === "create-project" && projectCreationPending)}>{dialog.action === "create-project" && projectCreationPending ? "创建中…" : "保存"}</button></footer>
         </form>
       </dialog></div>}
       {contextMenu?.kind === "workspace" && renderWorkspaceContextMenu(contextMenu)}
@@ -811,7 +842,7 @@ const DocumentItem = memo(function DocumentItem({ item, languageView, sessionId,
     <aside id={`evidence-${item.id}`} className={`insight-block ${item.kind}${item.statusTone ? ` ${item.statusTone}` : ""}`} data-testid={`insight-${item.kind}`}>
       <header><strong>{item.title}</strong><time>{time}</time></header>
       {item.imageUrl && <img src={item.imageUrl} alt={item.title} />}
-      {item.sections?.length ? <div className="insight-sections">{item.sections.map((section, index) => <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p>{section.backgroundReference && <a href={section.backgroundReference} target="_blank" rel="noopener noreferrer">已核对的背景资料 ↗</a>}</section>)}</div> : <p>{item.body || "正在解析内容"}</p>}
+      {item.sections?.length ? <div className="insight-sections">{item.sections.map((section, index) => <section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><ContentMarkdown text={section.text} />{section.backgroundReference && safeSourceUrl(section.backgroundReference) && <a href={safeSourceUrl(section.backgroundReference) ?? undefined} target="_blank" rel="noopener noreferrer">已核对的背景资料 ↗</a>}</section>)}</div> : <ContentMarkdown text={item.body || "正在解析内容"} />}
       {item.evidenceIds.length > 0 && <footer>{item.evidenceIds.slice(0, 6).map((id) => <button key={id} className="evidence-link" type="button" title={`回到证据 ${id}`} onClick={() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}>证据 · {id.slice(-6)}</button>)}</footer>}
     </aside>
   );
@@ -831,13 +862,13 @@ export function TeachingSectionsView({ sections }: { sections: NonNullable<Timel
           const label = term.label.replace(/^专业术语(?:\s*·\s*)?/, "").trim() || "术语说明";
           return <details key={`${term.label}:${termIndex}`} className="teaching-term">
             <summary>{label}</summary>
-            <p>{term.text}</p>
-            {term.backgroundReference && <a href={term.backgroundReference} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}
+            <ContentMarkdown text={term.text} />
+            {term.backgroundReference && safeSourceUrl(term.backgroundReference) && <a href={safeSourceUrl(term.backgroundReference) ?? undefined} target="_blank" rel="noopener noreferrer">查看背景资料 ↗</a>}
           </details>;
         })}</div>
       </section>];
     }
-    return [<section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><p>{section.text}</p></section>];
+    return [<section key={`${section.label}:${index}`} className={section.tone ?? "neutral"}><strong>{section.label}</strong><ContentMarkdown text={section.text} /></section>];
   })}</div>;
 }
 
@@ -899,12 +930,12 @@ export function CourseSummaryView({ overview, fallbackText, points, terms, teach
 
   return <>
     {overviewSections ? <section><h4>这节课讲了什么</h4><div className="course-summary-overview-sections">
-      {overviewSections.map((section) => <section key={section.label}><h5>{section.label}</h5><p>{section.text}</p></section>)}
-    </div></section> : overviewText && <section><h4>这节课讲了什么</h4><p>{overviewText}</p></section>}
+      {overviewSections.map((section) => <section key={section.label}><h5>{section.label}</h5><ContentMarkdown text={section.text} /></section>)}
+    </div></section> : overviewText && <section><h4>这节课讲了什么</h4><ContentMarkdown text={overviewText} /></section>}
     {points.length > 0 && <section><h4>按内容顺序回顾</h4><ol className="course-summary-chapter-list">{points.map((point, index) => <li key={`${index}:${point.slice(0, 32)}`}>
-      <details className="course-summary-chapter"><summary>{shortCourseChapterLabel(point)}</summary><p>{point}</p></details>
+      <details className="course-summary-chapter"><summary>{shortCourseChapterLabel(point)}</summary><ContentMarkdown text={point} /></details>
     </li>)}</ol></section>}
-    {terms.length > 0 && <section><h4>专业名词与背景</h4><dl>{terms.map((term, index) => <div key={`${term.term}:${index}`}><dt>{term.term}</dt><dd>{term.one_line}{term.background_reference && <a href={term.background_reference} target="_blank" rel="noopener noreferrer">查看来源 ↗</a>}</dd></div>)}</dl></section>}
+    {terms.length > 0 && <section><h4>专业名词与背景</h4><dl>{terms.map((term, index) => <div key={`${term.term}:${index}`}><dt>{term.term}</dt><dd><ContentMarkdown text={term.one_line} />{term.background_reference && safeSourceUrl(term.background_reference) && <a href={safeSourceUrl(term.background_reference) ?? undefined} target="_blank" rel="noopener noreferrer">查看来源 ↗</a>}</dd></div>)}</dl></section>}
     {!overviewSections && additionalTeachingSections.length > 0 && <section><h4>课程讲解结构</h4><TeachingSectionsView sections={additionalTeachingSections} /></section>}
   </>;
 }
@@ -2030,6 +2061,30 @@ export default function App() {
     }
   }
 
+  async function createProjectFromSidebar(title: string, folderId: string | null, idempotencyKey: string, submittedAt: number): Promise<void> {
+    setError("");
+    const requestStartedAt = performance.now();
+    console.info("workspace.project_create", { stage: "request_started", elapsed_ms: Math.round(requestStartedAt - submittedAt) });
+    try {
+      const project = await api.createProject(title, idempotencyKey);
+      const responseAt = performance.now();
+      console.info("workspace.project_create", { stage: "response_received", elapsed_ms: Math.round(responseAt - submittedAt), request_duration_ms: Math.round(responseAt - requestStartedAt) });
+      navigate(project.id, null);
+      const navigatedAt = performance.now();
+      console.info("workspace.project_create", { stage: "navigated", elapsed_ms: Math.round(navigatedAt - submittedAt), navigation_after_response_ms: Math.round(navigatedAt - responseAt) });
+      void persistSelection(project.id, null).catch((caught) => setError(caught instanceof Error ? caught.message : "项目已创建，但保存当前选择失败"));
+      if (folderId) {
+        void api.placeProject(project.id, { folder_id: folderId, sort_order: 0, archived: false })
+          .then(() => refresh())
+          .catch((caught) => setError(caught instanceof Error ? caught.message : "项目已创建，但移动到文件夹失败"));
+      }
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "项目创建失败，请重试";
+      setError(message);
+      throw caught;
+    }
+  }
+
   function selectWithoutAbandoningRecording(projectId: string, sessionId: string | null): void {
     const localLease = currentLocalLease();
     if (localLease && localLease.project_id !== projectId) {
@@ -2057,7 +2112,7 @@ export default function App() {
         onSelectProject={(project) => selectWithoutAbandoningRecording(project.id, null)}
         onSelectSession={(project, session) => selectWithoutAbandoningRecording(project.id, session.id)}
         onCreateFolder={(title, parentId) => runWorkspaceAction(async () => { await api.createFolder({ title, parent_id: parentId }); await refresh(); })}
-        onCreateProject={(title, folderId) => runWorkspaceAction(async () => { const project = await api.createProject(title); if (folderId) await api.placeProject(project.id, { folder_id: folderId, sort_order: 0, archived: false }); await refresh(); navigate(project.id, null); await persistSelection(project.id, null); })}
+        onCreateProject={createProjectFromSidebar}
         onUpdateFolder={(folder, title, parentId, archived, sortOrder) => runWorkspaceAction(async () => { await api.updateFolder(folder.id, { title, parent_id: parentId, sort_order: sortOrder ?? folder.sort_order, archived }); await refresh(); })}
         onPlaceProject={(project, folderId, archived, sortOrder) => runWorkspaceAction(async () => { const placement = snapshot.project_placements.find((item) => item.project_id === project.id); await api.placeProject(project.id, { folder_id: folderId, sort_order: sortOrder ?? placement?.sort_order ?? 0, archived }); await refresh(); if (archived && activeProject?.id === project.id) navigate(null, null); })}
         onUpdateProject={(project, input) => runWorkspaceAction(async () => { await api.updateProject(project.id, input); await refresh(); })}
