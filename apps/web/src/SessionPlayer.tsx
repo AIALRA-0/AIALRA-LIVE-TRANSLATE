@@ -19,11 +19,13 @@ function segmentUrl(sessionId: string, startSeconds: number): string {
   return `/api/v1/sessions/${sessionId}/audio/segment?start_ms=${Math.round(startSeconds * 1000)}&duration_ms=${SEGMENT_SECONDS * 1000}`;
 }
 
-export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }: {
+export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady, live = false, refreshKey = "" }: {
   sessionId: string;
   sessionState: string;
   seekRequest: { capturedAtMs: number; serial: number } | null;
   onReady: (ready: boolean) => void;
+  live?: boolean;
+  refreshKey?: string;
 }) {
   const audio = useRef<HTMLAudioElement>(null);
   const indexedSessionId = useRef(sessionId);
@@ -102,7 +104,7 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
       if (active && sessionChanged) setIndex(null);
     });
     return () => { active = false; };
-  }, [sessionId, sessionState, releasePrefetch]);
+  }, [sessionId, sessionState, refreshKey, releasePrefetch]);
 
   useEffect(() => { onReady(Boolean(index)); }, [index, onReady]);
 
@@ -182,8 +184,8 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
     selectSegment(nextStart, 0, true);
   };
   const progress = duration > 0 ? Math.min(100, Math.max(0, position / duration * 100)) : 0;
-  return <section className="session-player" aria-label="整节课程录音回放">
-    <div className="session-player-label"><strong>整节课程回放</strong><span>{clock(position)} / {clock(duration)}</span></div>
+  return <section className={`session-player ${live ? "live-player" : ""}`} aria-label="整节课程录音回放">
+    <div className="session-player-label"><strong>{live ? "原音回听" : "整节课程回放"}</strong><span>{clock(position)} / {clock(duration)}</span></div>
     <audio ref={audio} preload="metadata" src={source}
       onLoadedMetadata={(event) => {
         event.currentTarget.playbackRate = speed;
@@ -212,12 +214,12 @@ export function SessionPlayer({ sessionId, sessionState, seekRequest, onReady }:
       aria-label="课程录音" />
     <div className="session-player-controls">
       <button type="button" className="player-icon-button" onClick={toggle} aria-label={playing ? "暂停回放" : "播放课程"}>{playing ? "Ⅱ" : "▶"}</button>
-      <button type="button" onClick={() => seek(positionRef.current - 15)}>后退 15 秒</button>
+      <button type="button" onClick={() => seek(positionRef.current - (live ? 30 : 15))}>后退 {live ? 30 : 15} 秒</button>
       <input aria-label="回放位置" type="range" min={0} max={Math.max(duration, 0.1)} step={0.1} value={Math.min(position, duration)} style={{ "--player-progress": `${progress}%` } as CSSProperties} onChange={(event) => seek(Number(event.target.value))} />
-      <button type="button" onClick={() => seek(positionRef.current + 15)}>前进 15 秒</button>
-      <label><span>速度</span><select aria-label="回放速度" value={speed} onChange={(event) => { const next = Number(event.target.value); setSpeed(next); if (audio.current) audio.current.playbackRate = next; }}>
+      {!live && <button type="button" onClick={() => seek(positionRef.current + 15)}>前进 15 秒</button>}
+      {!live && <label><span>速度</span><select aria-label="回放速度" value={speed} onChange={(event) => { const next = Number(event.target.value); setSpeed(next); if (audio.current) audio.current.playbackRate = next; }}>
         {[0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{value}×</option>)}
-      </select></label>
+      </select></label>}
     </div>
     {buffering && !error && <small className="player-loading" role="status">正在加载当前录音</small>}
     {error && <small role="alert">{error}</small>}

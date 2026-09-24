@@ -8,6 +8,7 @@ import { clearStopIntent, readStopIntent, saveStopIntent, type RecordingStopInte
 import { UserNotes } from "./UserNotes";
 import { CourseQuestions } from "./CourseQuestions";
 import { SessionPlayer } from "./SessionPlayer";
+import { LiveReading } from "./LiveReading";
 import { CourseOutline } from "./CourseOutline";
 import { CloudTextPolicy } from "./CloudTextPolicy";
 import { focusedParagraphId, insightForParagraph, mainDocumentItems } from "./documentLayout";
@@ -1019,6 +1020,8 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   const [retryingExplanation, setRetryingExplanation] = useState(false);
   const [summaryRetryForEventId, setSummaryRetryForEventId] = useState<string | null>(null);
   const [learningView, setLearningView] = useState<"group" | "outline" | "course" | "questions">("group");
+  const [workspaceMode, setWorkspaceMode] = useState<"live" | "review">(() =>
+    routeSelection().section || ["processing", "completed", "failed", "archived"].includes(initial.state) ? "review" : "live");
   const [questionContext, setQuestionContext] = useState<{ cardId: string; serial: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [lease, setLease] = useState<RecordingLease | null>(null);
@@ -1710,6 +1713,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
         : "正在保存尾音和收尾；完成后可继续录制同一课程，历史内容保持不变。";
   const readWeaveTone = !readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : readWeave.syncing > 0 || readWeave.queued > 0 ? "yellow" : "green";
   const section = routeSelection().section;
+  const effectiveMode = section ? "review" : workspaceMode;
   const readWeaveNodeType = section === "user-notes" ? "user_notes" : section;
   const readWeaveUrl = readWeave?.targets?.find((target) => target.local_id === `${session.id}:${section === "user-notes" ? "user" : section}` || (!section && target.node_type === "session" && target.local_id === session.id))?.note_url ?? readWeave?.note_url;
   const visibleItems = useMemo(() => mainDocumentItems(timeline.items, section, languageView, documentSearch), [timeline.items, section, languageView, documentSearch]);
@@ -1733,6 +1737,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
   // A translation can arrive above the trailing preview. Track visible text,
   // not only item count or the final item's body, without following diagnostics.
   const documentContent = useMemo(() => JSON.stringify(renderedItems.map(({ id, body, translation }) => [id, body, translation])), [renderedItems]);
+  const latestAudioParagraphId = timeline.items.filter((item) => item.kind === "paragraph").at(-1)?.id ?? "";
 
   useLayoutEffect(() => {
     const element = documentRef.current;
@@ -1745,17 +1750,17 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
     } else {
       setNewItemsPending(true);
     }
-  }, [renderedItems.length, documentContent, section]);
+  }, [renderedItems.length, documentContent, section, effectiveMode]);
 
   return (
-    <div className="session-workspace">
+    <div className={`session-workspace ${effectiveMode === "live" ? "live-workspace" : "review-workspace"}`}>
       <header className="session-header">
         <div><p className="eyebrow">{project.title}</p><h1>{session.title}</h1><div className="session-meta"><span>建立：{formatLocalTimestamp(session.created_at)}</span><span>最近活动：{formatLocalTimestamp(lastActivityAt)}</span></div></div>
-        <div className="header-status"><StatusBadge tone={sessionStreamConnected ? "green" : "yellow"}>{sessionStreamConnected ? "内容已同步" : "正在重新连接"}</StatusBadge><StatusBadge tone={stopPending ? "yellow" : stateTone(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}>{stopPending ? "本机已停麦，待完成停止" : stateLabel(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}</StatusBadge></div>
+        <div className="header-status"><StatusBadge tone={sessionStreamConnected ? "green" : "yellow"}>{sessionStreamConnected ? "内容已同步" : "正在重新连接"}</StatusBadge><StatusBadge tone={stopPending ? "yellow" : stateTone(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}>{stopPending ? "本机已停麦，待完成停止" : stateLabel(recordingDisplayState(session.state, captureActive || (recordingStatusReady ? Boolean(remoteRecording) : undefined)))}</StatusBadge>{effectiveMode === "live" ? <time aria-label="当前时间">{new Date(statusClock).toLocaleTimeString("zh-CN", { hour12: false })}</time> : <button type="button" className="text-link-button" onClick={() => { navigate(project.id, session.id); setWorkspaceMode("live"); }}>返回听课</button>}</div>
       </header>
-      <SessionPlayer sessionId={session.id} sessionState={session.state} seekRequest={seekRequest} onReady={setWholeAudioReady} />
-      <main className="session-layout">
-        <section className="document-panel">
+      <SessionPlayer sessionId={session.id} sessionState={session.state} seekRequest={seekRequest} onReady={setWholeAudioReady} live={effectiveMode === "live"} refreshKey={latestAudioParagraphId} />
+      <main className={`session-layout ${effectiveMode === "live" ? "live-session-layout" : ""}`}>
+        {effectiveMode === "live" ? <LiveReading items={timeline.items} sessionId={session.id} wholeAudioReady={wholeAudioReady} onSeek={seekToCapture} finished={["processing", "completed", "failed"].includes(session.state) && !stopPending} onReview={() => setWorkspaceMode("review")} /> : <section className="document-panel">
           <div className="document-toolbar">
             <div>
               <span>{section === "user-notes" ? "我的笔记" : section === "assets" ? "课件与证据" : "逐段转写与翻译"}</span>
@@ -1813,7 +1818,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <div className="material-confirm-actions"><button className="secondary-button" type="button" disabled={uploading} onClick={() => { setPendingUploads([]); if (fileInput.current) fileInput.current.value = ""; }}>取消</button><button className="primary-button" type="button" disabled={uploading} onClick={() => void confirmUpload()}>{uploading ? "正在保存…" : "确认加入资料库"}</button></div>
             </div>}
           </section>
-        </section>
+        </section>}
         <div className="session-sidebar">
            <section className="side-card capture-card">
              <div className="card-heading"><h3>录音</h3><StatusBadge tone={captureTone}>{captureLabel}</StatusBadge></div>
@@ -1860,7 +1865,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
               <button className="primary-button" disabled>等待后台处理完成</button>
             )}
           </section>
-          <aside className="learning-sidebar" aria-label="课程学习内容">
+          {effectiveMode === "review" && <aside className="learning-sidebar" aria-label="课程学习内容">
           <div className="learning-tabs" role="group" aria-label="课程学习视图">
             <button type="button" aria-pressed={learningView === "group"} onClick={() => { setQuestionContext(null); setLearningView("group"); }}>当前内容</button>
             <button type="button" aria-pressed={learningView === "outline"} onClick={() => { setQuestionContext(null); setLearningView("outline"); }}>课程结构</button>
@@ -1888,7 +1893,7 @@ function SessionConsole({ project, initial, languageView, onLanguageView }: { pr
             navigate(project.id, session.id, "transcript");
             window.setTimeout(() => document.getElementById(`evidence-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
           }} /></div>}
-          </aside>
+          </aside>}
           {notice && <div className="notice-box session-notice" role="status">{notice}</div>}
         </div>
         <details className="session-system-details"><summary>运行诊断与同步 <StatusBadge tone={runtime?.worker?.online ? "green" : "yellow"}>{runtime?.worker?.online ? "处理服务在线" : "处理服务待连接"}</StatusBadge><StatusBadge tone={!readWeave?.configured ? "gray" : readWeave.conflicts > 0 ? "red" : "green"}>ReadWeave {!readWeave?.configured ? "未配置" : readWeave.conflicts > 0 ? "有冲突" : "已连接"}</StatusBadge><span className="diagnostics-hint">设备、队列与同步明细</span></summary>
