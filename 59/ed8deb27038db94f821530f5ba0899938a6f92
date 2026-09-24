@@ -1,0 +1,83 @@
+apps/web/src/WorkspaceProjectCreation.test.tsx
+  s_4d8bb530e409af::t_95dc2a9b42819f 1-88
+apps/web/src/contentMarkdownFormat.test.ts
+  s_4d8bb530e409af::t_1d5e3f6fff82db 1-21,25-27
+  s_4d8bb530e409af::t_774246b7dcf0ba 22-24
+apps/web/src/contentMarkdownFormat.ts
+  s_4d8bb530e409af::t_215e10320525d5 29
+  s_4d8bb530e409af::t_d6f1e5d46e57b4 1-28,30-39
+docs/VALIDATION_REPORT.md
+  s_4d8bb530e409af::t_f0fb3560fdaa76 3-7,11
+  s_4d8bb530e409af::t_87be4f5f86c474 8-10
+crates/core-server/src/projects.rs
+  s_4d8bb530e409af::t_ae6e496cb4b006 23,1095,1210-1211,1213-1219
+  s_4d8bb530e409af::t_3e919e8398af84 126-136,1123,1125-1128,1168-1169,1208,1228
+  s_4d8bb530e409af::t_8c264d407b5a71 9-10,109,112-116,118-125,138-170,174-189
+  s_4d8bb530e409af::t_cba56ee0cded7a 1096-1122,1124,1129-1167,1170-1207,1209,1212,1220-1227,1229-1261
+  s_4d8bb530e409af::t_c3bdba6424fb9a 190-191
+crates/event-store/src/lib.rs
+  s_4d8bb530e409af::t_6e73c9421016d7 28-29,190-205,327-430
+  s_4d8bb530e409af::t_9eb97a2b52f256 2630-2670,2705-2717
+  s_4d8bb530e409af::t_69fe522c0ae46e 431-432,2718
+docs/CHANGELOG.md
+  s_4d8bb530e409af::t_f0fb3560fdaa76 3-9
+apps/web/src/App.tsx
+  s_4d8bb530e409af::t_52bb42a3336a15 12-13,845,865-866,871,933-934,936,938
+  s_4d8bb530e409af::t_6781795e0637dd 683,694,706
+  s_4d8bb530e409af::t_0f6aaec08fa520 212,221,250-253,443-467,723,725-727,729,2064-2087,2115
+  s_4d8bb530e409af::t_c5b4cf6c3d4e17 424
+apps/web/src/api.ts
+  s_4d8bb530e409af::t_0f6aaec08fa520 118,120
+apps/web/tests/live_recording_smoke.mjs
+  s_4d8bb530e409af::t_ebf82c85615201 82-83
+  s_4d8bb530e409af::t_b5f257551a6ede 84
+crates/event-store/migrations/0011_project_creation_idempotency.migration
+  s_4d8bb530e409af::t_b35f99902fd616 1-10
+apps/web/src/styles.css
+  s_4d8bb530e409af::t_d130b2b09c759f 646-648,653-661,671,679,683-707,717,719-723,735-737,740
+apps/web/src/LiveReading.tsx
+  s_4d8bb530e409af::t_7ed79560ed4a80 1-2,9-32,46,48-50,52-60,62-71,74-75,87,97,101
+  s_4d8bb530e409af::t_0076fb145ab666 171-172
+  s_4d8bb530e409af::t_d6f1e5d46e57b4 4-5
+  s_4d8bb530e409af::t_0ac491f5f98528 51,61,98-99,160,168
+  s_4d8bb530e409af::t_4edf1b6a904461 119-159,161-162,165-167,169-170,173
+apps/web/src/api.projectCreation.test.ts
+  s_4d8bb530e409af::t_95dc2a9b42819f 1-17
+apps/web/tests/live_ui_smoke.mjs
+  s_4d8bb530e409af::t_0d22550107baf5 78
+  s_4d8bb530e409af::t_c4e9c01ec7aecf 30,66,68-70,75-76,79-81,83,87,89-91,99
+  s_4d8bb530e409af::t_5ef06775df0f88 88
+  s_4d8bb530e409af::t_dc2049314799c6 82
+docs/KNOWN_ISSUES.md
+  s_4d8bb530e409af::t_f0fb3560fdaa76 3-8
+apps/web/src/ContentMarkdown.tsx
+  s_4d8bb530e409af::t_0076fb145ab666 1,3-7
+  s_4d8bb530e409af::t_d6f1e5d46e57b4 2
+PROJECT_STATE.md
+  s_4d8bb530e409af::t_f0fb3560fdaa76 3-9
+apps/web/tests/project_creation_e2e.mjs
+  s_4d8bb530e409af::t_6e1afe58a62417 1-65
+apps/web/src/LiveReading.test.tsx
+  s_4d8bb530e409af::t_05a77ead0ceb57 18
+  s_4d8bb530e409af::t_a1fe6b112ee0fd 1-17,19-35
+apps/web/package.json
+  s_4d8bb530e409af::t_d51ae336ec2167 17-18
+pnpm-lock.yaml
+  s_4d8bb530e409af::t_61b7da0f281389 35-40,469-471,720-722,1050-1054,1800-1802,2061-2064,2361-2362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "59ed8deb27038db94f821530f5ba0899938a6f92",
+  "prompts": {},
+  "sessions": {
+    "s_4d8bb530e409af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a035e8-bf8f-7530-9481-8d123f42af0d",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "AIALRA-0 <AIALRA-0@users.noreply.github.com>"
+    }
+  }
+}
